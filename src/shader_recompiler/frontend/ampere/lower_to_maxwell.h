@@ -2042,6 +2042,13 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 // Bit 77 (strong/scoped ordering) needs nothing extra from a Maxwell LDG.
                 if ((insn.words[2] & ~0x2e00U) != 0x001e8100 || (address & 1) || address >= 246)
                     return fail(index, "native global load mode");
+            } else if ((insn.words[2] & 0xffU) == 0 && insn.Bits(76, 1) && insn.Bits(90, 1) &&
+                       !insn.Bits(62, 2)) {
+                // desc[URn][Ra.64]: the uniform register picks a descriptor (cache policy and, for
+                // bindless, the base), the address is the register pair. Maxwell has no descriptor,
+                // so it is dropped and the pair is the address.
+                if ((address & 1) || address >= 246)
+                    return fail(index, "native global load descriptor address pair");
             } else {
                 // The uniform base sits where a register source would (bits 32-37).
                 const u32 uniform_address =
@@ -3651,6 +3658,9 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                     return fail(index, "native integer carry mode");
                 if (opcode == 0x810) {
                     emit(0x1c00000000000000ULL | predicate | 250 | (u64{a} << 8) | (u64{insn.words[1]} << 20));
+                } else if (opcode == 0xa10) {
+                    emit(0x5c10000000000000ULL | predicate | 250 | (u64{a} << 8) |
+                         (u64{operand(1, false)} << 20)); // the constant bank through a load
                 } else {
                     emit(0x5c10000000000000ULL | predicate | 250 | (u64{a} << 8) | (u64{insn.Bits(32, 8)} << 20));
                 }
