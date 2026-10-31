@@ -31,19 +31,28 @@ Lowered already (2026-10-31, this branch): `ISETP.EX` (64-bit compare high word)
 
 Still rejected, with the instruction that fails:
 
-| Stage | Message | Instruction |
-|---|---|---|
-| graphics | native surface descriptor buffer conflict | `b9b 00007b9b 8080480c 00100f00` |
-| graphics | unsupported native opcode | `370 1c1d7370 08000000 000001ff` |
-| graphics | native shared atomic mode | `38c ffff038c 00000801 00800000` |
-| compute | native formatted surface store mode | `b9b 02007b9b 60005804 0010af00` |
-| compute | native extended constant add mode | `a10 94052a10 00005b00 007fe4ff` (4 programs) |
-| compute | unsupported native opcode | `a27 00022a27 0000a800 078e00ff` (4) |
-| compute | native constant LEA carry mode | `a11 0f0d8a11 00005900 010f0eff` |
-| compute | native integer min/max mode | `817 00097817 ffffffc0 07800200` |
-| compute | native high multiply mode | `827 05067827 66666667 078e02ff` |
-| compute | unsupported native opcode | `95c 0000795c 00000004 00300000` |
+Still rejected (fail-fast: the next one only surfaces once this one is lowered). The three
+graphics-path ones keep the screen black; the rest are compute passes:
 
+| Message | Instruction |
+|---|---|
+| native surface descriptor buffer conflict | `b9b 00007b9b 8080480c 00100f00` (2 programs) |
+| native formatted surface store mode | `b9b 02007b9b 60005804 0010af00`, `b9b 1200ab9b 6000aa04 0010af00` |
+| unsupported native opcode (TXQ.B, bindless handle) | `370 1c1d7370 08000000 000001ff` |
+| native integer multiply mode | `824 9a2b7824 00000001 008e0603` |
+| unsupported native opcode (IMAD.WIDE, cbuf) | `625 34028625 00005e00 078e0203` |
+| unsupported native opcode | `226 47407226 00000040 000010ff` |
+| unsupported native opcode (F2I.64) | `311 00047311 00000004 0021d800` |
+| unsupported native opcode | `fae 020d7fae 00000000 0e101c48` |
+| native integer carry/third source | `c10 0c0a7c10 00000004 0ff9e0ff` |
+| native constant add carry mode | `a10 2c2c8a10 00005c00 07b5e005` |
+| native matrix multiply | `23c ...` — `EDEN_NX2_TENSOR=1` does not clear it |
+
+The two `b9b` classes are not a missing case: `ShaderEnvironment::texture_bound` holds one
+descriptor buffer per program, so a program that stores through a surface and samples a
+texture that live in different descriptor buffers has nowhere to put the second one. That,
+and `TXQ.B` on a bindless handle (a descriptor in a register pair instead of a bank offset),
+are the two structural items; the remaining opcodes are ordinary case work.
 Also seen, not yet shader related:
 
 - `Unmapped Device ReadBlock` bursts — guest reads inside ranges that never got mapped.

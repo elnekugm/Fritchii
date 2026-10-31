@@ -3738,15 +3738,12 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
         }
         case 0x211: case 0x811: case 0xa11: case 0xc11: { // LEA (0xa11: cbuf, 0xc11: uniform Rb)
             if (insn.Bits(80, 1)) {
-                // LEA.HI Rd, Ra, Rb (or an immediate, 0x811), Rc, s: Rb + high word of (Rc:Ra << s);
-                // bit 73 sign-extends Ra (Rc is RZ) and .X (bit 74) adds the carry predicate in bits 87-90.
-                const bool extended = insn.Bits(74, 1) != 0;
-                const u32 high = insn.Bits(64, 8);
+                // LEA.HI Rd, Ra, Rb (or an immediate, 0x811), RZ, s: Rb + high word of (Ra << s);
+                // bit 73 sign-extends Ra. A register c (0x211) is the high word: Rb + ((Ra >> (32 - s)) | (Rc << s)).
+                const u32 c = insn.Bits(64, 8);
                 if (insn.Bits(72, 1) || insn.Bits(81, 3) != 7 ||
-                    (high != 255 && insn.Bits(73, 1)) ||
-                    (opcode == 0x211 && (insn.Bits(62, 1) || (insn.Bits(63, 1) && extended))) ||
-                    (opcode == 0xa11 && insn.Bits(62, 2)) ||
-                    (opcode == 0xc11 && (insn.words[1] & ~0x3fU)))
+                    (c != 255 && (opcode != 0x211 || c >= 250)) ||
+                    (opcode == 0x211 && insn.Bits(62, 2)))
                     return fail(index, "native high effective address mode");
                 u32 b = opcode == 0xc11 ? uniform_register(insn.Bits(32, 8)) : insn.Bits(32, 8);
                 if (opcode == 0xa11) b = operand(1, false);
@@ -3756,14 +3753,23 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
                     if (b == 251) mov_imm(251, insn.words[1]);
                 }
                 const u64 shift = (u64{32 - insn.Bits(75, 5)} << 20) | (u64{insn.Bits(73, 1)} << 48);
-                // The high word is a right shift of Ra, or with Rc a left funnel shift (SHF.L).
-                const auto high_word = [&](u64 target) {
-                    if (high == 255) emit(target | 0x3828000000000000ULL | (u64{insn.Bits(24, 8)} << 8) | shift);
-                    else emit(target | 0x36f8000000000000ULL | (u64{insn.Bits(24, 8)} << 8) | (u64{high} << 39) |
-                              (u64{insn.Bits(75, 5)} << 20));
-                };
-                if (b == 255 && !extended) {
-                    high_word(base(0));
+                if (c != 255) {
+                    emit(0x3828000000000000ULL | predicate | 250 | (u64{insn.Bits(24, 8)} << 8) | shift);
+                    emit(0x3848000000000000ULL | predicate | 252 | (u64{c} << 8) | (u64{insn.Bits(75, 5)} << 20));
+                    emit(0x5c40000000000000ULL | predicate | 250 | (u64{250} << 8) | (u64{252} << 20) | (u64{1} << 41));
+                    emit(0x5c10000000000000ULL | predicate | 250 | (u64{250} << 8) | (u64{b} << 20));
+                    if (insn.Bits(74, 1)) {
+                        // LEA.HI.X: a carry predicate (bits 87-89, negate 90) on top of the sum.
+                        const u32 condition = insn.Bits(87, 3), negate = insn.Bits(90, 1);
+                        if (condition != 7 || !negate) {
+                            mov_imm(252, 1);
+                            emit(0x5c10000000000000ULL | (u64{(negate << 3) | condition} << 16) | 250 |
+                                 (u64{250} << 8) | (u64{252} << 20));
+                        }
+                    }
+                    emit(base(0x5c10000000000000ULL) | (u64{250} << 8) | (u64{255} << 20));
+                } else if (b == 255) {
+                    emit(base(0x3828000000000000ULL) | (u64{insn.Bits(24, 8)} << 8) | shift);
                 } else {
                     high_word(predicate | 250);
                     if (extended) {
