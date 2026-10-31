@@ -626,7 +626,7 @@ void PresentManager::DiscardFrame(Frame* frame) {
 }
 
 void PresentManager::CopyToSwapchain(Frame* frame) {
-    bool requires_recreation = false;
+    bool requires_recreation = surface_recreation_pending;
 
     for (u32 attempt = 0; attempt < MAX_PRESENT_ATTEMPTS; ++attempt) {
         try {
@@ -636,6 +636,7 @@ void PresentManager::CopyToSwapchain(Frame* frame) {
                 surface = CreateSurface(instance, render_window.GetWindowInfo());
 #endif
                 RecreateSwapchain(frame);
+                surface_recreation_pending = false;
             }
 
             // Draw to swapchain.
