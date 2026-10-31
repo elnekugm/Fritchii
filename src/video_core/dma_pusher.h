@@ -133,6 +133,14 @@ struct CommandList final {
     u64 snapshot_suspensions = 0;
 };
 
+namespace GpfifoCapture {
+bool Enabled() noexcept;
+u64 BeginSubmission(s32 fd, u32 ioctl, u32 variant, u64 session,
+                    std::span<const u8> input, std::size_t inline_size) noexcept;
+void RecordEnqueue(u64 submit_id, s32 channel, const char* origin, CommandList& entries) noexcept;
+void Flush(const char* reason) noexcept;
+}
+
 /// FNV-1a over pushbuffer words (EDEN_NX2_PB_CHECK).
 inline u64 HashPushbufferWords(std::span<const u32> words) {
     u64 hash = 0xcbf29ce484222325ULL;
@@ -203,6 +211,8 @@ private:
     [[nodiscard]] bool WantsSegment() const;
     void ReportUnboundSubchannel();
     void WatchArgument(u32 method, u32 argument) const;
+    void RecordCapture(const char* phase, std::span<const CommandHeader> commands = {},
+                       std::size_t word_offset = 0) const noexcept;
 
 public:
     /// Logs the GPFIFO entry being processed (and the one before it), read through the GPU MMU

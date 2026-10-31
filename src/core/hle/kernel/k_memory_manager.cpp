@@ -321,7 +321,7 @@ Result KMemoryManager::AllocatePageGroupImpl(KPageGroup* out, size_t num_pages, 
     R_SUCCEED();
 }
 
-Result KMemoryManager::AllocateAndOpen(KPageGroup* out, size_t num_pages, u32 option) {
+Result KMemoryManager::AllocateAndOpen(KPageGroup* out, size_t num_pages, u32 option, bool random) {
     ASSERT(out != nullptr);
     ASSERT(out->GetNumPages() == 0);
 
@@ -334,7 +334,7 @@ Result KMemoryManager::AllocateAndOpen(KPageGroup* out, size_t num_pages, u32 op
 
     // Allocate the page group.
     R_TRY(this->AllocatePageGroupImpl(out, num_pages, pool, dir,
-                                      m_has_optimized_process[static_cast<size_t>(pool)], true));
+                                      m_has_optimized_process[static_cast<size_t>(pool)], random));
 
     // Open the first reference to the pages.
     for (const auto& block : *out) {
@@ -481,6 +481,9 @@ size_t KMemoryManager::Impl::Initialize(KPhysicalAddress address, size_t size,
 
 void KMemoryManager::Impl::InitializeOptimizedMemory(KernelCore& kernel) {
     auto optimize_pa = KPageTable::GetHeapPhysicalAddress(kernel, m_management_region);
+    kernel.System().DeviceMemory().buffer.MarkUsed(
+        GetInteger(optimize_pa) - Core::DramMemoryMap::Base,
+        CalculateOptimizedProcessOverheadSize(m_heap.GetSize()));
     auto* optimize_map = kernel.System().DeviceMemory().GetPointer<u64>(optimize_pa);
 
     std::memset(optimize_map, 0, CalculateOptimizedProcessOverheadSize(m_heap.GetSize()));

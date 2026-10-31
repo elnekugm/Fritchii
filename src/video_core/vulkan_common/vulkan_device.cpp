@@ -31,6 +31,7 @@
 #include "video_core/nx2_debug_control.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/vulkan_common/nsight_aftermath_tracker.h"
+#include "video_core/vulkan_common/memory_budget.h"
 #include "video_core/vulkan_common/vma.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/nx2_perf.h"
@@ -2092,6 +2093,28 @@ u64 Device::GetDeviceMemoryBudget() const {
         // gives it (4 GiB, 6 GiB with aggressive VRAM use).
         result = (std::min)(result, device_access_memory);
     }
+    // Only the main heap's budget: summing every heap's counted VRAM twice on AMD (an 8 GB card
+    // reported 8.5 GB) and kept the collector's thresholds above the heap the images fill. What
+    // the other heaps use is added the way GetDeviceMemoryUsage() counts it, so the usage reaches
+    // this when the main heap's does its budget.
+    u64 result = budget.heapBudget[main_heap];
+    if (heap_size_limit != 0) {
+        result = (std::min)(result, heap_size_limit);
+    }
+    for (const size_t heap : valid_heap_memory) {
+        if (heap != main_heap) {
+            result += AllocatedUsage(budget.heapUsage[heap], heap_budgets[heap]);
+        }
+    }
+#ifdef _WIN32
+    MEMORYSTATUSEX memory_status{};
+    memory_status.dwLength = sizeof(memory_status);
+    if (GlobalMemoryStatusEx(&memory_status)) {
+        result = LimitBudgetForHostCommit(result, GetDeviceMemoryUsage(),
+                                           memory_status.ullAvailPageFile, 4_GiB);
+        result = (std::max)(result, 1_MiB);
+    }
+#endif
     return result;
 }
 

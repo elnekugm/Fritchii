@@ -89,6 +89,25 @@ Xbyak::Allocator* CodeAllocator() {
 }
 #endif
 
+#ifdef _WIN32
+class CodeMemoryAllocator final : public Xbyak::Allocator {
+public:
+    u8* alloc(size_t size) override {
+        return static_cast<u8*>(VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS));
+    }
+
+    void free(u8* memory) override {
+        VirtualFree(memory, 0, MEM_RELEASE);
+    }
+
+    bool useProtect() const override {
+        return false;
+    }
+};
+
+CodeMemoryAllocator code_memory_allocator;
+#endif
+
 #ifdef DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT
 void ProtectMemory(const void* base, size_t size, bool is_executable) {
 #    ifdef _WIN32
@@ -238,10 +257,15 @@ void BlockOfCode::EnsureMemoryCommitted([[maybe_unused]] size_t codesize) {
         // emission has to be committed; in steps, as each VirtualAlloc call is a kernel call.
         committed_size = std::min<size_t>(maxSize_, (std::max)(committed_size + COMMIT_STEP, size_ + codesize));
 #    ifdef DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT
-        VirtualAlloc(top_, committed_size, MEM_COMMIT, PAGE_READWRITE);
+        void* const memory = VirtualAlloc(top_, new_committed_size, MEM_COMMIT, PAGE_READWRITE);
 #    else
-        VirtualAlloc(top_, committed_size, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+        void* const memory = VirtualAlloc(top_, new_committed_size, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
 #    endif
+        if (!memory) {
+            using Xbyak::Error;
+            XBYAK_THROW(Xbyak::ERR_CANT_ALLOC);
+        }
+        committed_size = new_committed_size;
     }
 #endif
 }

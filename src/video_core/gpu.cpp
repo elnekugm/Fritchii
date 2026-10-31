@@ -307,11 +307,22 @@ struct GPU::Impl {
     }
 
     VideoCore::RasterizerDownloadArea OnCPURead(DAddr addr, u64 size) {
+        if (gpu_thread.IsCurrentThread()) {
+            auto& split = VideoCommon::GpuSplit::Get();
+            if (split.Active()) {
+                VideoCore::RasterizerDownloadArea area{};
+                split.Defer([this, addr, size, &area] { area = OnCPURead(addr, size); });
+                split.Drain();
+                return area;
+            }
+        }
         auto raster_area = renderer->ReadRasterizer()->GetFlushArea(addr, size);
-        if (raster_area.preemtive) {
+        raster_area.preemtive = true;
+        if (gpu_thread.IsCurrentThread() || VideoCommon::GpuSplit::IsBackThread()) {
+            renderer->ReadRasterizer()->FlushRegion(
+                raster_area.start_address, raster_area.end_address - raster_area.start_address);
             return raster_area;
         }
-        raster_area.preemtive = true;
         // A guest CPU read of GPU-written memory (reactive flushing): count them, they decide
         // whether buffer data must be copied back at every fence (EDEN_NX2_BUFFER_DOWNLOADS).
         if (static std::atomic<u64> reads{}; (reads.fetch_add(1, std::memory_order_relaxed) & 63) == 0) {

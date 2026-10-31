@@ -733,6 +733,26 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
     }
     // EDEN_NX2_SHADER_DUMP=<dir>: keep every captured native program (named by its key) so the
     // lowering can be tested offline against all of a game's shaders.
+    const auto dump_mapped = [&](const std::filesystem::path& path) {
+        std::ofstream mapped(path, std::ios::binary);
+        if (!mapped) return 0U;
+        std::array<u8, 0x1000> block{};
+        u32 offset = 0;
+        while (offset < 0x10000) {
+            const size_t size = std::min<size_t>(
+                block.size() - ((program_base + offset) % block.size()), 0x10000 - offset);
+            if (!gpu_memory->IsWithinGPUAddressRange(program_base + offset) ||
+                !gpu_memory->IsWithinGPUAddressRange(program_base + offset + size - 1) ||
+                !gpu_memory->IsContinuousRange(program_base + offset, size)) {
+                break;
+            }
+            gpu_memory->ReadBlock(program_base + offset, block.data(), size);
+            mapped.write(reinterpret_cast<const char*>(block.data()), size);
+            if (!mapped) break;
+            offset += static_cast<u32>(size);
+        }
+        return offset;
+    };
     if (static const char* const dump_directory = std::getenv("EDEN_NX2_SHADER_DUMP");
         dump_directory != nullptr) {
         const auto folder = std::filesystem::path{dump_directory};
@@ -777,18 +797,14 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
             {
                 // Retain mapped bytes beyond the first EXIT for investigating
                 // native CALL targets in compiler library subroutines.
-                std::ofstream mapped(folder / (key + ".mapped.bin"), std::ios::binary);
-                std::array<u8, 0x1000> block{};
-                for (u32 offset = 0; offset < 0x10000; offset += 0x1000) {
-                    if (!gpu_memory->IsFullyMappedRange(program_base + offset, block.size())) break;
-                    gpu_memory->ReadBlock(program_base + offset, block.data(), block.size());
-                    mapped.write(reinterpret_cast<const char*>(block.data()), block.size());
-                }
+                dump_mapped(folder / (key + ".mapped.bin"));
             }
             LOG_WARNING(Shader, "Native shader paused: key={}, offset={:#x}, reason={}, source={}",
                         key, lowered.error_offset, lowered.error, source_path.string());
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes{30};
-            while (!gpu_memory->IsShuttingDown() && std::chrono::steady_clock::now() < deadline) {
+            const bool wait_for_override = std::getenv("EDEN_NATIVE_SHADER_OVERRIDE_NO_WAIT") == nullptr;
+            while (!gpu_memory->IsShuttingDown() && std::chrono::steady_clock::now() < deadline &&
+                   (wait_for_override || std::filesystem::exists(override_path))) {
                 if (std::filesystem::exists(override_path)) {
                     std::ifstream file(override_path, std::ios::binary | std::ios::ate);
                     const auto length = file.tellg();
@@ -1053,8 +1069,18 @@ u32 GraphicsEnvironment::ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) {
     const auto& cbuf{maxwell3d->state.shader_stages[stage_index].const_buffers[cbuf_index]};
     ASSERT(cbuf.enabled);
     u32 value{};
-    if (cbuf_offset < cbuf.size) {
-        value = gpu_memory->Read<u32>(cbuf.address + cbuf_offset);
+    if (snapshot) {
+        const auto& cbuf{snapshot->const_buffers[cbuf_index]};
+        ASSERT(cbuf.enabled);
+        if (cbuf_offset < cbuf.size) {
+            std::memcpy(&value, cbuf.bytes.data() + cbuf_offset, sizeof(value));
+        }
+    } else {
+        const auto& cbuf{maxwell3d->state.shader_stages[stage_index].const_buffers[cbuf_index]};
+        ASSERT(cbuf.enabled);
+        if (cbuf_offset < cbuf.size) {
+            value = gpu_memory->Read<u32>(cbuf.address + cbuf_offset);
+        }
     }
     cbuf_values.emplace(MakeCbufKey(cbuf_index, cbuf_offset), value);
     return value;

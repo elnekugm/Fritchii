@@ -156,6 +156,7 @@ private:
 
     void RegisterClient(HLERequestContext& ctx);
     void StartMonitoring(HLERequestContext& ctx);
+    void Unknown36(HLERequestContext& ctx);
     void Socket(HLERequestContext& ctx);
     void SocketExempt(HLERequestContext& ctx);
     void Select(HLERequestContext& ctx);

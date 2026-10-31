@@ -36,6 +36,7 @@
 #include "core/hle/kernel/k_page_table.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/memory.h"
+#include "core/memory/read_traps.h"
 #include "video_core/gpu.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/host1x/host1x.h"
@@ -76,6 +77,9 @@ struct Memory::Impl {
 #else
         host_buffer = std::addressof(system.DeviceMemory().buffer);
 #endif
+
+        std::scoped_lock lk{read_trap_mutex};
+        read_traps.Clear();
     }
 
     void MapMemoryRegion(Common::PageTable& page_table, Common::ProcessAddress base, u64 size,
@@ -85,6 +89,13 @@ struct Memory::Impl {
         ASSERT_MSG((base & YUZU_PAGEMASK) == 0, "non-page aligned base: {:016X}", GetInteger(base));
         ASSERT_MSG(target >= DramMemoryMap::Base, "Out of bounds target: {:016X}",
                    GetInteger(target));
+        std::unique_lock trap_lock{read_trap_mutex, std::defer_lock};
+        if (current_page_table->fastmem_arena) {
+            trap_lock.lock();
+            read_traps.Drop(GetInteger(base) >> YUZU_PAGEBITS,
+                            (GetInteger(base) + size) >> YUZU_PAGEBITS);
+        }
+
         MapPages(page_table, base / YUZU_PAGESIZE, size / YUZU_PAGESIZE, target,
                  Common::PageType::Memory);
 
@@ -97,6 +108,13 @@ struct Memory::Impl {
                      bool separate_heap) {
         ASSERT_MSG((size & YUZU_PAGEMASK) == 0, "non-page aligned size: {:016X}", size);
         ASSERT_MSG((base & YUZU_PAGEMASK) == 0, "non-page aligned base: {:016X}", GetInteger(base));
+        std::unique_lock trap_lock{read_trap_mutex, std::defer_lock};
+        if (current_page_table->fastmem_arena) {
+            trap_lock.lock();
+            read_traps.Drop(GetInteger(base) >> YUZU_PAGEBITS,
+                            (GetInteger(base) + size) >> YUZU_PAGEBITS);
+        }
+
         MapPages(page_table, base / YUZU_PAGESIZE, size / YUZU_PAGESIZE, 0,
                  Common::PageType::Unmapped);
 
@@ -551,7 +569,11 @@ struct Memory::Impl {
             stats->Note(vaddr, size, cached);
         }
 
+        // Page types change under the read trap lock, so arming and disarming never act on a page
+        // whose cached state changed after they looked at it.
+        std::unique_lock trap_lock{read_trap_mutex, std::defer_lock};
         if (current_page_table->fastmem_arena) {
+            trap_lock.lock();
             Common::MemoryPermission perm{};
             // EDEN_NX2_NO_REACTIVE=1 drops the read traps on Switch 2 programs. Opt-in: without
             // them a CPU read of GPU-written memory can see stale data.
@@ -971,6 +993,9 @@ struct Memory::Impl {
             DisarmReadTraps(v_address, size);
             current_area = system.GPU().OnCPURead(address, size);
         });
+        // Only once every device alias is flushed (or inside an area flushed after this
+        // generation's traps were armed): a disarmed page is read through fastmem without trapping.
+        DisarmReadTraps(v_address, size, generation);
     }
 
     void HandleRasterizerWrite(VAddr v_address, size_t size) {
@@ -995,7 +1020,7 @@ struct Memory::Impl {
                 sys_core_guard.unlock();
             }
         };
-        gpu_device_memory->ApplyOpOnPointer(p, scratch_buffers[core], [&](DAddr address) {
+        system.Host1x().MemoryManager().ApplyOpOnPointer(p, scratch_buffers[core], [&](DAddr address) {
             auto& current_area = rasterizer_write_areas[core];
             PAddr subaddress = address >> YUZU_PAGEBITS;
             // Performance note:
@@ -1047,9 +1072,6 @@ struct Memory::Impl {
         constexpr size_t sys_core = Core::Hardware::NUM_CPU_CORES - 1;
         const size_t core = (std::min)(system.GetCurrentHostThreadID(),
                                      sys_core); // any other calls threads go to syscore.
-        if (!gpu_device_memory) [[unlikely]] {
-            gpu_device_memory = &system.Host1x().MemoryManager();
-        }
         // Guard on sys_core;
         if (core == sys_core) [[unlikely]] {
             sys_core_guard.lock();
@@ -1060,12 +1082,11 @@ struct Memory::Impl {
             }
         };
         auto& gpu = system.GPU();
-        gpu_device_memory->ApplyOpOnPointer(
+        system.Host1x().MemoryManager().ApplyOpOnPointer(
             p, scratch_buffers[core], [&](DAddr address) { gpu.InvalidateRegion(address, size, true); });
     }
 
     Core::System& system;
-    Tegra::MaxwellDeviceMemoryManager* gpu_device_memory{};
     Common::PageTable* current_page_table = nullptr;
 
     std::array<VideoCore::RasterizerDownloadArea, Core::Hardware::NUM_CPU_CORES> rasterizer_read_areas{};

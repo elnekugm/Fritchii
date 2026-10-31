@@ -531,7 +531,7 @@ void TextureCache<P>::TickFrame() {
             }
             if (native_thresholds_applied && budget_check_frames++ % 30 == 0) {
                 const u64 budget = runtime.GetDeviceMemoryBudget();
-                if (budget > 2_GiB) {
+                if (budget != 0) {
                     const u64 old_critical = critical_memory;
                     const u64 margin = (std::min)(budget / 8, 1_GiB);
                     if constexpr (requires { runtime.GetDeviceMemorySlack(); }) {
@@ -1202,6 +1202,25 @@ void TextureCache<P>::FillImageViews(std::span<ImageViewInOut> views, bool compu
         }
         for (ImageViewInOut& view : views) {
             view.id = VisitImageView(view.index, compute);
+            if (view.id != NULL_IMAGE_VIEW_ID) {
+                const ImageId image_id = slot_image_views[view.id].image_id;
+                Image& image = slot_images[image_id];
+                if (view.blacklist) {
+                    ReplaceUnwrittenSparse(image_id);
+                }
+                if (True(image.flags & ImageFlagBits::UnwrittenSparse) &&
+                    True(image.flags & ImageFlagBits::Remapped)) {
+                    // Written since it was made without memory (a storage image this shader
+                    // writes, a CPU write, an alias the GPU wrote): deleted, so the views are
+                    // visited again and get a backed image.
+                    if (True(image.flags & ImageFlagBits::Tracked)) {
+                        UntrackImage(image, image_id);
+                    }
+                    UnregisterImage(image_id);
+                    DeleteImage(image_id);
+                    continue;
+                }
+            }
             if (blacklist) {
                 if (view.blacklist && view.id != NULL_IMAGE_VIEW_ID) {
                     const ImageViewBase& image_view = slot_image_views[view.id];
@@ -1824,6 +1843,19 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
     }
     auto const [descriptor, is_new] = table.Read(*gpu_memory, index);
     if (is_new) {
+        static const bool trace_native_image = std::getenv("EDEN_NX2_IMAGE_TRACE") != nullptr;
+        static u32 native_image_traces{};
+        if (trace_native_image && descriptor.Width() == 3840 && descriptor.Height() == 2160 &&
+            native_image_traces < 64) {
+            ++native_image_traces;
+            const auto physical = gpu_memory->GpuToCpuAddress(descriptor.Address(), 512);
+            LOG_INFO(HW_GPU,
+                     "Native sampled image: channel={} compute={} tic={} gpu={:#x} physical={:#x} "
+                     "block_linear={} block_height={} raw={:016x}",
+                     current_channel_id, compute, index, descriptor.Address(),
+                     physical.value_or(0), descriptor.IsBlockLinear(), descriptor.block_height.Value(),
+                     fmt::join(descriptor.raw, " "));
+        }
         if (IsValidEntry(*gpu_memory, descriptor)) {
             const auto [pair, is_new_tc] = channel_state->image_views.try_emplace(descriptor);
             if (is_new_tc) {
@@ -1909,6 +1941,9 @@ void TextureCache<P>::WriteMemory(DAddr cpu_addr, size_t size) {
         }
         if (UploadsByLayer(image)) {
             MarkLayersWritten(image, cpu_addr, size);
+            return;
+        }
+        if (MarkPartialWrite(image, cpu_addr, size)) {
             return;
         }
         if (True(image.flags & ImageFlagBits::CpuModified)) {
@@ -2367,10 +2402,16 @@ bool TextureCache<P>::TemporalUpscale(const Tegra::Engines::Fermi2D::Surface& ds
 template <class P>
 std::pair<typename P::ImageView*, bool> TextureCache<P>::TryFindFramebufferImageView(
     const Tegra::FramebufferConfig& config, DAddr cpu_addr) {
-    // TODO: Properly implement this
-    const auto it = page_table.find(cpu_addr >> YUZU_PAGEBITS);
-    if (it == page_table.end()) {
-        return {};
+    static const bool trace_native_image = std::getenv("EDEN_NX2_IMAGE_TRACE") != nullptr;
+    static u64 framebuffer_queries{};
+    const u64 query = trace_native_image ? framebuffer_queries++ : 0;
+    const bool trace = trace_native_image && (query % 240) == 0;
+    if (trace) {
+        LOG_INFO(HW_GPU, "Native framebuffer query {}: physical={:#x} backing={:#x} allocation={}x{} "
+                 "stride={} crop=({},{})-({},{})", query, cpu_addr,
+                 device_memory.GetPhysicalRawAddressFromDAddr(cpu_addr), config.width, config.height,
+                 config.stride, config.crop_rect.left, config.crop_rect.top,
+                 config.crop_rect.right, config.crop_rect.bottom);
     }
     const auto view_format = [&]() {
         switch (config.pixel_format) {
@@ -2383,13 +2424,12 @@ std::pair<typename P::ImageView*, bool> TextureCache<P>::TryFindFramebufferImage
         }
     }();
 
-    const auto& image_map_ids = it->second;
     boost::container::small_vector<ImageId, 4> valid_image_ids;
-    for (const ImageMapId map_id : image_map_ids) {
-        const ImageMapView& map = slot_map_views[map_id];
-        const ImageBase& image = slot_images[map.image_id];
-        if (image.cpu_addr != cpu_addr) {
-            continue;
+    u32 traced_candidates{};
+    const auto add_candidates = [&](DAddr address, bool physical_alias) {
+        const auto it = page_table.find(address >> YUZU_PAGEBITS);
+        if (it == page_table.end()) {
+            return;
         }
         if (image.image_view_ids.empty()) {
             continue;
@@ -2400,12 +2440,27 @@ std::pair<typename P::ImageView*, bool> TextureCache<P>::TryFindFramebufferImage
                 LOG_WARNING(HW_GPU, "Ignoring incompatible framebuffer alias: address={:#x}, image={}, view={}",
                             cpu_addr, image.info.format, view_format);
             }
-            continue;
         }
-        valid_image_ids.push_back(map.image_id);
+    };
+    add_candidates(cpu_addr, false);
+    if (const PAddr backing = device_memory.GetPhysicalRawAddressFromDAddr(cpu_addr);
+        backing != 0 && config.allocation_size != 0) {
+        Common::ScratchBuffer<u32> aliases;
+        device_memory.ApplyOpOnPAddr(backing, aliases, [&](DAddr alias) {
+            if (alias != cpu_addr) {
+                add_candidates(alias, true);
+            }
+        });
     }
 
     const auto GetImageViewForFramebuffer = [&](ImageId image_id) {
+        if (trace) {
+            const auto& image = slot_images[image_id];
+            LOG_INFO(HW_GPU, "Native framebuffer query {} selected: gpu={:#x} physical={:#x} "
+                     "size={}x{} format={} tick={}", query, image.gpu_addr, image.cpu_addr,
+                     image.info.size.width, image.info.size.height, image.info.format,
+                     image.modification_tick);
+        }
         ImageViewInfo info{ImageViewType::e2D, view_format};
         if (config.blending == Tegra::BlendMode::Opaque) {
             info.x_source = static_cast<u8>(SwizzleSource::R);
@@ -2428,6 +2483,9 @@ std::pair<typename P::ImageView*, bool> TextureCache<P>::TryFindFramebufferImage
         return GetImageViewForFramebuffer(*most_recent);
     }
 
+    if (trace) {
+        LOG_INFO(HW_GPU, "Native framebuffer query {}: no compatible physical-range candidate", query);
+    }
     return {};
 }
 
@@ -2719,6 +2777,19 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
         return;
     }
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::TextureUpload};
+
+    if (!image.partial_dirty_pages.empty() || !image.partial_remapped.empty()) {
+        // Only some pages changed and the rest of the image is still tracked.
+        const bool uploaded = RefreshPartialContents(image);
+        RestorePartialPages(image);
+        if (uploaded) {
+            image.flags &= ~ImageFlagBits::CpuModified;
+            return;
+        }
+        if (True(image.flags & ImageFlagBits::Tracked)) {
+            UntrackImage(image, image_id); // the layout is not handled: upload it whole below
+        }
+    }
 
     image.flags &= ~ImageFlagBits::CpuModified;
 
@@ -4203,10 +4274,16 @@ std::optional<typename TextureCache<P>::BlitImages> TextureCache<P>::GetBlitImag
     if (can_be_depth_blit) {
         try_options |= RelaxedOptions::Format;
     }
+    bool replaced_unwritten = false;
     do {
         has_deleted_images = false;
         src_id = FindImage(src_info, src_addr, try_options);
         dst_id = FindImage(dst_info, dst_addr, try_options);
+        if (!replaced_unwritten && dst_id && ReplaceUnwrittenSparse(dst_id)) {
+            replaced_unwritten = true;
+            has_deleted_images = true;
+            continue;
+        }
         if (!copy.must_accelerate) {
             do {
                 if (!src_id && !dst_id) {
@@ -4394,9 +4471,14 @@ ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAdd
     }
     ImageId image_id{};
     bool delete_state = has_deleted_images;
+    bool replaced_unwritten = false;
     do {
         has_deleted_images = false;
         image_id = FindOrInsertImage(info, gpu_addr);
+        if (!replaced_unwritten && image_id && ReplaceUnwrittenSparse(image_id)) {
+            replaced_unwritten = true;
+            has_deleted_images = true;
+        }
         delete_state |= has_deleted_images;
     } while (has_deleted_images);
     has_deleted_images = delete_state;
@@ -4405,6 +4487,22 @@ ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAdd
     }
     Image& image = slot_images[image_id];
     const ImageViewType view_type = RenderTargetImageViewType(info);
+    static const bool trace_native_image = std::getenv("EDEN_NX2_IMAGE_TRACE") != nullptr;
+    if (trace_native_image && info.size.width >= 1280 && info.size.height >= 720) {
+        static std::vector<std::pair<GPUVAddr, DAddr>> traced;
+        const std::pair<GPUVAddr, DAddr> key{gpu_addr, image.cpu_addr};
+        if (traced.size() < 64 && std::ranges::find(traced, key) == traced.end()) {
+            traced.push_back(key);
+            LOG_INFO(HW_GPU, "Native render target view: channel={} requested_gpu={:#x} "
+                     "cached_gpu={:#x} physical={:#x} backing={:#x} requested={}x{} cached={}x{} format={} "
+                     "block_height={} native_tiling={}", current_channel_id, gpu_addr,
+                     image.gpu_addr, image.cpu_addr,
+                     device_memory.GetPhysicalRawAddressFromDAddr(image.cpu_addr),
+                     info.size.width, info.size.height,
+                     image.info.size.width, image.info.size.height, info.format,
+                     info.block.height, info.native_tiling);
+        }
+    }
     SubresourceBase base;
     if (image.info.type == ImageType::Linear) {
         base = SubresourceBase{.level = 0, .layer = 0};
@@ -4775,8 +4873,183 @@ void TextureCache<P>::TrackImage(ImageBase& image, ImageId image_id) {
 }
 
 template <class P>
+bool TextureCache<P>::MarkPartialWrite(ImageBase& image, DAddr cpu_addr, size_t size) {
+    // Games stream small updates into very large textures (lookup tables, virtual texture pages)
+    // every frame; re-uploading the whole image for each costs hundreds of milliseconds.
+    constexpr size_t min_size = 16_MiB;
+    constexpr ImageFlagBits excluded = ImageFlagBits::Sparse | ImageFlagBits::Converted |
+                                       ImageFlagBits::AcceleratedUpload | ImageFlagBits::Unbacked |
+                                       ImageFlagBits::TrimmedLevels | ImageFlagBits::AsynchronousDecode;
+    if (False(image.flags & ImageFlagBits::Tracked) || True(image.flags & excluded) ||
+        image.info.type != ImageType::e2D || image.guest_size_bytes < min_size ||
+        image.cpu_addr >= ~(1ULL << 40) ||
+        (True(image.flags & ImageFlagBits::CpuModified) && image.partial_dirty_pages.empty() &&
+         image.partial_remapped.empty())) {
+        return false;
+    }
+    const DAddr image_begin = image.cpu_addr;
+    const DAddr image_end = image.cpu_addr + image.guest_size_bytes;
+    const DAddr begin = std::max<DAddr>(cpu_addr, image_begin);
+    const DAddr end = std::min<DAddr>(cpu_addr + size, image_end);
+    if (begin >= end) {
+        return true;
+    }
+    const DAddr base_page = image_begin >> Core::DEVICE_PAGEBITS;
+    const u32 first = static_cast<u32>((begin >> Core::DEVICE_PAGEBITS) - base_page);
+    const u32 last = static_cast<u32>(((end - 1) >> Core::DEVICE_PAGEBITS) - base_page);
+    const u32 total_pages =
+        static_cast<u32>(((image_end - 1) >> Core::DEVICE_PAGEBITS) - base_page + 1);
+    auto& pages = image.partial_dirty_pages;
+    for (u32 page = first; page <= last; ++page) {
+        const auto it = std::lower_bound(pages.begin(), pages.end(), page);
+        if (it != pages.end() && *it == page) {
+            continue;
+        }
+        pages.insert(it, page);
+        device_memory.UpdatePagesCachedCount((base_page + page) << Core::DEVICE_PAGEBITS,
+                                             Core::DEVICE_PAGESIZE, -1);
+    }
+    image.flags |= ImageFlagBits::CpuModified;
+    if (pages.size() > total_pages / 4) {
+        // Most of the image changed: untrack it whole and upload it whole.
+        UntrackImage(image, ImageId{});
+    }
+    return true;
+}
+
+template <class P>
+bool TextureCache<P>::UploadInChunks(Image& image) {
+    // A whole upload of a very large image needs a staging buffer of its full size (rounded up to
+    // a power of two: 1 GiB for 600 MiB of data), which can fail when memory is tight.
+    constexpr u64 min_size = 64_MiB;
+    constexpr u64 chunk_size = 32_MiB;
+    constexpr ImageFlagBits excluded = ImageFlagBits::Sparse | ImageFlagBits::Converted |
+                                       ImageFlagBits::AcceleratedUpload | ImageFlagBits::Unbacked |
+                                       ImageFlagBits::TrimmedLevels;
+    if (True(image.flags & excluded) || image.info.type != ImageType::e2D ||
+        MapSizeBytes(image) < min_size) {
+        return false;
+    }
+    std::vector<u8> data;
+    for (u64 offset = 0; offset < image.guest_size_bytes; offset += chunk_size) {
+        const std::array range{
+            std::pair<u64, u64>{offset, std::min<u64>(offset + chunk_size, image.guest_size_bytes)}};
+        data.clear();
+        const auto copies = UnswizzleImageRows(*gpu_memory, image.gpu_addr, image.info, range, data);
+        if (copies.empty()) {
+            if (offset == 0) {
+                return false; // layout not handled: one staging buffer after all
+            }
+            continue; // padding between levels or layers
+        }
+        auto staging = runtime.UploadStagingBuffer(data.size());
+        std::memcpy(staging.mapped_span.data(), data.data(), data.size());
+        image.UploadMemory(staging, copies);
+    }
+    runtime.InsertUploadMemoryBarrier();
+    return true;
+}
+
+template <class P>
+bool TextureCache<P>::MarkPartialRemap(ImageBase& image, Tegra::MemoryManager& memory,
+                                       GPUVAddr gpu_addr, size_t size) {
+    // Virtual textures remap a few 64 KiB pages of a huge sparse texture every frame.
+    constexpr size_t min_size = 16_MiB;
+    constexpr ImageFlagBits excluded = ImageFlagBits::Sparse | ImageFlagBits::Converted |
+                                       ImageFlagBits::AcceleratedUpload | ImageFlagBits::Unbacked |
+                                       ImageFlagBits::TrimmedLevels | ImageFlagBits::AsynchronousDecode |
+                                       ImageFlagBits::Remapped;
+    if (True(image.flags & excluded) || image.info.type != ImageType::e2D ||
+        image.guest_size_bytes < min_size) {
+        return false;
+    }
+    const GPUVAddr begin = std::max<GPUVAddr>(gpu_addr, image.gpu_addr);
+    const GPUVAddr end = std::min<GPUVAddr>(gpu_addr + size, image.gpu_addr + image.guest_size_bytes);
+    if (begin >= end) {
+        return true;
+    }
+    for (GPUVAddr page = Common::AlignDown(begin, Core::DEVICE_PAGESIZE); page < end;
+         page += Core::DEVICE_PAGESIZE) {
+        if (memory.GpuToCpuAddress(page) != image.cpu_addr + (page - image.gpu_addr)) {
+            return false;
+        }
+    }
+    if (True(image.flags & ImageFlagBits::CpuModified) && image.partial_dirty_pages.empty() &&
+        image.partial_remapped.empty()) {
+        return true; // already due for a whole upload, which reads through the new mapping
+    }
+    image.partial_remapped.emplace_back(begin - image.gpu_addr, end - image.gpu_addr);
+    image.flags |= ImageFlagBits::CpuModified;
+    u64 remapped = 0;
+    for (const auto& [low, high] : image.partial_remapped) {
+        remapped += high - low;
+    }
+    if (remapped > image.guest_size_bytes / 4) {
+        // Most of the image moved: upload it whole.
+        if (True(image.flags & ImageFlagBits::Tracked)) {
+            UntrackImage(image, ImageId{});
+        } else {
+            RestorePartialPages(image);
+        }
+    }
+    return true;
+}
+
+template <class P>
+void TextureCache<P>::RestorePartialPages(ImageBase& image) {
+    const DAddr base_page = image.cpu_addr >> Core::DEVICE_PAGEBITS;
+    for (const u32 page : image.partial_dirty_pages) {
+        device_memory.UpdatePagesCachedCount((base_page + page) << Core::DEVICE_PAGEBITS,
+                                             Core::DEVICE_PAGESIZE, 1);
+    }
+    image.partial_dirty_pages.clear();
+    image.partial_remapped.clear();
+}
+
+template <class P>
+bool TextureCache<P>::RefreshPartialContents(Image& image) {
+    std::vector<std::pair<u64, u64>> ranges;
+    const u64 head = image.cpu_addr & Core::DEVICE_PAGEMASK; // the image starts inside its first page
+    for (const u32 page : image.partial_dirty_pages) {
+        const u64 page_begin = u64{page} << Core::DEVICE_PAGEBITS;
+        const u64 begin = page_begin > head ? page_begin - head : 0;
+        const u64 end =
+            (std::min<u64>)(page_begin + Core::DEVICE_PAGESIZE - head, image.guest_size_bytes);
+        if (!ranges.empty() && ranges.back().second >= begin) {
+            ranges.back().second = (std::max)(ranges.back().second, end);
+        } else {
+            ranges.emplace_back(begin, end);
+        }
+    }
+    if (!image.partial_remapped.empty()) {
+        ranges.insert(ranges.end(), image.partial_remapped.begin(), image.partial_remapped.end());
+        std::ranges::sort(ranges);
+        std::vector<std::pair<u64, u64>> merged;
+        for (const auto& range : ranges) {
+            if (!merged.empty() && merged.back().second >= range.first) {
+                merged.back().second = (std::max)(merged.back().second, range.second);
+            } else {
+                merged.push_back(range);
+            }
+        }
+        ranges = std::move(merged);
+    }
+    std::vector<u8> data;
+    auto copies = UnswizzleImageRows(*gpu_memory, image.gpu_addr, image.info, ranges, data);
+    if (copies.empty()) {
+        return false;
+    }
+    auto staging = runtime.UploadStagingBuffer(data.size());
+    std::memcpy(staging.mapped_span.data(), data.data(), data.size());
+    image.UploadMemory(staging, copies);
+    runtime.InsertUploadMemoryBarrier();
+    return true;
+}
+
+template <class P>
 void TextureCache<P>::UntrackImage(ImageBase& image, ImageId image_id) {
     ASSERT(True(image.flags & ImageFlagBits::Tracked));
+    RestorePartialPages(image);
     image.flags &= ~ImageFlagBits::Tracked;
     if (False(image.flags & ImageFlagBits::Sparse)) {
         if (image.cpu_addr < ~(1ULL << 40)) {
@@ -4813,7 +5086,7 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
         }
     }
     if (image.HasScaled()) {
-        total_used_memory -= GetScaledImageSizeBytes(image);
+        total_used_memory -= (std::min)(total_used_memory, GetScaledImageSizeBytes(image));
     }
     // TickFrame sets the total from the driver, which can be under the sum of these estimates.
     total_used_memory -= (std::min)(total_used_memory, ImageMemoryBytes(slot_images[image_id]));
@@ -5430,6 +5703,18 @@ void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
 }
 
 template <class P>
+bool TextureCache<P>::ReplaceUnwrittenSparse(ImageId image_id) {
+    Image& image = slot_images[image_id];
+    if (False(image.flags & ImageFlagBits::UnwrittenSparse) ||
+        True(image.flags & ImageFlagBits::Remapped)) {
+        return false;
+    }
+    Tegra::Nx2SparseMarkWritten(image.gpu_addr, image.guest_size_bytes);
+    image.flags |= ImageFlagBits::CpuModified | ImageFlagBits::Remapped;
+    return true;
+}
+
+template <class P>
 void TextureCache<P>::PrepareImage(ImageId image_id, bool is_modification, bool invalidate) {
     Image& image = slot_images[image_id];
     CheckCrossFrameUse(image, is_modification, invalidate);
@@ -5437,6 +5722,7 @@ void TextureCache<P>::PrepareImage(ImageId image_id, bool is_modification, bool 
         CheckTombstonePrepare(image_id, image, is_modification, invalidate); // EXP43=4
     }
     if (invalidate) {
+        RestorePartialPages(image);
         image.flags &= ~(ImageFlagBits::CpuModified | ImageFlagBits::GpuModified);
         if (False(image.flags & ImageFlagBits::Tracked)) {
             TrackImage(image, image_id);

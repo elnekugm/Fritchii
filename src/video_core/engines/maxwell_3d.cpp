@@ -353,7 +353,11 @@ void Maxwell3D::ConsumeSinkImpl(Core::System& system) {
     // Sunk methods are state writes only (not in execution_mask): skip unchanged values, as
     // CallMethod does.
     const bool skip_same = SkipSameValueWrites();
-    const auto process = [&](u32 method, u32 value) {
+    const auto process = [&](u32 method, u32 raw, u32 value) {
+#ifdef ARCHITECTURE_x86_64
+        TuringMacroJit::RtDump::Record(this, method, raw, value, static_cast<u32>(control),
+                                     regs.reg_array[method], std::span{regs.reg_array}.subspan(0x200, 0x80));
+#endif
         if (!skip_same || regs.reg_array[method] != value) {
             ProcessDirtyRegisters(method, value);
         }
@@ -361,14 +365,14 @@ void Maxwell3D::ConsumeSinkImpl(Core::System& system) {
     if (control == Regs::ShadowRamControl::Track || control == Regs::ShadowRamControl::TrackWithFilter) {
         for (auto [method, value] : method_sink) {
             shadow_state.reg_array[method] = value;
-            process(method, value);
+            process(method, value, value);
         }
     } else if (control == Regs::ShadowRamControl::Replay) {
         for (auto [method, value] : method_sink)
-            process(method, shadow_state.reg_array[method]);
+            process(method, value, shadow_state.reg_array[method]);
     } else {
         for (auto [method, value] : method_sink)
-            process(method, value);
+            process(method, value, value);
     }
     method_sink.clear();
 }
@@ -737,6 +741,11 @@ void Maxwell3D::CallMethodSlow(Core::System& system, u32 method, u32 method_argu
             method_argument, static_cast<u32>(shadow_state.shadow_ram_control), is_last_call ? 1U : 0U};
     }
     const u32 argument = ProcessShadowRam(method, method_argument);
+#ifdef ARCHITECTURE_x86_64
+    TuringMacroJit::RtDump::Record(this, method, method_argument, argument,
+                                 static_cast<u32>(shadow_state.shadow_ram_control), regs.reg_array[method],
+                                 std::span{regs.reg_array}.subspan(0x200, 0x80));
+#endif
     // A state register written with the value it holds changes nothing: no dirty flags (they
     // would make the next draw re-check that state), no method processing. Title 1 makes ~6
     // million 3D register writes a second, ~60% of them same-value, most from macro replays.

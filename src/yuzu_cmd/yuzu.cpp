@@ -71,6 +71,9 @@
 
 #ifdef _WIN32
 // windows.h needs to be included before shellapi.h
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <shellapi.h>
 #include "common/windows/timer_resolution.h"
@@ -652,7 +655,10 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     }
 
     state->system.Initialize();
-
+    state->network_initialized = Network::Init();
+    if (!state->network_initialized) {
+        return SDL_APP_FAILURE;
+    }
 
     // Apply the command line arguments
     state->system.ApplySettings();

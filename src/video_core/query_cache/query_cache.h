@@ -552,6 +552,15 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
 }
 
 template <typename Traits>
+std::optional<u32> QueryCacheBase<Traits>::PendingRelease(DAddr cpu_addr) {
+    std::scoped_lock lock{pending_releases_mutex};
+    if (const auto it = pending_releases.find(cpu_addr); it != pending_releases.end()) {
+        return it->second;
+    }
+    return std::nullopt;
+}
+
+template <typename Traits>
 void QueryCacheBase<Traits>::UnregisterPending() {
     const auto gen_caching_indexing = [](VAddr cur_addr) {
         return std::make_pair<u64, u32>(cur_addr >> Core::DEVICE_PAGEBITS,

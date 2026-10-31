@@ -23,6 +23,7 @@
 #include "common/swap.h"
 #include "core/hle/service/nvdrv/core/nvmap.h"
 #include "core/hle/service/nvdrv/devices/nvdevice.h"
+#include "core/hle/service/nvdrv/devices/nx2_gpu_mapping_table.h"
 
 namespace Tegra {
 class MemoryManager;
@@ -242,6 +243,7 @@ private:
         size_t asid{};
     };
     std::map<std::pair<u64, u64>, Nx2DeviceRange> nx2_device_ranges;
+    Nx2GpuMappingTable nx2_gpu_views;
     void Nx2Release(u64 cpu_address, u64 size);
 
     // Switch 2 sparse regions: a device range per region, mapped for the GPU when it's created;

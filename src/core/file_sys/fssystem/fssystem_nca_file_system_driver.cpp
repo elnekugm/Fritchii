@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright 2025 Eden Emulator Project
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
@@ -92,6 +92,11 @@ Result NcaFileSystemDriver::OpenStorageImpl(VirtualFile* out, NcaFsHeaderReader*
 
     // Initialize our header reader for the fs index.
     R_TRY(out_header_reader->Initialize(*m_reader, fs_index));
+
+    // NCZ files serve already-decrypted body data (CTR sections are stored decrypted).
+    // Skip the AES layers so we don't decrypt plaintext twice.
+    const bool is_pre_decrypted =
+        m_reader->GetDecryptedBodyStorage() != nullptr;
 
     // Declare the storage we're opening.
     VirtualFile storage;
@@ -209,32 +214,34 @@ Result NcaFileSystemDriver::OpenStorageImpl(VirtualFile* out, NcaFsHeaderReader*
         }
     } else {
         // Create the appropriate storage for the encryption type.
-        switch (out_header_reader->GetEncryptionType()) {
-        case NcaFsHeader::EncryptionType::None:
-            // If there's no encryption, use the base storage we made previously.
-            break;
-        case NcaFsHeader::EncryptionType::AesXts:
-            R_TRY(this->CreateAesXtsStorage(std::addressof(storage), std::move(storage),
-                                            fs_data_offset));
-            break;
-        case NcaFsHeader::EncryptionType::AesCtr:
-            R_TRY(this->CreateAesCtrStorage(std::addressof(storage), std::move(storage),
-                                            fs_data_offset, out_header_reader->GetAesCtrUpperIv(),
-                                            AlignmentStorageRequirement::None));
-            break;
-        case NcaFsHeader::EncryptionType::AesCtrSkipLayerHash: {
-            // Create the aes ctr storage.
-            VirtualFile aes_ctr_storage;
-            R_TRY(this->CreateAesCtrStorage(std::addressof(aes_ctr_storage), storage,
-                                            fs_data_offset, out_header_reader->GetAesCtrUpperIv(),
-                                            AlignmentStorageRequirement::None));
+        if (!is_pre_decrypted) {
+            switch (out_header_reader->GetEncryptionType()) {
+            case NcaFsHeader::EncryptionType::None:
+                // If there's no encryption, use the base storage we made previously.
+                break;
+            case NcaFsHeader::EncryptionType::AesXts:
+                R_TRY(this->CreateAesXtsStorage(std::addressof(storage), std::move(storage),
+                                                fs_data_offset));
+                break;
+            case NcaFsHeader::EncryptionType::AesCtr:
+                R_TRY(this->CreateAesCtrStorage(std::addressof(storage), std::move(storage),
+                                                fs_data_offset, out_header_reader->GetAesCtrUpperIv(),
+                                                AlignmentStorageRequirement::None));
+                break;
+            case NcaFsHeader::EncryptionType::AesCtrSkipLayerHash: {
+                // Create the aes ctr storage.
+                VirtualFile aes_ctr_storage;
+                R_TRY(this->CreateAesCtrStorage(std::addressof(aes_ctr_storage), storage,
+                                                fs_data_offset, out_header_reader->GetAesCtrUpperIv(),
+                                                AlignmentStorageRequirement::None));
 
-            // Create region switch storage.
-            R_TRY(this->CreateRegionSwitchStorage(std::addressof(storage), out_header_reader,
-                                                  std::move(storage), std::move(aes_ctr_storage)));
-        } break;
-        default:
-            R_THROW(ResultInvalidNcaFsHeaderEncryptionType);
+                // Create region switch storage.
+                R_TRY(this->CreateRegionSwitchStorage(std::addressof(storage), out_header_reader,
+                                                      std::move(storage), std::move(aes_ctr_storage)));
+            } break;
+            default:
+                R_THROW(ResultInvalidNcaFsHeaderEncryptionType);
+            }
         }
 
         // Potentially save storages to our context.
@@ -404,21 +411,25 @@ Result NcaFileSystemDriver::OpenIndirectableStorageAsOriginal(
     }
 
     // Create the appropriate storage for the encryption type.
-    switch (header_reader->GetEncryptionType()) {
-    case NcaFsHeader::EncryptionType::None:
-        // If there's no encryption, use the base storage we made previously.
-        break;
-    case NcaFsHeader::EncryptionType::AesXts:
-        R_TRY(
-            this->CreateAesXtsStorage(std::addressof(storage), std::move(storage), fs_data_offset));
-        break;
-    case NcaFsHeader::EncryptionType::AesCtr:
-        R_TRY(this->CreateAesCtrStorage(std::addressof(storage), std::move(storage), fs_data_offset,
-                                        header_reader->GetAesCtrUpperIv(),
-                                        AlignmentStorageRequirement::CacheBlockSize));
-        break;
-    default:
-        R_THROW(ResultInvalidNcaFsHeaderEncryptionType);
+    const bool is_pre_decrypted =
+        m_reader->GetDecryptedBodyStorage() != nullptr;
+    if (!is_pre_decrypted) {
+        switch (header_reader->GetEncryptionType()) {
+        case NcaFsHeader::EncryptionType::None:
+            // If there's no encryption, use the base storage we made previously.
+            break;
+        case NcaFsHeader::EncryptionType::AesXts:
+            R_TRY(this->CreateAesXtsStorage(std::addressof(storage), std::move(storage),
+                                            fs_data_offset));
+            break;
+        case NcaFsHeader::EncryptionType::AesCtr:
+            R_TRY(this->CreateAesCtrStorage(std::addressof(storage), std::move(storage),
+                                            fs_data_offset, header_reader->GetAesCtrUpperIv(),
+                                            AlignmentStorageRequirement::CacheBlockSize));
+            break;
+        default:
+            R_THROW(ResultInvalidNcaFsHeaderEncryptionType);
+        }
     }
 
     // Set output storage.
@@ -428,8 +439,9 @@ Result NcaFileSystemDriver::OpenIndirectableStorageAsOriginal(
 
 Result NcaFileSystemDriver::CreateBodySubStorage(VirtualFile* out, s64 offset, s64 size) {
     // Create the body storage.
-    auto body_storage =
-        std::make_shared<SharedNcaBodyStorage>(m_reader->GetSharedBodyStorage(), m_reader);
+    auto body = m_reader->GetDecryptedBodyStorage();
+    auto body_storage = std::make_shared<SharedNcaBodyStorage>(
+        body ? std::move(body) : m_reader->GetSharedBodyStorage(), m_reader);
     R_UNLESS(body_storage != nullptr, ResultAllocationMemoryFailedAllocateShared);
 
     // Get the body storage size.
@@ -453,6 +465,11 @@ Result NcaFileSystemDriver::CreateAesCtrStorage(
     // Check pre-conditions.
     ASSERT(out != nullptr);
     ASSERT(base_storage != nullptr);
+
+    if (m_reader->GetDecryptedBodyStorage() != nullptr) {
+        *out = std::move(base_storage);
+        R_SUCCEED();
+    }
 
     // Create the iv.
     std::array<u8, AesCtrStorage::IvSize> iv{};
@@ -490,6 +507,11 @@ Result NcaFileSystemDriver::CreateAesXtsStorage(VirtualFile* out, VirtualFile ba
     // Check pre-conditions.
     ASSERT(out != nullptr);
     ASSERT(base_storage != nullptr);
+
+    if (m_reader->GetDecryptedBodyStorage() != nullptr) {
+        *out = std::move(base_storage);
+        R_SUCCEED();
+    }
 
     // Create the iv.
     std::array<u8, AesXtsStorage::IvSize> iv{};
@@ -831,6 +853,12 @@ Result NcaFileSystemDriver::CreateAesCtrExStorageMetaStorage(
     // Validate preconditions.
     ASSERT(out != nullptr);
     ASSERT(base_storage != nullptr);
+
+    if (m_reader->GetDecryptedBodyStorage() != nullptr) {
+        *out = std::move(base_storage);
+        R_SUCCEED();
+    }
+
     ASSERT(encryption_type == NcaFsHeader::EncryptionType::None ||
            encryption_type == NcaFsHeader::EncryptionType::AesCtrEx ||
            encryption_type == NcaFsHeader::EncryptionType::AesCtrExSkipLayerHash);
@@ -892,6 +920,11 @@ Result NcaFileSystemDriver::CreateAesCtrExStorage(
     ASSERT(base_storage != nullptr);
     ASSERT(meta_storage != nullptr);
     ASSERT(patch_info.HasAesCtrExTable());
+
+    if (m_reader->GetDecryptedBodyStorage() != nullptr) {
+        *out = std::move(base_storage);
+        R_SUCCEED();
+    }
 
     // Read the bucket tree header.
     BucketTree::Header header;

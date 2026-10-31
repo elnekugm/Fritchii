@@ -373,17 +373,22 @@ public:
                      num_hashes <= (nrr_size - hashes_offset) / sizeof(Sha256Hash),
                  RO::ResultInvalidNrr);
 
-        // Set NRR info.
-        context->SetNrrInfoInUse(nrr_info, true);
-        nrr_info->nrr_heap_address = nrr_address;
-        nrr_info->nrr_heap_size = nrr_size;
+            std::vector<Sha256Hash> hashes(header.GetNumHashes());
+            if (!hashes.empty()) {
+                R_UNLESS(process->GetMemory().ReadBlock(nrr_address + header.GetHashesOffset(),
+                                                        hashes.data(), hashes.size() * sizeof(Sha256Hash)),
+                         RO::ResultInvalidNrr);
+            }
 
         // Read NRR hash list.
         nrr_info->hashes.resize(num_hashes);
         process->GetMemory().ReadBlock(nrr_address + hashes_offset, nrr_info->hashes.data(),
                                        sizeof(Sha256Hash) * num_hashes);
 
-        R_SUCCEED();
+        if (process->IsSwitch2()) {
+            R_RETURN(register_nrr.operator()<NrrHeaderNx2>());
+        }
+        R_RETURN(register_nrr.operator()<NrrHeader>());
     }
 
     Result UnregisterModuleInfo(size_t context_id, u64 nrr_address) {

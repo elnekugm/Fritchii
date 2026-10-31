@@ -41,6 +41,9 @@
 #include "video_core/nx2_indirect_grid.h"
 #include "video_core/nx2_list_verify.h"
 #include "video_core/rasterizer_interface.h"
+#ifdef ARCHITECTURE_x86_64
+#include "video_core/macro_turing_jit.h"
+#endif
 
 namespace Tegra {
 
@@ -264,6 +267,7 @@ bool DmaPusher::Step() {
 
     auto& current_command = command_list.command_lists[dma_pushbuffer_subindex];
     const CommandListHeader& header = current_command;
+    RecordCapture("entry-begin");
     dma_state.dma_get = header.addr;
 
     if (signal_sync && !synced) {
@@ -292,7 +296,35 @@ bool DmaPusher::Step() {
             if (kepler_payload || macro_payload) {
                 const size_t words = std::min<size_t>(dma_state.method_count, header.size);
                 auto* const engine_state = subchannels[dma_state.subchannel];
-                if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
+                // Parameters continued in an entry of their own can be arguments the GPU wrote
+                // (Donkey Kong Bananza's terrain: the culling pass counts each mesh's triangles
+                // into a 5-word indirect draw record and the colour pass draws with it). Read
+                // without a flush, the macro sees the older guest words (a zero count, so the
+                // terrain is never drawn). EDEN_NX2_PBFLUSH=0 turns this off.
+                static const bool flush_parameters = [] {
+                    const char* value = std::getenv("EDEN_NX2_PBFLUSH");
+                    return value == nullptr || value[0] != '0';
+                }();
+                bool flushed_parameters = false;
+                if (flush_parameters && words <= 64) {
+                    if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
+                        split.Drain();
+                    }
+                    const GPUVAddr address = dma_state.dma_get;
+                    const size_t bytes = words * sizeof(u32);
+                    if (memory_manager.IsMemoryDirty(address, bytes, VideoCommon::CacheType::BufferCache)) {
+                        memory_manager.FlushRegion(address, bytes, VideoCommon::CacheType::BufferCache);
+                        flushed_parameters = true;
+                        static std::atomic<u32> flush_logs{};
+                        if (flush_logs.fetch_add(1) < 20) {
+                            LOG_INFO(HW_GPU, "Macro parameters at {:#x} ({} words) were written by the GPU: flushed",
+                                     address, words);
+                        }
+                    }
+                }
+                if (flushed_parameters) {
+                    engine_state->current_dirty = false;
+                } else if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
                     // The caches behind IsMemoryDirty belong to the split's back thread.
                     split.Defer(
                         [engine_state, memory = &memory_manager,
@@ -539,7 +571,11 @@ static bool RecordParsedEntries() {
 }
 
 size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_t word_offset) {
+    RecordCapture("execute-begin", commands, word_offset);
     for (size_t index = 0; index < commands.size();) {
+#ifdef ARCHITECTURE_x86_64
+        TraceBindPacket(*this, commands, index, word_offset);
+#endif
         // Data word of methods command
         if (dma_state.method_count && dma_state.non_incrementing) {
             auto const& command_header = commands[index]; //must ref (MUltiMethod re)
@@ -621,9 +657,11 @@ size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_
             index++;
         }
         if (puller.HasPendingAcquire()) {
+            RecordCapture("execute-suspend", {}, word_offset + index);
             return index;
         }
     }
+    RecordCapture("execute-end", {}, word_offset + commands.size());
     return commands.size();
 }
 
@@ -770,6 +808,16 @@ void DmaPusher::CallMethod(u32 argument) {
             VideoCommon::Nx2Profile::Scope method_scope{VideoCommon::Nx2Profile::Zone::Method};
             subchannel->ConsumeSink(system);
             subchannel->current_dma_segment = dma_state.dma_get + dma_state.dma_word_offset;
+#ifdef ARCHITECTURE_x86_64
+            if (dma_state.method == NativeBindMethod &&
+                subchannel_type[dma_state.subchannel] == Engines::EngineTypes::Maxwell3D) {
+                auto& maxwell3d = *static_cast<Engines::Maxwell3D*>(subchannel);
+                if (maxwell3d.GetNativeMacroEngine().native_turing) {
+                    DumpInvalidNativeBind(*this, maxwell3d.regs.load_mme.start_address_ptr,
+                                          maxwell3d.GetNativeMacroPositions().size(), {&argument, 1});
+                }
+            }
+#endif
             subchannel->CallMethod(system, dma_state.method, argument, dma_state.is_last_call);
         }
     }
@@ -847,6 +895,16 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
         VideoCommon::Nx2Profile::Scope method_scope{VideoCommon::Nx2Profile::Zone::Method};
         subchannel->ConsumeSink(system);
         subchannel->current_dma_segment = dma_state.dma_get + dma_state.dma_word_offset;
+#ifdef ARCHITECTURE_x86_64
+        if (dma_state.method == NativeBindMethod &&
+            subchannel_type[dma_state.subchannel] == Engines::EngineTypes::Maxwell3D) {
+            auto& maxwell3d = *static_cast<Engines::Maxwell3D*>(subchannel);
+            if (maxwell3d.GetNativeMacroEngine().native_turing) {
+                DumpInvalidNativeBind(*this, maxwell3d.regs.load_mme.start_address_ptr,
+                                      maxwell3d.GetNativeMacroPositions().size(), {base_start, num_methods});
+            }
+        }
+#endif
         subchannel->CallMultiMethod(system, dma_state.method, base_start, num_methods, dma_state.method_count);
     }
 }

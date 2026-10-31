@@ -38,6 +38,7 @@
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
+#include "video_core/renderer_vulkan/vk_shader_reuse.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/shader_cache.h"
 
@@ -104,6 +105,7 @@ class Index;
 struct Record;
 } // namespace PrecompiledKept
 
+using VideoCommon::GraphicsEnvironment;
 using VideoCommon::ShaderInfo;
 
 struct ShaderPools {
@@ -343,6 +345,40 @@ private:
     /// and logs the counts every 10 s.
     void TickTranslations();
 
+    /// Builds graphics_key's pipeline on the GPU thread if the shaders of an earlier pipeline
+    /// fit it, so only the driver compile is left (on the pipeline workers). Null otherwise.
+    std::unique_ptr<GraphicsPipeline> CreateGraphicsPipelineFromReusedShaders();
+
+    // Asynchronous translation of native graphics pipelines (NX2_SHADER_STUTTER.md).
+    using GraphicsEnvironmentArray = std::array<GraphicsEnvironment, Maxwell::MaxShaderProgram>;
+
+    /// A graphics pipeline translated on a worker thread, handed to the GPU thread.
+    struct TranslatedGraphicsPipeline {
+        GraphicsPipelineCacheKey key;
+        std::unique_ptr<GraphicsPipeline> pipeline; ///< Null when the build failed.
+        GraphicsEnvironmentArray envs;              ///< For the disk cache.
+        std::chrono::steady_clock::duration build_time{};
+    };
+
+    [[nodiscard]] bool CanTranslateAsynchronously() const;
+
+    /// Queues the translation of graphics_key's pipeline on a worker thread. Nothing when the
+    /// environments could not be detached from the engine.
+    std::optional<std::future<TranslatedGraphicsPipeline>> QueueGraphicsTranslation();
+
+    /// Runs on a translation worker thread.
+    TranslatedGraphicsPipeline TranslateGraphicsPipeline(const GraphicsPipelineCacheKey& key,
+                                                         GraphicsEnvironmentArray envs);
+
+    /// Waits for a queued translation and serializes its pipeline like CreateGraphicsPipeline()
+    /// (GPU thread).
+    std::unique_ptr<GraphicsPipeline> AdoptTranslatedGraphicsPipeline(
+        std::future<TranslatedGraphicsPipeline>& translated);
+
+    void SerializeGraphicsPipeline(const GraphicsPipelineCacheKey& key,
+                                   GraphicsEnvironmentArray envs);
+
+    /// With `allow_translation` false, only builds pipelines from reused shaders (else null).
     std::unique_ptr<GraphicsPipeline> CreateGraphicsPipeline(
         ShaderPools& pools, const GraphicsPipelineCacheKey& key,
         std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
@@ -613,6 +649,9 @@ private:
     std::unique_ptr<ShaderPools> verify_pools;
     std::mutex spare_pools_mutex;
     std::vector<std::shared_ptr<ShaderPools>> spare_pools;
+
+    /// Declared before every thread pool, which all use it.
+    ShaderReuseCache shader_reuse;
 
     Shader::Profile profile;
     Shader::HostTranslateInfo host_info;

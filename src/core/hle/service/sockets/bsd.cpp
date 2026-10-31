@@ -795,6 +795,15 @@ void BSD_USA::StartMonitoring(HLERequestContext& ctx) {
     rb.Push(ResultSuccess);
 }
 
+void BSD_USA::Unknown36(HLERequestContext& ctx) {
+    // Sent once per session by nn::socket::Initialize (SDK 18+) right before StartMonitoring:
+    // in u32 (first word of the socket config) and the client pid, out u32 where non-zero fails
+    // the initialization.
+    IPC::ResponseBuilder rb{ctx, 3};
+    rb.Push(ResultSuccess);
+    rb.Push<u32>(0);
+}
+
 void BSD_USA::Socket(HLERequestContext& ctx) {
     IPC::RequestParser rp{ctx};
     const u32 domain = rp.Pop<u32>();
