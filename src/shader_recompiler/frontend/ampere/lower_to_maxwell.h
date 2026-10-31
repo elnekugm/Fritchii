@@ -1955,6 +1955,9 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
         }
         case 0x28c: case 0x88c: {
             const u32 output = insn.Bits(81, 3);
+            const u32 accum = insn.Bits(87, 3);
+            const u32 accum_neg = insn.Bits(90, 1);
+            const u32 set_op = insn.Bits(74, 2);
             const u32 a = uniform_register(insn.Bits(24, 8)), b = opcode == 0x88c ? 252U : uniform_register(insn.Bits(32, 8));
             const u32 combine = insn.Bits(87, 3), combine_op = insn.Bits(74, 2);
             if (output > 6 || insn.Bits(84, 3) != 7 || insn.Bits(72, 1) || combine_op == 3 ||
