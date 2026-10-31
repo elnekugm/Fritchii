@@ -29,48 +29,20 @@ surface only once the earlier ones are lowered.
 Lowered already (2026-10-31, this branch): `ISETP.EX` (64-bit compare high word), `REDUX.MIN`,
 `SHF` with a constant source (`0xa19`).
 
-Lowered so far, each verified by a run: `ISETP.EX`, `REDUX.MIN`, `SHF` with a constant
-source (`0xa19`), `IMNMX` with a 32-bit immediate (`0x817`), `IMAD.HI.S32` (`0x827`), `IMAD.HI`
-with a constant multiplier (`0xa27`), `IADD3.X` with a constant source (`0xa10`), `LEA.HI.X`
-with a constant base (`0xa11`), `ATOMS.MIN/MAX` (`0x38c`), `BAR.SYNC.DEFER_BLOCKING` (`0xb1d`),
-`BPT.TRAP` as a no-op (`0x95c`), and `LDG` through `desc[URn]` (`0x981`).
+Still rejected, with the instruction that fails:
 
-**Graphics path: nothing is rejected any more and no draw is skipped.** The two structural
-fixes that got there:
-
-- Surface stores and loads keep their own descriptor buffer (`required_surface_buffer`,
-  `SurfaceBoundBuffer()`), so a program can sample a texture from one constant buffer and store
-  through a surface in another; the pipeline cache version went to 19 and the native override
-  header to seven words for it.
-- `SUST.P` takes a partial channel mask (`Bits(72,4)`) instead of requiring all four channels.
-- `TXQ.B` on a bindless handle (`0x370`) becomes Maxwell `TXQ (b)` with the handle in the register.
-- `CALL` accepts the predicated NOINC forward transfer when the next instruction is `BSSY`
-  (`0x947`), the rule the nxnative build uses.
-
-The screen is still black because the *compute* side never dispatches: 24 × `native shader
-dispatch required` (a QMD needs a lowered program that was rejected). What is left is one family
-per line, all compute:
-
-| Message | Instruction | Needs |
+| Stage | Message | Instruction |
 |---|---|---|
-| unsupported native opcode | `825 ccd43825 00000010 078e02d2` | IMAD.WIDE where bits 32-39 carry a register, not an immediate |
-| native integer carry/third source | `210 05087210 00000007 07b5e800`, `c10 0402ac10 0000000a 0ffde0ff`, `c10 0c0a7c10 00000004 0ff9e0ff` | IADD3 with a third source and two carry predicates, in the uniform-rewritten form |
-| native constant add carry mode | `a10 2c2c8a10 00005c00 07b5e005`, `a10 1a1aca10 00005c00 0783e011` | IADD3 with a cbuf addend, a third source and both carries |
-| native constant LEA carry mode | `a11 2935ea11 00009500 010f0c27` | LEA.HI.X with a constant base and a carry predicate |
-| native uniform-source effective address mode | `c11 0a0a7c11 00000004 0f8fe0ff` | LEA with a uniform base |
-| native program uses lowering scratch registers | `812 00f67812 00000010 078ec0ff` | an operand names R250-R255, which the lowering keeps for itself |
-| native MUFU mode | `308 000c7308 0000000c 00002400` | MUFU with a form the lowering does not model |
-| unsupported native opcode | `fae 020d7fae 00000000 0e101c48` | LDGSTS.E.BYPASS.128: Maxwell has no async copy, so LDG + STS |
-| unsupported native opcode | `226 47407226 00000040 000010ff` | IDP.4A.S8.S8: four signed 8-bit products summed |
-
-Reminder: this is fail-fast, so accepting one instruction only reveals the next. The count of
-failing compute dispatches stays at 24 until every program lowers; the screen stays black while
-any of them does.
-
-Done in this pass, each verified by a run: `LEA`/`LEA.HI` with a carry predicate (Pp out of
-bits 81-83), `F2I.FTZ.U64.TRUNC` (`0x311`, the auto-exposure of `Lighting.bfsha`), `IMAD.X` with a
-carry value and bit 73, `FMNMX` with a dropped predicate output, `HMMA` with a plain addend, and
-`IADD3` third-source modifiers.
+| graphics | native surface descriptor buffer conflict | `b9b 00007b9b 8080480c 00100f00` |
+| graphics | unsupported native opcode | `370 1c1d7370 08000000 000001ff` |
+| graphics | native shared atomic mode | `38c ffff038c 00000801 00800000` |
+| compute | native formatted surface store mode | `b9b 02007b9b 60005804 0010af00` |
+| compute | native extended constant add mode | `a10 94052a10 00005b00 007fe4ff` (4 programs) |
+| compute | unsupported native opcode | `a27 00022a27 0000a800 078e00ff` (4) |
+| compute | native constant LEA carry mode | `a11 0f0d8a11 00005900 010f0eff` |
+| compute | native integer min/max mode | `817 00097817 ffffffc0 07800200` |
+| compute | native high multiply mode | `827 05067827 66666667 078e02ff` |
+| compute | unsupported native opcode | `95c 0000795c 00000004 00300000` |
 
 Also seen, not yet shader related:
 

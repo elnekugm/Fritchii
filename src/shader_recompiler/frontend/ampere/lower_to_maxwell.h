@@ -1510,31 +1510,17 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
             restore_predicate(1U << scratch);
             break;
         }
-        case 0x80d: { // CSMTEST: a test of shading-mode state Eden does not model, taken as false.
-            // Kirby Air Riders' vertex-side shaders run "CSMTEST.A.FCSM_TR P0" then "@P0 EXIT":
-            // never leave early. Outputs of PT discard the result.
-            const u32 first = insn.Bits(81, 3), second = insn.Bits(84, 3);
-            if (insn.Bits(87, 4) != 7 || insn.Bits(16, 16))
-                return fail(index, "native CSM test mode");
-            for (const u32 target : {first, second})
-                if (target != 7)
-                    emit(0x5090000000000000ULL | predicate | (u64{target} << 3) | 7 | (u64{7} << 12) |
-                         (u64{1} << 15) | (u64{7} << 29) | (u64{7} << 39));
-            break;
-        }
-        case 0x3c4: { // REDUX.SUM (modulo 2^32), .MIN/.MAX (unsigned), .OR or .XOR over the actual active lanes.
+        case 0x3c4: { // REDUX.SUM (modulo 2^32), .MAX.U32, .MIN.U32, or .OR over the actual active lanes.
             const u32 source = insn.Bits(24, 8), target = uniform_register(static_cast<u32>(dest));
-            const u32 mode = insn.words[2] & ~0x200U;
-            const bool maximum = mode == 0x14000, minimum = mode == 0x10000;
-            const bool signed_order = insn.Bits(73, 1);
-            // OR and XOR: inactive lanes contribute zero, as for the sum. Maxwell LOP: 1 = OR, 2 = XOR.
-            const u32 logical = insn.words[2] == 0x4000 ? 1U : insn.words[2] == 0x8000 ? 2U : 0U;
+            const bool maximum = insn.words[2] == 0x14000;
+            const bool minimum = insn.words[2] == 0x10000;
+            const bool bitwise_or = insn.words[2] == 0x4000;
             if (target == ~0U || target == 255 || insn.words[1] ||
-                (insn.words[2] != 0xc000 && !maximum && !minimum && !logical) ||
-                (signed_order && !maximum && !minimum) || native_predicate != 7)
-                return fail(index, "native warp sum mode");
+                (insn.words[2] != 0xc000 && !maximum && !minimum && !bitwise_or) ||
+                native_predicate != 7)
+                return fail(index, "native warp reduction mode");
             emit(0x50d8000000070000ULL | 250 | (u64{7} << 39) | (u64{7} << 45) | (u64{1} << 48));
-            mov_imm(target, minimum ? ~0U : 0U);
+            mov_imm(target, minimum ? ~0U : 0);
             for (u32 lane = 0; lane < 32; ++lane) {
                 emit(0xef10000000070000ULL | 251 | (u64{source} << 8) | (u64{lane} << 20) |
                     (u64{1} << 28) | (u64{1} << 29) | (u64{31} << 34) | (u64{7} << 48));
@@ -1544,14 +1530,14 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
                 emit(0x3828000000070000ULL | 252 | (u64{250} << 8) | (u64{lane} << 20));
                 emit(0x0400000000070000ULL | 252 | (u64{252} << 8) | (u64{1} << 20));
                 emit(0x5c10000000070000ULL | 252 | (u64{255} << 8) | (u64{252} << 20) | (u64{1} << 48));
-                // Inactive lanes: 0, or ~0 for the minimum (OR with the inverted lane mask).
-                emit(0x5c40000000070000ULL | 251 | (u64{251} << 8) | (u64{252} << 20) | (u64{7} << 48) |
-                     (u64{minimum} << 40) | (u64{minimum} << 41));
-                if (minimum) {
-                    emit(0x5c20000000070000ULL | target | (u64{target} << 8) | (u64{251} << 20) | (u64{7} << 39));
-                } else if (maximum) {
-                    emit(0x5c20000000070000ULL | target | (u64{target} << 8) | (u64{251} << 20) | (u64{15} << 39));
-                } else if (logical) {
+                // An inactive lane gives the operation's identity: 0, or all ones for MIN (OR
+                // with the inverted mask).
+                emit(0x5c40000000070000ULL | 251 | (u64{251} << 8) | (u64{252} << 20) |
+                     (u64{7} << 48) | (minimum ? (u64{1} << 41) | (u64{1} << 40) : 0));
+                if (maximum || minimum) {
+                    emit(0x5c20000000070000ULL | target | (u64{target} << 8) | (u64{251} << 20) |
+                         (u64{minimum ? 7U : 15U} << 39));
+                } else if (bitwise_or) {
                     emit(0x5c40000000070000ULL | target | (u64{target} << 8) | (u64{251} << 20) |
                         (u64{logical} << 41) | (u64{7} << 48));
                 } else {
@@ -1755,13 +1741,13 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
             emit(base(0x3828000000000000ULL) | (u64{insn.words[1]} << 8) |
                 (u64{1} << 39) | (u64{1} << 40));
             break;
-        case 0x219: case 0xa19: case 0xc19: { // U32 register (or cbuf, 0xa19, or uniform, 0xc19) shifts with a zero word outside the selected result.
+        case 0x219: case 0xc19: case 0xa19: { // U32 register (or uniform, 0xc19, or
+                                                 // constant, 0xa19) shifts with a zero word
+                                                 // outside the selected result.
             const u32 low = insn.Bits(24, 8), high = insn.Bits(64, 8);
-            const bool constant = opcode == 0xa19;
-            // A constant shift amount is loaded into R251 once the form is known.
-            const u32 shift = opcode == 0xc19 ? uniform_register(insn.Bits(32, 8)) : constant ? 251U : insn.Bits(32, 8);
-            const bool shift_operand = constant ? valid_cbuf() && !insn.Bits(62, 2) : insn.words[1] <= 255;
-            const auto load_shift = [&] { if (constant) materialize(2, 0, 251, false, false); };
+            const u32 shift = opcode == 0xa19   ? operand(1, false)
+                              : opcode == 0xc19 ? uniform_register(insn.Bits(32, 8))
+                                                : insn.Bits(32, 8);
             const bool right = insn.Bits(76, 1) != 0, high_result = insn.Bits(80, 1) != 0;
             if (opcode == 0x219 && shift_operand &&
                 (insn.words[2] & ~0xffU) == 0x00001200U) {
@@ -1781,13 +1767,13 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
             }
             // SHF.R.U32 of the low word with a zero high word: a plain logical right shift.
             if (right && !high_result && high == 255 && insn.Bits(73, 2) == 3 && shift != ~0U &&
-                shift_operand &&
+                (opcode == 0xa19 || insn.words[1] <= 255) &&
                 (insn.words[2] & ~(0x000118ffU | (opcode == 0xc19 ? 0x08000000U : 0U))) == 0x00000600U) {
                 load_shift();
                 emit(base(0x5c28000000000000ULL) | (u64{low} << 8) | (u64{shift} << 20));
                 break;
             }
-            if (!shift_operand || insn.Bits(73, 2) != 3 || shift == ~0U ||
+            if ((opcode != 0xa19 && insn.words[1] > 255) || insn.Bits(73, 2) != 3 || shift == ~0U ||
                 (insn.words[2] & ~(0x000118ffU | (opcode == 0xc19 ? 0x08000000U : 0U))) != 0x00000600U ||
                 (right ? (!high_result || low != 255) : (high_result ? low != 255 : high != 255)))
                 return fail(index, "native register shift mode");
@@ -3621,47 +3607,33 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
         case 0x20c: case 0x80c: case 0xa0c: case 0xc0c: { // ISETP
             const bool floating = (opcode & 0x1ff) == 0xb;
             if (!floating && insn.Bits(72, 1)) {
-                // ISETP.EX (bit 72): the high-word half of a 64-bit compare. The low words'
-                // result comes in as the predicate at bits 68-70 (negated by 71), e.g.
-                // ISETP.NE P0 = lo != 0, then ISETP.NE.EX P0 = (hi != 0) OR P0. EQ: high equal
-                // AND low; NE: high different OR low; the orderings: high strictly ordered OR
-                // (high equal AND low).
-                const u32 compare = insn.Bits(76, 3);
-                const u32 destination = insn.Bits(81, 3);
-                const u32 destination_b = insn.Bits(84, 3);
-                const u32 low = insn.Bits(68, 4);
-                const u32 accumulate = insn.Bits(87, 4);
-                const u32 combine = insn.Bits(74, 2);
-                if (compare == 0 || compare == 7 || combine == 3)
-                    return fail(index, "native extended integer comparison mode");
-                const u32 a = operand(0, false), b = operand(1, false);
-                u32 temporary = 0;
-                while (temporary == destination || temporary == destination_b ||
-                       temporary == (low & 7) || temporary == (accumulate & 7) ||
-                       temporary == insn.Bits(12, 3))
-                    ++temporary;
-                const u32 mask = 1U << temporary;
-                emit(0x38e8000000070000ULL | 253 | (u64{255} << 8) | (u64{mask} << 20));
-                const auto isetp = [&](u32 op, u32 input, u32 combine) {
-                    return 0x5b60000000000000ULL | predicate | 7 | (u64{temporary} << 3) |
-                           (u64{a} << 8) | (u64{b} << 20) | (u64{input & 7} << 39) |
-                           (u64{input >> 3} << 42) | (u64{combine} << 45) |
-                           (u64{insn.Bits(73, 1)} << 48) | (u64{op} << 49);
-                };
-                constexpr u32 And = 0, Or = 1, Lt = 1, Eq = 2, Gt = 4, Ne = 5;
-                if (compare == Eq) {
-                    emit(isetp(Eq, low, And));
-                } else if (compare == Ne) {
-                    emit(isetp(Ne, low, Or));
-                } else {
-                    emit(isetp(Eq, low, And));
-                    emit(isetp(compare <= 3 ? Lt : Gt, temporary, Or));
+                // ISETP.EX: the high word of a 64-bit compare, the low word's result in the
+                // predicate at 68-71. EQ and NE are Maxwell's own combine with a source
+                // predicate. The orderings are (a strictly-ordered b) OR (a == b AND low),
+                // through P6. The instruction's own input must be PT.
+                const u32 ex_compare = insn.Bits(76, 3);
+                if (ex_compare == 0 || ex_compare == 7 || insn.Bits(87, 4) != 7 ||
+                    insn.Bits(74, 2)) {
+                    return fail(index, "native extended integer comparison");
                 }
-                emit(0x5090000000000000ULL | predicate | destination_b |
-                     (u64{destination} << 3) | (u64{temporary} << 12) | (u64{7} << 29) |
-                     (u64{accumulate & 7} << 39) | (u64{accumulate >> 3} << 42) |
-                     (u64{combine} << 45));
-                emit(0x38f0000000070000ULL | (u64{253} << 8) | (u64{mask} << 20));
+                const u32 ea = operand(0, false), eb = operand(1, false);
+                const u64 sign = u64{insn.Bits(73, 1)} << 48;
+                const u64 low = (u64{insn.Bits(68, 3)} << 39) | (u64{insn.Bits(71, 1)} << 42);
+                const u64 outs = insn.Bits(84, 3) | (u64{insn.Bits(81, 3)} << 3);
+                if (ex_compare == 2 || ex_compare == 5) {
+                    emit(0x5b60000000000000ULL | predicate | outs | (u64{ea} << 8) |
+                         (u64{eb} << 20) | low | (u64{ex_compare == 5 ? 1U : 0U} << 45) |
+                         sign | (u64{ex_compare} << 49));
+                } else {
+                    const u32 strict = ex_compare <= 3 ? 1U : 4U; // LT, LE: LT. GT, GE: GT
+                    save_predicate();
+                    emit(0x5b60000000000000ULL | predicate | 7 | (u64{6} << 3) | (u64{ea} << 8) |
+                         (u64{eb} << 20) | low | sign | (u64{2} << 49));
+                    emit(0x5b60000000000000ULL | predicate | outs | (u64{ea} << 8) |
+                         (u64{eb} << 20) | (u64{6} << 39) | (u64{1} << 45) | sign |
+                         (u64{strict} << 49));
+                    restore_predicate();
+                }
                 break;
             }
             const u32 a = operand(0, floating), b = operand(1, floating);
