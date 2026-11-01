@@ -44,8 +44,8 @@ inline u32 ProgramOverrideSourceSize(std::span<const u8> bytes) {
         (mapped ? header[5] != header[2] / 16 : header[5] != 0) ||
         header[2] == 0 || header[2] % sizeof(Instruction) || header[2] > 1048576 ||
         header[3] == 0 || header[3] > 1048576 || (header[4] != ~0U && header[4] >= 18) ||
-        (header[6] != ~0U && header[6] >= 18)) return 0;
-    if (bytes.size() != sizeof(header) + size_t{header[2]} + size_t{header[3]} * 8 + size_t{header[5]} * 4) return 0;
+        (surface != ~0U && surface >= 18)) return 0;
+    if (bytes.size() != header_size + size_t{header[2]} + size_t{header[3]} * 8 + size_t{header[5]} * 4) return 0;
     return header[2];
 }
 
@@ -61,15 +61,17 @@ inline LoweredProgram DecodeProgramOverride(std::span<const u8> bytes,
     std::array<u32, 6> header{};
     if (!ProgramOverrideSourceSize(bytes)) return fail("invalid native override header or length");
     std::memcpy(header.data(), bytes.data(), sizeof(header));
+    const bool has_surface = header[1] == 0x3330564f;
+    const size_t header_size = sizeof(header) + (has_surface ? sizeof(u32) : 0);
     if (header[2] != source.size_bytes()) return fail("native override source length mismatch");
-    if (std::memcmp(bytes.data() + sizeof(header), source.data(), source.size_bytes()))
+    if (std::memcmp(bytes.data() + header_size, source.data(), source.size_bytes()))
         return fail("native override source mismatch");
     result.instructions.resize(header[3]);
-    std::memcpy(result.instructions.data(), bytes.data() + sizeof(header) + source.size_bytes(), header[3] * 8);
+    std::memcpy(result.instructions.data(), bytes.data() + header_size + source.size_bytes(), header[3] * 8);
     if (header[5]) {
         result.source_instruction_offsets.resize(header[5]);
         std::memcpy(result.source_instruction_offsets.data(),
-                    bytes.data() + sizeof(header) + source.size_bytes() + size_t{header[3]} * 8,
+                    bytes.data() + header_size + source.size_bytes() + size_t{header[3]} * 8,
                     size_t{header[5]} * 4);
         u32 previous = 0;
         for (u32 offset : result.source_instruction_offsets) {
