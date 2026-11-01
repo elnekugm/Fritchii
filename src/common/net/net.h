@@ -41,9 +41,9 @@ struct Release {
     std::string title;
     std::string body;
     std::string tag;
-    std::string base_download_url;
     std::string html_url;
-    std::string host;
+    // Commit the release was built from.
+    std::string commit;
 
     std::vector<std::string> assets;
     std::unordered_map<std::string, AssetInfo> asset_info;
@@ -58,10 +58,15 @@ struct Release {
     std::vector<Asset> GetPlatformAssets(std::string_view platform,
                                          LinuxPackage package = LinuxPackage::Any) const;
 
-    static std::optional<Release> FromJson(const nlohmann::json& json, const std::string &host, const std::string& repo);
-    static std::optional<Release> FromJson(const std::string_view& json, const std::string &host, const std::string& repo);
-    static std::vector<Release> ListFromJson(const nlohmann::json &json, const std::string &host, const std::string &repo);
-    static std::vector<Release> ListFromJson(const std::string_view &json, const std::string &host, const std::string &repo);
+    static std::optional<Release> FromJson(const nlohmann::json& json);
+    static std::vector<Release> ListFromJson(const nlohmann::json& json);
+    static std::vector<Release> ListFromJson(const std::string_view& json);
+};
+
+struct Commit {
+    std::string sha;
+    std::string summary;
+    std::string author;
 };
 
 struct RequestResult {
@@ -74,7 +79,7 @@ struct RequestResult {
 RequestResult Fetch(const std::string &url, const std::string &path);
 
 // Make a request via httplib, and return the response body if applicable.
-std::optional<std::string> MakeRequest(const std::string &url, const std::string &path);
+std::optional<std::string> MakeRequest(const std::string& url, const std::string& path);
 
 struct ReleaseList {
     std::vector<Release> releases;

@@ -39,7 +39,6 @@
 #endif
 
 #ifdef ENABLE_UPDATE_CHECKER
-#include <QFuture>
 #include <QFutureWatcher>
 #include "frontend_common/update_checker.h"
 #endif

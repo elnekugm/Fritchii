@@ -70,6 +70,8 @@ jobs:
     needs: prepare-release
     runs-on: ${{ matrix.runner }}
     env:
+      BUILD_TAG: ${{ needs.name.outputs.tag }}
+      ASSET_NAME: eglantine-${{ needs.name.outputs.tag }}-${{ matrix.platform }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 3000M
       CCACHE_COMPILERCHECK: content
@@ -626,7 +628,7 @@ jobs:
   # unticked.
   release:
     name: Publish release
-    needs: build
+    needs: [name, build]
     if: github.event_name == 'push' || inputs.publish_release
     runs-on: ubuntu-24.04
     permissions:
@@ -663,10 +665,14 @@ jobs:
           done
           ls -la dist
 
+      # The notes list the commits since the channel's previous release; the app shows users the
+      # commits since their own build.
       - name: Create release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ needs.name.outputs.channel }}
+          BUILD_TAG: ${{ needs.name.outputs.tag }}
         run: |
           set -euo pipefail
           tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/build-${GITHUB_RUN_NUMBER}" --jq '.object.sha')

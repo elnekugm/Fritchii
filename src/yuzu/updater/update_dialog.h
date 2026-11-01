@@ -7,8 +7,8 @@
 #include <QDialog>
 #include <QString>
 #include "common/net/net.h"
+#include "frontend_common/update_checker.h"
 
-class QRadioButton;
 namespace Ui {
 class UpdateDialog;
 }
@@ -38,7 +38,6 @@ private:
     bool DownloadTo(const QString& filename);
 
     Ui::UpdateDialog* ui;
-    QList<QRadioButton*> m_buttons;
     Common::Net::Asset m_asset;
     Common::Net::Release m_release;
     bool m_fritchii{};

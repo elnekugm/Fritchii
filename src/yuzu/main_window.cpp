@@ -1836,6 +1836,11 @@ void MainWindow::ConnectMenuEvents() {
     connect_menu(ui->action_Firmware_From_ZIP, &MainWindow::OnInstallFirmwareFromZIP);
     connect_menu(ui->action_Install_Keys, &MainWindow::OnInstallDecryptionKeys);
     connect_menu(ui->action_About, &MainWindow::OnAbout);
+#ifdef ENABLE_UPDATE_CHECKER
+    connect_menu(ui->action_Check_For_Updates, [this] { CheckForUpdates(true); });
+#else
+    ui->action_Check_For_Updates->setVisible(false);
+#endif
     connect_menu(ui->action_Eden_Dependencies, &MainWindow::OnEdenDependencies);
     connect_menu(ui->action_Data_Manager, &MainWindow::OnDataDialog);
 
