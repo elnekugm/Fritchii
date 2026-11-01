@@ -926,54 +926,7 @@ void DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {
         if (!always_drain && !written()) {
             return;
         }
-        // Few entries on written pages are ever dirty (2-3% in title 1). Until one has been, check
-        // it on the back without stopping the front; the first time costs one stale frame, then
-        // the page waits as before. EDEN_NX2_COMMAND_HOT=0 waits for every written page.
-        static const bool hot_pages = [] {
-            const char* value = std::getenv("EDEN_NX2_COMMAND_HOT");
-            return value == nullptr || value[0] != '0';
-        }();
-        constexpr GPUVAddr page_mask = (GPUVAddr{1} << Nx2WrittenPageBits) - 1;
-        // EDEN_NX2_COMMAND_HOT_ENTRY=1: wait only for entries the GPU has rewritten, not every entry
-        // on a hot page. Title 4 waited ~10x less often but longer each time: 30 fps against 34.
-        static const bool hot_entries = [] {
-            const char* value = std::getenv("EDEN_NX2_COMMAND_HOT_ENTRY");
-            return value != nullptr && value[0] == '1';
-        }();
-        const auto hot = [&] {
-            if (hot_entries) {
-                return Nx2IsHotCommandEntry(address);
-            }
-            for (GPUVAddr page = address & ~page_mask; page < address + size; page += page_mask + 1) {
-                if (const auto device = memory_manager.GpuToCpuAddress(page);
-                    device && Nx2IsHotCommandPage(*device)) {
-                    return true;
-                }
-            }
-            return false;
-        };
-        // EDEN_NX2_COMMAND_LAG=1: never wait here. The first frame's words stay in use until the back's
-        // flush lands, so draws can use GPU-written parameters a frame late.
-        static const bool lag = std::getenv("EDEN_NX2_COMMAND_LAG") != nullptr;
-        if (!always_drain && hot_pages && (lag || !hot())) {
-            split.Defer([memory = &memory_manager, address, size] {
-                if (!memory->IsMemoryDirty(address, size, VideoCommon::CacheType::BufferCache)) {
-                    return;
-                }
-                Nx2MarkHotCommandEntry(address);
-                for (GPUVAddr page = address & ~page_mask; page < address + size; page += page_mask + 1) {
-                    if (const auto device = memory->GpuToCpuAddress(page)) {
-                        Nx2MarkHotCommandPage(*device);
-                    }
-                }
-                memory->FlushRegion(address, size, VideoCommon::CacheType::BufferCache);
-            });
-            return;
-        }
-        CommandStats(0);
-        const auto drain_start = std::chrono::steady_clock::now();
-        split.Drain(VideoCommon::GpuSplit::DrainSite::Commands);
-        CommandStats(1, std::chrono::steady_clock::now() - drain_start);
+        split.Drain();
     }
     if (!written()) {
         return;
