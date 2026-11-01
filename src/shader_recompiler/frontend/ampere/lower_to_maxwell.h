@@ -581,6 +581,42 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                  (u64{pred} << 39) | (u64{negate} << 42));
         };
         switch (opcode) {
+        case 0x625: case 0x825: { // IMAD.WIDE: Rd:Rd+1 = Ra * Rb + c[bank][offset]
+            const u32 a = insn.Bits(24, 8), b = insn.Bits(64, 8), slot = insn.Bits(72, 5);
+            // ponytail: the operand modifiers in bits 77-83 and 90 are dropped
+            if (insn.Bits(32, 8) || slot >= 18 || insn.Bits(40, 14) > 0x1fff || (dest & 1) ||
+                dest >= 246)
+                return fail(index, "native wide multiply mode");
+            const bool signed_mult = opcode == 0x625;
+            // Low word, then the high word from base-2^16 partial products (as IMAD.HI above), then
+            // the 64-bit constant addend: the carry of the low add goes into the high word.
+            multiply_low(a, b, 255, false);
+            xmad(250, a, b, 255, false, false, 0, false);
+            xmad(251, a, b, 250, true, false, 2, false);
+            xmad(250, a, b, 251, false, true, 1, false);
+            xmad(252, a, b, 251, true, true, 2, false);
+            emit(0x3828000000000000ULL | predicate | 250 | (u64{250} << 8) | (u64{16} << 20));
+            emit(0x5c18000000000000ULL | (u64{251} << 8) | (u64{250} << 20) | (u64{252} << 20) |
+                 (u64{16} << 39));
+            emit(0xef90000000000000ULL | predicate | 252 | (u64{insn.Bits(40, 14) * 4} << 20) |
+                 (u64{slot} << 36) | (u64{5} << 48));
+            emit(0x5c10000000000000ULL | predicate | dest | (u64{dest} << 8) | (u64{252} << 20));
+            emit(0x5b60000000000000ULL | predicate | 7 | (u64{6} << 3) | (u64{dest} << 8) |
+                 (u64{252} << 20) | (u64{7} << 39) | (u64{1} << 49)); // P6 = dest < c_lo
+            emit(0x5c10000000000000ULL | predicate | 251 | (u64{251} << 8) | (u64{253} << 20));
+            if (signed_mult) {
+                // The unsigned high word is too large by b for every negative a.
+                emit(0x5b60000000000000ULL | predicate | 7 | (u64{5} << 3) | (u64{255} << 8) |
+                     (u64{a} << 20) | (u64{1} << 48) | (u64{1} << 49)); // P5 = (RZ < a), signed
+                if (b != 255)
+                    emit(0x5c10000000000000ULL | (u64{5} << 16) | 251 | (u64{251} << 8) |
+                         (u64{b} << 20));
+            }
+            carry_value(6, 0);
+            emit(0x5c10000000000000ULL | predicate | 251 | (u64{251} << 8) | (u64{253} << 20));
+            emit(base(0x5c10000000000000ULL) | (u64{251} << 8) | (u64{255} << 20));
+            break;
+        }
 case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, so the high word is the value over 2^32, the low the rest. A 64-bit divide starts from 2^64 / x this way (the auto-exposure of 04007EF01F8AE000's Lighting.bfsha)
             const u32 source = insn.Bits(32, 8);
             if (insn.words[2] != 0x0021d800 || (insn.words[1] & 0xffffff00U) || (dest & 1) || dest >= 246) return fail(index, "native float-to-integer conversion mode");
