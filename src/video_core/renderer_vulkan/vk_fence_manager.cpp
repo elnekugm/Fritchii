@@ -19,7 +19,7 @@ InnerFence::InnerFence(Scheduler& scheduler_, bool is_stubbed_)
 
 InnerFence::~InnerFence() = default;
 
-void InnerFence::Queue() {
+void InnerFence::Queue(VideoCore::RasterizerInterface& rasterizer) {
     if (is_stubbed) {
         return;
     }
@@ -63,7 +63,7 @@ Fence FenceManager::CreateFence(bool is_stubbed) {
 }
 
 void FenceManager::QueueFence(Fence& fence) {
-    fence->Queue();
+    fence->Queue(rasterizer);
 }
 
 bool FenceManager::IsFenceSignaled(Fence& fence) const {

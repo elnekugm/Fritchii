@@ -2479,14 +2479,20 @@ void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType 
         gpu.InvalidateGPUCache();
     }
     if (True(which & VideoCommon::CacheType::TextureCache)) {
+        VideoCommon::ReadbackDiagnostics::Scope diagnostic{
+            VideoCommon::ReadbackDiagnostics::Event::TextureReadback, size};
         std::scoped_lock lock{texture_cache.mutex};
         texture_cache.DownloadMemory(addr, size);
     }
     if ((True(which & VideoCommon::CacheType::BufferCache))) {
+        VideoCommon::ReadbackDiagnostics::Scope diagnostic{
+            VideoCommon::ReadbackDiagnostics::Event::BufferReadback, size};
         std::scoped_lock lock{buffer_cache.mutex};
         buffer_cache.DownloadMemory(addr, size);
     }
     if ((True(which & VideoCommon::CacheType::QueryCache))) {
+        VideoCommon::ReadbackDiagnostics::Scope diagnostic{
+            VideoCommon::ReadbackDiagnostics::Event::QueryReadback, size};
         query_cache.FlushRegion(addr, size);
     }
 }

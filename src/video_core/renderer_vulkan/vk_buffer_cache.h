@@ -6,7 +6,9 @@
 
 #pragma once
 
+#include <array>
 #include <limits>
+#include <memory>
 
 #include <boost/container/small_vector.hpp>
 

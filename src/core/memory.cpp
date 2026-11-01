@@ -37,6 +37,11 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/memory.h"
 #include "core/memory/read_traps.h"
+#include "core/memory/readback_cache.h"
+#include "core/memory/readback_diagnostics.h"
+#include "core/memory/core_readback_shadow.h"
+#include "core/memory/core_readback_cache.h"
+#include "core/memory/core_readback_capacity_shadow.h"
 #include "video_core/gpu.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/host1x/host1x.h"
@@ -342,7 +347,8 @@ struct Memory::Impl {
         },
         [&](const Common::ProcessAddress current_vaddr, const std::size_t offset, const std::size_t copy_amount, const u8* const ptr) {
             if (!unsafe) {
-                HandleRasterizerDownload(GetInteger(current_vaddr), copy_amount);
+                HandleRasterizerDownload(GetInteger(current_vaddr), copy_amount,
+                                         ReadbackDiagnostics::Caller::ReadBlock);
             }
             std::memcpy(reinterpret_cast<u8*>(buffer) + offset, ptr, copy_amount);
         });
@@ -413,7 +419,8 @@ struct Memory::Impl {
             WriteBlockImpl(dest_addr + offset, ptr, copy_amount, false);
         },
         [&](const Common::ProcessAddress current_vaddr, const std::size_t offset, const std::size_t copy_amount, u8* const ptr) {
-            HandleRasterizerDownload(GetInteger(current_vaddr), copy_amount);
+            HandleRasterizerDownload(GetInteger(current_vaddr), copy_amount,
+                                     ReadbackDiagnostics::Caller::CopyBlock);
             WriteBlockImpl(dest_addr + offset, ptr, copy_amount, false);
         });
     }
@@ -436,7 +443,8 @@ struct Memory::Impl {
         auto on_rasterizer = [&](const Common::ProcessAddress current_vaddr, const std::size_t offset, const std::size_t block_size) {
             // dc ivac: Invalidate to point of coherency
             // GPU flush -> CPU invalidate
-            HandleRasterizerDownload(GetInteger(current_vaddr), block_size);
+            HandleRasterizerDownload(GetInteger(current_vaddr), block_size,
+                                     ReadbackDiagnostics::Caller::InvalidateDataCache);
         };
         return PerformCacheOperation(dest_addr, size, on_rasterizer);
     }
@@ -988,10 +996,25 @@ struct Memory::Impl {
             const DAddr end_address = address + size;
             if (current_area.start_address <= address && end_address <= current_area.end_address)
                 [[likely]] {
+                diagnostics.Add(Event::AreaHit);
                 return;
             }
             DisarmReadTraps(v_address, size);
             current_area = system.GPU().OnCPURead(address, size);
+            if (CoreReadbackCache::Enabled() || CoreReadbackShadow::Enabled() || capacity) {
+                const auto current = capture_shadow();
+                if (capacity) {
+                    capacity->After(shadow_before, current_area, current);
+                }
+                if (CoreReadbackCache::Enabled()) {
+                    core_readback_caches[core].Remember(shadow_before.page, current_area,
+                                                       current.page, current.aliases,
+                                                       current.generation);
+                }
+                if (CoreReadbackShadow::Enabled()) {
+                    core_readback_shadows[core].After(shadow_before, current_area, current, core);
+                }
+            }
         });
         // Only once every device alias is flushed (or inside an area flushed after this
         // generation's traps were armed): a disarmed page is read through fastmem without trapping.

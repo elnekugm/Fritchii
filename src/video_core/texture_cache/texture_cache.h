@@ -2043,6 +2043,14 @@ std::optional<VideoCore::RasterizerDownloadArea> TextureCache<P>::GetFlushArea(D
     }
     std::optional<VideoCore::RasterizerDownloadArea> area{};
     ForEachImageInRegion(cpu_addr, size, [&](ImageId, ImageBase& image) {
+        if (True(image.flags & ImageFlagBits::Tracked)) {
+            CacheTrackingDiagnostics::Record(CacheTrackingDiagnostics::Event::TextureTrackedRead,
+                                              cpu_addr, size, image.cpu_addr, image.guest_size_bytes);
+            if (!image.partial_dirty_pages.empty() || !image.partial_remapped.empty()) {
+                CacheTrackingDiagnostics::Record(CacheTrackingDiagnostics::Event::TexturePartialRead,
+                                                  cpu_addr, size, image.cpu_addr, image.guest_size_bytes);
+            }
+        }
         if (False(image.flags & ImageFlagBits::GpuModified)) {
             return;
         }
@@ -4909,6 +4917,8 @@ bool TextureCache<P>::MarkPartialWrite(ImageBase& image, DAddr cpu_addr, size_t 
         device_memory.UpdatePagesCachedCount((base_page + page) << Core::DEVICE_PAGEBITS,
                                              Core::DEVICE_PAGESIZE, -1);
     }
+    CacheTrackingDiagnostics::Record(CacheTrackingDiagnostics::Event::TexturePartialWrite,
+                                      cpu_addr, size, image.cpu_addr, image.guest_size_bytes);
     image.flags |= ImageFlagBits::CpuModified;
     if (pages.size() > total_pages / 4) {
         // Most of the image changed: untrack it whole and upload it whole.

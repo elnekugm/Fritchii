@@ -22,6 +22,7 @@
 #include "video_core/gpu_thread.h"
 #include "video_core/gpu_split.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/readback_diagnostics.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/renderer_base.h"
 
@@ -29,14 +30,46 @@ namespace VideoCommon::GPUThread {
 
 namespace {
 
+VideoCore::RasterizerDownloadArea ReadMemory(VideoCore::RasterizerInterface& rasterizer,
+                                           const ThreadManager& manager, const SynchState& state,
+                                           DAddr addr, u64 size, u64 published_work_sequence,
+                                           ReadbackDependencyDiagnostics::Record* diagnostic) {
+    if (diagnostic) {
+        diagnostic->backend_start = ReadbackDependencyDiagnostics::Now();
+    }
+    const u64 generation = manager.ReadbackGeneration();
+    auto area = rasterizer.GetFlushArea(addr, size);
+    if (diagnostic) {
+        diagnostic->backend_generation = generation;
+        diagnostic->area_end = ReadbackDependencyDiagnostics::Now();
+        diagnostic->preemptive_flag = area.preemtive;
+    }
+    rasterizer.FlushRegion(area.start_address, area.end_address - area.start_address);
+    area.preemtive = true;
+    if (diagnostic) {
+        diagnostic->flush_end = ReadbackDependencyDiagnostics::Now();
+        diagnostic->checked_generation = manager.ReadbackGeneration();
+        diagnostic->checked_sequence = state.published_work_sequence.load(std::memory_order_acquire);
+        area.completed_generation =
+            generation != 0 && diagnostic->checked_generation == generation &&
+                    diagnostic->checked_sequence == published_work_sequence
+                ? generation
+                : 0;
+    } else {
+        area.completed_generation =
+            generation != 0 && manager.ReadbackGeneration() == generation &&
+                    state.published_work_sequence.load(std::memory_order_acquire) == published_work_sequence
+                ? generation
+                : 0;
+    }
+    return area;
+}
+
 // Tells a CPU thread waiting in PushCommand that its command ran.
 void SignalCommand(SynchState& state, u64 fence, bool block) {
-    state.signaled_fence.store(fence);
+    state.signaled_fence.store(fence, std::memory_order_release);
     if (block) {
-        // We have to lock the write_lock to ensure that the condition_variable wait not get a
-        // race between the check and the lock itself.
-        std::scoped_lock lk{state.write_lock};
-        state.cv.notify_all();
+        state.signaled_fence.notify_all();
     }
 }
 
@@ -66,10 +99,15 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         // Before the split's back thread starts, which reads it too.
         Profile::Initialize();
         auto& split = VideoCommon::GpuSplit::Get();
-        while (!stop_token.stop_requested()) {
+        while (true) {
+            next = {};
             Profile::Report();
             split.MaybeStart(system);
-            if (scheduler.HasPendingChannels()) {
+            if (stop_token.stop_requested()) {
+                if (!state.queue.TryPop(next)) {
+                    break;
+                }
+            } else if (scheduler.HasPendingChannels()) {
                 // Suspended channels wait on semaphores the CPU releases: poll them meanwhile.
                 {
                     Profile::Scope scope{Profile::Zone::ResumePending};
@@ -103,8 +141,13 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 Profile::Scope scope{Profile::Zone::Idle};
                 state.queue.PopWait(next, stop_token);
             }
-            if (stop_token.stop_requested()) {
-                break;
+            if (std::holds_alternative<std::monostate>(next.data)) {
+                continue;
+            }
+            if (const auto* read = std::get_if<CpuReadCommand>(&next.data);
+                read && read->diagnostic) {
+                read->diagnostic->front_popped = ReadbackDependencyDiagnostics::Now();
+                read->diagnostic->split = split.Active();
             }
             last_progress = std::chrono::steady_clock::now();
             if (split.Active()) {
@@ -182,6 +225,10 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
             } else if (auto* run = std::get_if<RunCommand>(&next.data)) {
                 Profile::Scope scope{Profile::Zone::Run};
                 run->func();
+            } else if (const auto* read = std::get_if<CpuReadCommand>(&next.data)) {
+                *read->result = GPUThread::ReadMemory(*renderer.ReadRasterizer(), *this, state,
+                                                    read->addr, read->size,
+                                                    next.published_work_sequence, read->diagnostic);
             } else if (const auto* flush = std::get_if<FlushRegionCommand>(&next.data)) {
                 Profile::Scope scope{Profile::Zone::FlushInvalidate};
                 renderer.ReadRasterizer()->FlushRegion(flush->addr, flush->size);
@@ -192,6 +239,9 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 ASSERT(false);
             }
             SignalCommand(state, next.fence, next.block);
+        }
+        if (split.Active()) {
+            split.Drain();
         }
     });
 }
@@ -216,6 +266,8 @@ void ThreadManager::Run(std::function<void()>&& func, bool is_async, bool before
 }
 
 void ThreadManager::InvalidateRegion(DAddr addr, u64 size) {
+    BeginAsyncGuestWrite();
+    SCOPE_EXIT { EndAsyncGuestWrite(); };
     rasterizer->OnCacheInvalidation(addr, size);
 }
 
@@ -239,7 +291,18 @@ u64 ThreadManager::PushCommand(CommandData&& command_data, bool block, bool is_a
         block = true;
     }
 
+    if (const auto* read = std::get_if<CpuReadCommand>(&command_data);
+        read && read->diagnostic) {
+        read->diagnostic->before_lock = ReadbackDependencyDiagnostics::Now();
+    }
     std::unique_lock lk(state.write_lock);
+    if (state.shutting_down) {
+        return 0;
+    }
+    if (!std::holds_alternative<CpuReadCommand>(command_data)) {
+        state.published_work_sequence.fetch_add(1, std::memory_order_acq_rel);
+        InvalidateReadbackCache();
+    }
     const u64 fence{++state.last_fence};
     if (Common::Nx2Timeline::Active()) {
         // The command's sequence number, which the GPU threads' list markers repeat
@@ -254,6 +317,7 @@ u64 ThreadManager::PushCommand(CommandData&& command_data, bool block, bool is_a
     }
     state.queue.EmplaceWait(std::move(command_data), fence, block);
 
+    lk.unlock();
     if (block) {
         // With the split, SignalCommand runs on the back.
         Common::Nx2Timeline::ArgSpan timeline_span{"guest: wait for GPU command", {"seq", fence}};
@@ -267,7 +331,12 @@ u64 ThreadManager::PushCommand(CommandData&& command_data, bool block, bool is_a
 
 void ThreadManager::NotifyShutdown() {
     if (thread.joinable()) {
-        thread.request_stop();
+        {
+            std::scoped_lock lk{state.write_lock};
+            state.shutting_down = true;
+            InvalidateReadbackCache();
+            thread.request_stop();
+        }
         thread.join();
     }
     VideoCommon::GpuSplit::Get().Stop();

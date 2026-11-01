@@ -35,6 +35,7 @@
 #include "common/dkb_frame_trace.h"
 #include "common/game_presets.h"
 #include "common/settings.h"
+#include "common/swap.h"
 #include "common/thread.h"
 #include "core/core.h"
 #include "core/arm/dynarmic/window_trace.h"
@@ -302,8 +303,8 @@ private:
                 if (!shared->alive) {
                     return;
                 }
-                request.pending = false;
                 event->Signal(kernel);
+                request.pending = false;
             });
         TipcReplyWords(ctx, {});
     }
@@ -549,6 +550,10 @@ private:
         // GpuMemoryHandle that later map jobs (211) name.
         const u32 handle = m_next_memory_handle++;
         m_memory[handle] = {start, last - start + 1};
+        if (std::getenv("EDEN_NX2_IMAGE_TRACE") != nullptr) {
+            LOG_INFO(Service, "nx2:gpu mapping register handle={} cpu={:#x} size={:#x}",
+                     handle, start, last - start + 1);
+        }
         TipcReplyWords(ctx, {handle});
     }
 
@@ -634,6 +639,10 @@ private:
         const u32 handle = w[2];
         if (const auto it = m_memory.find(handle); it != m_memory.end()) {
             const auto [address, size] = it->second;
+            if (std::getenv("EDEN_NX2_IMAGE_TRACE") != nullptr) {
+                LOG_INFO(Service, "nx2:gpu mapping destroy handle={} cpu={:#x} size={:#x}",
+                         handle, address, size);
+            }
             LOG_DEBUG(Service, "nx2:gpu 102 destroy handle={} [{:#x}, +{:#x}] slot={}", handle,
                       address, size, w[3]);
             if (size != 0) {
@@ -4362,6 +4371,7 @@ private:
     static constexpr u32 HostSyncpoints = 192;        // Tegra::Host1x::SyncpointManager
 
     void AttachSyncptMemory(HLERequestContext& ctx) {
+        std::scoped_lock lock{m_syncpt_mutex};
         // RequestParser doesn't skip TIPC handle words, so read the raw data words.
         const auto* cmd_buf = ctx.CommandBuffer();
         const size_t data = TipcDataOffset(cmd_buf);
@@ -4432,11 +4442,18 @@ private:
     // Mirrors Eden's guest syncpoint values into the shared RO page. Returns true if any changed.
     bool UpdateSyncptValues() {
         auto& manager = system.Host1x().GetSyncpointManager();
+        const u32 count = std::min(m_syncpt_count, HostSyncpoints);
+        if (count == 0) {
+            return false;
+        }
+        std::array<u64_le, HostSyncpoints> values{};
+        m_syncpt_memory->ReadBlock(m_syncpt_ro + SyncptValuesOffset, values.data(),
+                                  count * sizeof(values[0]));
         bool changed = false;
-        for (u32 id = 0; id < std::min(m_syncpt_count, HostSyncpoints); ++id) {
+        for (u32 id = 0; id < count; ++id) {
             const u64 value = manager.GetGuestSyncpointValue(id);
             const u64 address = m_syncpt_ro + SyncptValuesOffset + id * 8;
-            if (m_syncpt_memory->Read64(address) != value) {
+            if (values[id] != value) {
                 m_syncpt_memory->Write64(address, value);
                 changed = true;
             }
@@ -4457,6 +4474,7 @@ private:
     // and rearms if it still has to wait. Acknowledging without a value change costs the client a
     // wakeup per poll, which keeps waits whose syncpoint we never see from hanging.
     void PollSyncpts() {
+        std::scoped_lock lock{m_syncpt_mutex};
         if (m_syncpt_memory == nullptr) {
             return;
         }
@@ -4957,6 +4975,7 @@ private:
     std::shared_ptr<Nx2NativeObjects> m_objects{std::make_shared<Nx2NativeObjects>()};
     KernelHelpers::ServiceContext m_context;
     std::array<Kernel::KEvent*, 2> m_syncpt_events{};
+    std::mutex m_syncpt_mutex;
     Core::Memory::Memory* m_syncpt_memory{};
     u64 m_syncpt_rw{};
     u64 m_syncpt_ro{};

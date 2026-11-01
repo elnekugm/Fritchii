@@ -112,6 +112,8 @@ public:
         }
         if (!delay_fence && committed_flushes == 0 && SkipEmptyFence(trim)) {
             Nx2Profile::Scope skipped_scope{Nx2Profile::Zone::FenceSkipped};
+            gpu.BeginAsyncGuestWrite();
+            SCOPE_EXIT { gpu.EndAsyncGuestWrite(); };
             func();
             rasterizer.InvalidateGPUCache();
             return;
@@ -152,6 +154,8 @@ public:
         }
         QueueFence(new_fence);
         if (!delay_fence) {
+            gpu.BeginAsyncGuestWrite();
+            SCOPE_EXIT { gpu.EndAsyncGuestWrite(); };
             func();
         }
         fences.push(std::move(new_fence));
@@ -318,6 +322,8 @@ private:
                     return;
                 }
             }
+            gpu.BeginAsyncGuestWrite();
+            SCOPE_EXIT { gpu.EndAsyncGuestWrite(); };
             PopAsyncFlushes(pending_flushes.front());
             pending_flushes.pop_front();
             auto operations = std::move(pending_operations.front());

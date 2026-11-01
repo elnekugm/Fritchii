@@ -23,6 +23,7 @@
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "core/core.h"
+#include "core/device_memory.h"
 #include "core/memory.h"
 #include "video_core/nx2_debug_control.h"
 #include "video_core/nx2_profile.h"
@@ -270,7 +271,7 @@ bool DmaPusher::Step() {
     RecordCapture("entry-begin");
     dma_state.dma_get = header.addr;
 
-    if (signal_sync && !synced) {
+    if (signal_sync) {
         std::unique_lock lk(sync_mutex);
         sync_cv.wait(lk, [this]() { return synced.load(); });
         signal_sync = false;
@@ -293,7 +294,13 @@ bool DmaPusher::Step() {
             const auto engine = subchannel_type[dma_state.subchannel];
             const bool kepler_payload = engine == Engines::EngineTypes::KeplerCompute && dma_state.method == ComputeInline && dma_state.non_incrementing;
             const bool macro_payload = engine == Engines::EngineTypes::Maxwell3D && dma_state.method >= MacroRegistersStart;
-            if (kepler_payload || macro_payload) {
+            const auto& split_state = VideoCommon::GpuSplit::Get();
+            const bool front_native_macro = macro_payload &&
+                g_nx2_ampere.load(std::memory_order_relaxed) && split_state.Active() &&
+                split_state.FrontMacros() &&
+                static_cast<Engines::Maxwell3D*>(subchannels[dma_state.subchannel])
+                    ->GetNativeMacroEngine().native_turing;
+            if ((kepler_payload || macro_payload) && !front_native_macro) {
                 const size_t words = std::min<size_t>(dma_state.method_count, header.size);
                 auto* const engine_state = subchannels[dma_state.subchannel];
                 // Parameters continued in an entry of their own can be arguments the GPU wrote
@@ -306,7 +313,12 @@ bool DmaPusher::Step() {
                     return value == nullptr || value[0] != '0';
                 }();
                 bool flushed_parameters = false;
-                if (flush_parameters && words <= 64) {
+                if (flush_parameters && words <= 64 &&
+                    (!g_nx2_ampere.load(std::memory_order_relaxed) ||
+                     Nx2HasGpuWrittenPage(dma_state.dma_get, words * sizeof(u32),
+                                         [&](GPUVAddr page) {
+                                             return memory_manager.GpuToCpuAddress(page);
+                                         }))) {
                     if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
                         split.Drain();
                     }
@@ -572,9 +584,14 @@ static bool RecordParsedEntries() {
 
 size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_t word_offset) {
     RecordCapture("execute-begin", commands, word_offset);
+#ifdef ARCHITECTURE_x86_64
+    const bool trace_bind = !TuringMacroJit::RtDump::Directory().empty();
+#endif
     for (size_t index = 0; index < commands.size();) {
 #ifdef ARCHITECTURE_x86_64
-        TraceBindPacket(*this, commands, index, word_offset);
+        if (trace_bind) {
+            TraceBindPacket(*this, commands, index, word_offset);
+        }
 #endif
         // Data word of methods command
         if (dma_state.method_count && dma_state.non_incrementing) {
@@ -1243,7 +1260,7 @@ void DmaPusher::RecordParsedEntry(const CommandListHeader& header,
 
 void DmaPusher::DumpCurrentEntry(const char* reason) {
     // Entries whose memory changed after they were parsed (the CPU rewrote them meanwhile).
-    for (size_t i = 0; i < std::min(parsed_entry_count, parsed_entries.size()); ++i) {
+    for (size_t i = 0; i < (std::min)(parsed_entry_count, parsed_entries.size()); ++i) {
         const auto& entry = parsed_entries[(parsed_entry_count - 1 - i) % parsed_entries.size()];
         std::vector<u32> words(entry.size);
         memory_manager.ReadBlockUnsafe(entry.address, words.data(), words.size() * sizeof(u32));
@@ -1288,6 +1305,22 @@ void DmaPusher::DumpCurrentEntry(const char* reason) {
         const CommandListHeader& header = lists[i];
         LOG_WARNING(HW_GPU, "  entry {} of {}: addr={:#x} size={:#x}", i, lists.size(),
                     header.addr.Value(), header.size.Value());
+        const auto device = memory_manager.GpuToCpuAddress(header.addr);
+        const auto* gpu_pointer = memory_manager.GetPointer(header.addr);
+        const auto* cpu_pointer = system.ApplicationMemory().GetPointerSilent(header.addr.Value());
+        LOG_WARNING(HW_GPU, "    backing: address_space={} device={:#x} gpu_physical={:#x} "
+                    "same_numeric_cpu_physical={:#x} same_backing={}",
+                    memory_manager.GetID(), device.value_or(0),
+                    gpu_pointer ? system.DeviceMemory().GetRawPhysicalAddr(gpu_pointer) : 0,
+                    cpu_pointer ? system.DeviceMemory().GetRawPhysicalAddr(cpu_pointer) : 0,
+                    gpu_pointer != nullptr && gpu_pointer == cpu_pointer);
+        if (header.size != 0) {
+            const u32 gpu_before = memory_manager.Read<u32>(header.addr);
+            const u32 cpu_value = system.ApplicationMemory().Read32(header.addr.Value());
+            const u32 gpu_after = memory_manager.Read<u32>(header.addr);
+            LOG_WARNING(HW_GPU, "    first word before/after CPU read: gpu={:08x} cpu={:08x} gpu={:08x}",
+                        gpu_before, cpu_value, gpu_after);
+        }
         for (u64 word = 0; word < std::min<u64>(header.size, 0x80); word += 8) {
             std::string gpu_line;
             std::string cpu_line;

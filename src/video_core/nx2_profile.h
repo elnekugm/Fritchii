@@ -127,7 +127,8 @@ inline void Initialize() {
 }
 
 inline bool Enabled() {
-    return g_enabled;
+    static const bool enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
+    return enabled;
 }
 
 inline bool Fine() {

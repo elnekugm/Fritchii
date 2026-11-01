@@ -355,8 +355,10 @@ void Maxwell3D::ConsumeSinkImpl(Core::System& system) {
     const bool skip_same = SkipSameValueWrites();
     const auto process = [&](u32 method, u32 raw, u32 value) {
 #ifdef ARCHITECTURE_x86_64
-        TuringMacroJit::RtDump::Record(this, method, raw, value, static_cast<u32>(control),
-                                     regs.reg_array[method], std::span{regs.reg_array}.subspan(0x200, 0x80));
+        if (TuringMacroJit::RtDump::RecordingConfigured()) {
+            TuringMacroJit::RtDump::Record(this, method, raw, value, static_cast<u32>(control),
+                                         regs.reg_array[method], std::span{regs.reg_array}.subspan(0x200, 0x80));
+        }
 #endif
         if (!skip_same || regs.reg_array[method] != value) {
             ProcessDirtyRegisters(method, value);
@@ -742,9 +744,11 @@ void Maxwell3D::CallMethodSlow(Core::System& system, u32 method, u32 method_argu
     }
     const u32 argument = ProcessShadowRam(method, method_argument);
 #ifdef ARCHITECTURE_x86_64
-    TuringMacroJit::RtDump::Record(this, method, method_argument, argument,
-                                 static_cast<u32>(shadow_state.shadow_ram_control), regs.reg_array[method],
-                                 std::span{regs.reg_array}.subspan(0x200, 0x80));
+    if (TuringMacroJit::RtDump::RecordingConfigured()) {
+        TuringMacroJit::RtDump::Record(this, method, method_argument, argument,
+                                     static_cast<u32>(shadow_state.shadow_ram_control), regs.reg_array[method],
+                                     std::span{regs.reg_array}.subspan(0x200, 0x80));
+    }
 #endif
     // A state register written with the value it holds changes nothing: no dirty flags (they
     // would make the next draw re-check that state), no method processing. Title 1 makes ~6

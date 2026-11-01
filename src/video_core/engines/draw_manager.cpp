@@ -56,11 +56,13 @@ void Maxwell3D::DrawManager::ProcessMethodCall(Maxwell3D& maxwell3d, u32 method,
     case MAXWELL3D_REG_INDEX(index_buffer32_subsequent):
     case MAXWELL3D_REG_INDEX(index_buffer16_subsequent):
     case MAXWELL3D_REG_INDEX(index_buffer8_subsequent):
+        instance_index++;
         draw_state.instance_count++;
-        [[fallthrough]];
+        return DrawIndexSmall(maxwell3d, argument);
     case MAXWELL3D_REG_INDEX(index_buffer32_first):
     case MAXWELL3D_REG_INDEX(index_buffer16_first):
     case MAXWELL3D_REG_INDEX(index_buffer8_first):
+        instance_index = 0;
         return DrawIndexSmall(maxwell3d, argument);
     case MAXWELL3D_REG_INDEX(draw_inline_index):
         SetInlineIndexBuffer(maxwell3d, argument);
@@ -149,6 +151,9 @@ void Maxwell3D::DrawManager::DrawArray(Maxwell3D& maxwell3d, Maxwell3D::Regs::Pr
 }
 
 void Maxwell3D::DrawManager::DrawArrayInstanced(Maxwell3D& maxwell3d, Maxwell3D::Regs::PrimitiveTopology topology, u32 vertex_first, u32 vertex_count, bool subsequent) {
+    DrawDeferred(maxwell3d);
+    draw_state.instance_count = 0;
+    instance_index = subsequent ? instance_index + 1 : 0;
     draw_state.topology = topology;
     draw_state.vertex_buffer.first = vertex_first;
     draw_state.vertex_buffer.count = vertex_count;
@@ -236,9 +241,11 @@ void Maxwell3D::DrawManager::DrawBegin(Maxwell3D& maxwell3d) {
     auto increment_instance_count = maxwell3d.regs.draw.instance_id == Maxwell3D::Regs::Draw::InstanceId::Subsequent;
     if (reset_instance_count) {
         DrawDeferred(maxwell3d);
+        instance_index = 0;
         draw_state.instance_count = 0;
         draw_state.draw_mode = DrawMode::General;
     } else if (increment_instance_count) {
+        instance_index++;
         draw_state.instance_count++;
         draw_state.draw_mode = DrawMode::Instance;
     }
