@@ -1016,6 +1016,9 @@ struct Memory::Impl {
                 }
             }
         });
+        if (unarmed.value_or(false)) {
+            return; // No trap in range: nothing to disarm.
+        }
         // Only once every device alias is flushed (or inside an area flushed after this
         // generation's traps were armed): a disarmed page is read through fastmem without trapping.
         DisarmReadTraps(v_address, size, generation);
