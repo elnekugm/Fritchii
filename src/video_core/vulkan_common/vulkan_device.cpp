@@ -31,6 +31,7 @@
 #include "video_core/nx2_debug_control.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/vulkan_common/nsight_aftermath_tracker.h"
+#include "video_core/vulkan_common/cooperative_matrix.h"
 #include "video_core/vulkan_common/vma.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/nx2_perf.h"
@@ -1407,6 +1408,11 @@ bool Device::GetSuitability(bool requires_swapchain) {
     // Retrieve subgroup properties.
     properties.subgroup_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
     SetNext(next, properties.subgroup_properties);
+    if (extensions.cooperative_matrix) {
+        properties.cooperative_matrix.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_PROPERTIES_NV;
+        SetNext(next, properties.cooperative_matrix);
+    }
 
     // Retrieve relevant extension properties.
     if (extensions.shader_float_controls) {
@@ -1468,6 +1474,24 @@ bool Device::GetSuitability(bool requires_swapchain) {
 
     // Perform the property fetch.
     physical.GetProperties2(properties2);
+
+    if (extensions.cooperative_matrix && dld.vkGetPhysicalDeviceCooperativeMatrixPropertiesNV &&
+        (properties.cooperative_matrix.cooperativeMatrixSupportedStages &
+         VK_SHADER_STAGE_COMPUTE_BIT)) {
+        u32 count{};
+        const auto query = dld.vkGetPhysicalDeviceCooperativeMatrixPropertiesNV;
+        if (query(physical, &count, nullptr) == VK_SUCCESS && count != 0) {
+            std::vector<VkCooperativeMatrixPropertiesNV> matrices(count);
+            for (auto& matrix : matrices) {
+                matrix.sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_NV;
+            }
+            if (query(physical, &count, matrices.data()) == VK_SUCCESS) {
+                matrices.resize(count);
+                cooperative_matrix_shape_supported =
+                    std::ranges::any_of(matrices, IsTensorMatrixShape);
+            }
+        }
+    }
 
     // Store base properties
     properties.properties = properties2.properties;

@@ -51,7 +51,7 @@ class GenericEnvironment : public Shader::Environment {
 public:
     explicit GenericEnvironment() = default;
     explicit GenericEnvironment(Tegra::MemoryManager& gpu_memory_, GPUVAddr program_base_,
-                                u32 start_address_);
+                                u32 start_address_, bool support_cooperative_matrix_ = false);
 
     ~GenericEnvironment() override;
 
@@ -185,7 +185,8 @@ public:
                                  Tegra::MemoryManager& gpu_memory_,
                                  Tegra::Engines::Maxwell3D::Regs::ShaderType program,
                                  GPUVAddr program_base_, u32 start_address_,
-                                 std::shared_ptr<const LoweredNativeCode> lowered_native_ = {});
+                                 std::shared_ptr<const LoweredNativeCode> lowered_native_ = {},
+                                 bool support_cooperative_matrix_ = false);
 
     ~GraphicsEnvironment() override = default;
 
@@ -267,7 +268,8 @@ public:
     explicit ComputeEnvironment(Tegra::Engines::KeplerCompute& kepler_compute_,
                                 Tegra::MemoryManager& gpu_memory_, GPUVAddr program_base_,
                                 u32 start_address_,
-                                std::shared_ptr<const LoweredNativeCode> lowered_native_ = {});
+                                std::shared_ptr<const LoweredNativeCode> lowered_native_ = {},
+                                bool support_cooperative_matrix_ = false);
 
     ~ComputeEnvironment() override = default;
 

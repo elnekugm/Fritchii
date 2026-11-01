@@ -181,8 +181,9 @@ static void DumpImpl(u64 /*pipeline_hash*/, u64 shader_hash, std::span<const u64
 }
 
 GenericEnvironment::GenericEnvironment(Tegra::MemoryManager& gpu_memory_, GPUVAddr program_base_,
-                                       u32 start_address_)
-    : gpu_memory{&gpu_memory_}, program_base{program_base_} {
+                                       u32 start_address_, bool support_cooperative_matrix_)
+    : gpu_memory{&gpu_memory_}, program_base{program_base_},
+      support_cooperative_matrix{support_cooperative_matrix_} {
     start_address = start_address_;
 }
 
@@ -891,8 +892,10 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
                                          Tegra::MemoryManager& gpu_memory_,
                                          Maxwell::ShaderType program, GPUVAddr program_base_,
                                          u32 start_address_,
-                                         std::shared_ptr<const LoweredNativeCode> lowered_native_)
-    : GenericEnvironment{gpu_memory_, program_base_, start_address_}, maxwell3d{&maxwell3d_} {
+                                         std::shared_ptr<const LoweredNativeCode> lowered_native_,
+                                         bool support_cooperative_matrix_)
+    : GenericEnvironment{gpu_memory_, program_base_, start_address_, support_cooperative_matrix_},
+      maxwell3d{&maxwell3d_} {
     gpu_memory->ReadBlock(program_base + start_address, &sph, sizeof(sph));
     initial_offset = sizeof(sph);
     texture_bound = maxwell3d->regs.bindless_texture_const_buffer_slot;
@@ -1351,9 +1354,11 @@ GraphicsEnvironment::LiveCheck GraphicsEnvironment::CheckAgainstLive() {
 ComputeEnvironment::ComputeEnvironment(Tegra::Engines::KeplerCompute& kepler_compute_,
                                        Tegra::MemoryManager& gpu_memory_, GPUVAddr program_base_,
                                        u32 start_address_,
-                                       std::shared_ptr<const LoweredNativeCode> lowered_native_)
-    : GenericEnvironment{gpu_memory_, program_base_, start_address_}, kepler_compute{
-                                                                          &kepler_compute_} {
+                                       std::shared_ptr<const LoweredNativeCode> lowered_native_,
+                                       bool support_cooperative_matrix_)
+    : GenericEnvironment{gpu_memory_, program_base_, start_address_, support_cooperative_matrix_},
+      kepler_compute{
+                                                                      &kepler_compute_} {
     const auto& qmd{kepler_compute->launch_description};
     stage = Shader::Stage::Compute;
     local_memory_size = qmd.local_pos_alloc + qmd.local_crs_alloc;

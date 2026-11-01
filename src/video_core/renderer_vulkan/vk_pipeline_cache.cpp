@@ -764,8 +764,12 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
               "VkPipelineBuilder", {}, Common::ThreadPlacement::Background),
       serialization_thread(1, "VkPipelineSerialization", {},
                            Common::ThreadPlacement::Background),
-      translation_workers(num_translation_threads, "VkPipelineTranslator", {},
-                          Common::ThreadPlacement::Background) {
+    translation_workers(num_translation_threads, "VkPipelineTranslator", {},
+                        Common::ThreadPlacement::Background) {
+    const char* tensor_mode = std::getenv("EDEN_NX2_TENSOR");
+    const bool tensor_enabled = tensor_mode && std::string_view{tensor_mode} == "fast" &&
+                                device.IsExtCooperativeMatrixSupported();
+    SetCooperativeMatrixSupported(tensor_enabled);
     if (use_async_translation) {
         LOG_INFO(Render_Vulkan, "Native graphics pipelines are translated on {} worker threads",
                  num_translation_threads);
@@ -882,6 +886,9 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .has_broken_spirv_subgroup_shuffle = driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY,
         .has_broken_spirv_fragment_shuffle = driver_id == VK_DRIVER_ID_AMD_PROPRIETARY,
         .max_subgroup_size = device.GetMaxSubgroupSize(),
+        .support_cooperative_matrix = tensor_enabled,
+        .max_compute_shared_memory_size = device.GetMaxComputeSharedMemorySize(),
+        .max_tensor_workgroup_size = device.GetMaxTensorWorkgroupSize(),
         .has_broken_robust =
             device.IsNvidia() && device.GetNvidiaArch() <= NvidiaArchitecture::Arch_Pascal,
         .min_ssbo_alignment = device.GetStorageBufferAlignment(),
@@ -2738,6 +2745,10 @@ ComputePipeline* PipelineCache::CurrentComputePipeline() {
         .shared_memory_size = qmd.shared_alloc,
         .workgroup_size{qmd.block_dim_x, qmd.block_dim_y, qmd.block_dim_z},
     };
+    if (const auto rejected = rejected_tensor_pipelines.find(key);
+        rejected != rejected_tensor_pipelines.end()) {
+        std::rethrow_exception(rejected->second);
+    }
     const auto [pair, is_new]{compute_cache.try_emplace(key)};
     auto& entry{pair->second};
     if (is_new) {
@@ -7523,7 +7534,7 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(const ComputePipe
     const GPUVAddr program_base{kepler_compute->regs.code_loc.Address()};
     const auto& qmd{kepler_compute->launch_description};
     ComputeEnvironment env{*kepler_compute, *gpu_memory, program_base, qmd.program_start,
-                           shader->lowered_native};
+                           shader->lowered_native, profile.support_cooperative_matrix};
     env.SetCachedSize(shader->size_bytes);
     env.KeepStoragePointers(keep_pointers);
 
@@ -7616,21 +7627,26 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
     device.SaveShader(code);
     vk::ShaderModule spv_module{BuildShader(device, code)};
 
-    // Text log + .spv dump. Same split as the graphics path.
-    const bool should_log = GPU::Logging::IsActive();
-    const bool should_dump = Settings::values.gpu_log_shader_dumps.GetValue();
-    if (should_log || should_dump) {
-        const std::string shader_name = fmt::format("shader_{:016x}_compute", key.unique_hash);
-        if (should_log) {
-            const std::string shader_info = fmt::format("SPIR-V size: {} bytes, hash: {:016x}",
-                code.size() * sizeof(u32), key.unique_hash);
-            GPU::Logging::GPULogger::GetInstance().LogShaderCompilation(shader_name, shader_info);
-        }
-        if (should_dump) {
-            GPU::Logging::DumpSpirvShader(key.unique_hash,
-                                          std::span<const u32>(code.data(), code.size()));
+    // Text log + .spv dump. Done before pipeline build so a driver crash still leaves the module.
+    {
+        const bool should_log = GPU::Logging::IsActive();
+        const bool should_dump = Settings::values.gpu_log_shader_dumps.GetValue();
+        if (should_log || should_dump) {
+            const std::string shader_name = fmt::format("shader_{:016x}_compute", key.unique_hash);
+            if (should_log) {
+                const std::string shader_info = fmt::format("SPIR-V size: {} bytes, hash: {:016x}",
+                    code.size() * sizeof(u32), key.unique_hash);
+                GPU::Logging::GPULogger::GetInstance().LogShaderCompilation(shader_name, shader_info);
+            }
+            if (should_dump) {
+                GPU::Logging::DumpSpirvShader(key.unique_hash,
+                                              std::span<const u32>(code.data(), code.size()));
+            }
         }
     }
+
+    device.SaveShader(code);
+    vk::ShaderModule spv_module{BuildShader(device, code)};
 
     if (device.HasDebuggingToolAttached()) {
         const auto name{fmt::format("Shader {:016x}", key.unique_hash)};
@@ -7657,6 +7673,12 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
             .mapped_pointers =
                 env.IsNativeProgram() ? env.MappedStoragePointerKeys() : std::vector<u64>{}};
 
+} catch (const Shader::TensorRejected& exception) {
+    if (build_in_parallel) {
+        throw;
+    }
+    LOG_WARNING(Render_Vulkan, "Skipping cached tensor shader: {}", exception.what());
+    return nullptr;
 } catch (const Shader::Exception& exception) {
     if (warm) {
         // A warm-up guess the translation rejects: counted by the warm-up, logged at its end.

@@ -170,6 +170,7 @@ add_library(shader_recompiler STATIC
     frontend/maxwell/translate/impl/video_set_predicate.cpp
     frontend/maxwell/translate/impl/vote.cpp
     frontend/maxwell/translate/impl/warp_shuffle.cpp
+    frontend/maxwell/translate/impl/tensor_mul_add.cpp
     frontend/maxwell/translate/translate.cpp
     frontend/maxwell/translate/translate.h
     frontend/maxwell/translate_program.cpp

@@ -416,9 +416,6 @@ public:
 
     [[nodiscard]] F32 DPdyCoarse(const F32& a);
 
-private:
-    IR::Block::iterator insertion_point;
-
     template <typename T = Value, typename... Args>
     T Inst(Opcode op, Args... args) {
         auto it{block->PrependNewInst(insertion_point, op, {Value{args}...})};
@@ -441,6 +438,9 @@ private:
         auto it{block->PrependNewInst(insertion_point, op, {Value{args}...}, raw_flags)};
         return T{Value{&*it}};
     }
+
+private:
+    IR::Block::iterator insertion_point;
 };
 
 } // namespace Shader::IR
