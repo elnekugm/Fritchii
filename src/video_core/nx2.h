@@ -30,6 +30,9 @@ inline std::atomic<bool> g_nx2_ampere{false};
 // reads the command list. One bit per 4 KiB of the 36-bit device address space (2 MiB).
 inline constexpr u64 Nx2WrittenPageBits = 12;
 inline std::array<std::atomic<u64>, (u64{1} << (36 - Nx2WrittenPageBits)) / 64> g_nx2_gpu_written_pages{};
+/// Counts the times pages were marked GPU-written for the first time: it stops moving once a
+/// title has written all the memory it reuses (Nx2CheckCommandPagesFirst).
+inline std::atomic<u64> g_nx2_gpu_written_generation{};
 
 /// Bumped when a page is marked GPU-written for the first time (read by nothing since
 /// EDEN_NX2_LIST_FAST went; a diagnostic count).

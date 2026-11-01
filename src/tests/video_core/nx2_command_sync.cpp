@@ -84,3 +84,19 @@ TEST_CASE("Command synchronization skips clean-page flushes but still drains que
     }
     REQUIRE(drains == 1);
 }
+
+TEST_CASE("Only a page's first GPU write moves the written generation",
+          "[video_core][nx2_command_sync]") {
+    Tegra::Nx2ClearGpuWrittenPages();
+    const u64 before = Tegra::g_nx2_gpu_written_generation.load();
+    Tegra::Nx2MarkGpuWritten(32 * Page, 2 * Page);
+    const u64 after_first = Tegra::g_nx2_gpu_written_generation.load();
+    REQUIRE(after_first > before);
+    // The same pages again, and a part of them: nothing new.
+    Tegra::Nx2MarkGpuWritten(32 * Page, 2 * Page);
+    Tegra::Nx2MarkGpuWritten(33 * Page + 16, 64);
+    REQUIRE(Tegra::g_nx2_gpu_written_generation.load() == after_first);
+    // A page next to them is new.
+    Tegra::Nx2MarkGpuWritten(34 * Page, 4);
+    REQUIRE(Tegra::g_nx2_gpu_written_generation.load() > after_first);
+}
