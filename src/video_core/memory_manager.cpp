@@ -65,6 +65,8 @@ MemoryManager::MemoryManager(Core::System& system_, MaxwellDeviceMemoryManager& 
     big_entries.resize(big_page_table_size / 32, 0);
     big_page_continuous.resize(big_page_table_size / continuous_bits, 0);
     entries.resize(page_table_size / 32, 0);
+    // A new address space at the address of a destroyed one must not reuse its kinds.
+    kind_generation.fetch_add(1, std::memory_order_release);
 }
 
 MemoryManager::MemoryManager(Core::System& system_, u64 address_space_bits_, GPUVAddr split_address_, u64 big_page_bits_, u64 page_bits_)
@@ -75,7 +77,9 @@ void MemoryManager::SetNativeSyncpointShim(GPUVAddr address) {
     native_syncpoint_shim.store(address, std::memory_order_release);
 }
 
-MemoryManager::~MemoryManager() = default;
+MemoryManager::~MemoryManager() {
+    kind_generation.fetch_add(1, std::memory_order_release);
+}
 
 MemoryManager::EntryType MemoryManager::GetEntry(size_t position, bool is_big_page) const {
     if (is_big_page) {
@@ -166,6 +170,7 @@ GPUVAddr MemoryManager::PageTableOp(GPUVAddr gpu_addr, [[maybe_unused]] DAddr de
     {
         std::unique_lock<std::mutex> lock(guard);
         kind_map.Map(gpu_addr, gpu_addr + size, kind);
+        kind_generation.fetch_add(1, std::memory_order_release);
     }
     if (VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::Bounds)) {
         UpdateContinuousRuns(gpu_addr, size);
@@ -228,6 +233,7 @@ GPUVAddr MemoryManager::BigPageTableOp(GPUVAddr gpu_addr, [[maybe_unused]] DAddr
     {
         std::unique_lock<std::mutex> lock(guard);
         kind_map.Map(gpu_addr, gpu_addr + size, kind);
+        kind_generation.fetch_add(1, std::memory_order_release);
     }
     if (VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::Bounds)) {
         UpdateContinuousRuns(gpu_addr, size);
@@ -995,7 +1001,19 @@ size_t MemoryManager::GetMemoryLayoutSize(GPUVAddr gpu_addr,
 
 size_t MemoryManager::GetMemoryLayoutSizeUncached(GPUVAddr gpu_addr) const {
     std::unique_lock<std::mutex> lock(guard);
-    return kind_map.GetContinuousSizeFrom(gpu_addr);
+    const auto key = static_cast<s64>(gpu_addr);
+    if (key < 0) {
+        return 0;
+    }
+    const auto segment = kind_map.GetSegment(key);
+    cached = {
+        .owner = this,
+        .generation = kind_generation.load(std::memory_order_relaxed),
+        .start = static_cast<GPUVAddr>(std::max<s64>(segment.start, 0)),
+        .end = static_cast<GPUVAddr>(segment.end),
+        .null = segment.value == PTEKind::INVALID,
+    };
+    return cached.null ? 0 : static_cast<size_t>(cached.end - gpu_addr);
 }
 
 void MemoryManager::InvalidateRegion(GPUVAddr gpu_addr, size_t size,
