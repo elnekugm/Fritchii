@@ -345,6 +345,11 @@ private:
         }
     }
 
+    /// Whether every fence made so far has been released, its operations included.
+    bool NoFenceInFlight() const {
+        return fences_in_flight.load(std::memory_order_acquire) == 0;
+    }
+
     void ReleaseThreadFunc(std::stop_token stop_token) {
         Common::SetCurrentThreadName("GPUFencingThread");
         Common::SetCurrentThreadPriority(Common::ThreadPriority::High);
@@ -443,6 +448,9 @@ private:
                     KeepSpareOperations(released.operations);
                 }
             }
+            // Only now are these fences done: their operations ran (SignalFence's fast path for
+            // delayed fences must not overtake them).
+            fences_in_flight.fetch_sub(batch.size(), std::memory_order_release);
             {
                 std::unique_lock lock(ring_guard);
                 for (Released& released : batch) {
