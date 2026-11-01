@@ -96,6 +96,11 @@ struct IPlatformServiceManager::Impl {
     Kernel::KSharedMemory* builtin_font_memory{};
     /// Backing memory for the shared font data
     std::array<u8, SHARED_FONT_MEM_SIZE> shared_font;
+    /// The plain copies get their own shared memory: next to firmware fonts, which fill most of
+    /// the 17 MiB BFTTF block, they did not fit and Switch 2 games waited for a font forever.
+    std::vector<u8> builtin_font;
+    Kernel::KSharedMemory* builtin_font_mem{};
+    std::size_t builtin_font_mem_size{};
 };
 
 IPlatformServiceManager::IPlatformServiceManager(Core::System& system_, const char* service_name_)
