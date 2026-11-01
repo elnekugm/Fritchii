@@ -1788,39 +1788,13 @@ private:
         if (!Settings::values.use_speed_limit.GetValue() || Settings::SpeedLimit() == 0) {
             return;
         }
-        static const u32 forced_interval = [] {
-            const char* value = std::getenv("EDEN_NX2_SWAP_INTERVAL");
-            return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
-        }();
-        // Mario Kart World flips between intervals 1 and 2 every few frames (its own frame timing
-        // on a VRR display): held to two vblanks on each 2, it fell from ~40 to 20-30 fps. Honour
-        // an interval above 1 only once the game has kept it for StableSwapPresents presents.
-        constexpr u32 StableSwapPresents = 120;
-        if (timing != std::exchange(m_swap_word, timing)) {
-            m_swap_stable = 0;
-            if (m_swap_changes < 32) {
-                ++m_swap_changes;
-                LOG_INFO(Service, "nx2:vi2 present #{} swap interval {} (word 12 = {:#x})",
-                         m_presents, timing >> 16, timing);
-            }
-        } else if (m_swap_stable < StableSwapPresents) {
-            ++m_swap_stable;
-        }
-        const u32 requested_interval = std::clamp<u32>(timing >> 16, 1, 4);
-        const u32 swap_interval = forced_interval != 0                    ? forced_interval
-                                  : m_swap_stable >= StableSwapPresents ? requested_interval
-                                                                        : 1;
-        const u32 refresh_rate = (timing & 0xffff) >= 30 && (timing & 0xffff) <= 240 ? timing & 0xffff : 60;
-        // EDEN_NX2_PRESENT_HZ=<rate> (the 30FPS PATCH): hold presents to this rate instead.
+        // EDEN_NX2_PRESENT_HZ=<rate>: hold presents to this rate instead of 60.
         static const long long present_hz = [] {
             const char* text = std::getenv("EDEN_NX2_PRESENT_HZ");
-            return text ? (std::max)(std::strtoll(text, nullptr, 10), 1LL) : 0LL;
+            return text ? (std::max)(std::strtoll(text, nullptr, 10), 1LL) : 60LL;
         }();
         const auto interval =
-            present_hz != 0
-                ? std::chrono::nanoseconds{100'000'000'000LL / present_hz / Settings::SpeedLimit()}
-                : std::chrono::nanoseconds{100'000'000'000LL * swap_interval / refresh_rate /
-                                           Settings::SpeedLimit()};
+            std::chrono::nanoseconds{100'000'000'000LL / present_hz / Settings::SpeedLimit()};
         const auto now = std::chrono::steady_clock::now();
         // EDEN_NX2_VBLANK_ALIGN=1: a late frame waits for the next vblank, as on a fixed-rate
         // console display. Off: the SDK now reports VRR (nso.cpp), and title 4 then times its own
