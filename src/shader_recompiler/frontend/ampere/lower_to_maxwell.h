@@ -682,6 +682,16 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
             emit(0x5c98000000000000ULL | predicate | (dest + 1) | (u64{15} << 39) | (u64{251} << 20));
             break;
         }
+        case 0x312: { // I2F.U64.F32.RN Rd, Rs: a 64-bit unsigned source pair (verified with turingas)
+            const u32 source = insn.Bits(32, 8);
+            // Bits 78-79 are the rounding mode, as Maxwell I2F's bits 39-40.
+            if ((insn.words[2] & ~0xc000U) != 0x00301000U || (insn.words[1] & 0xffffff00U) ||
+                (source & 1) || source >= 246)
+                return fail(index, "native integer-to-float conversion mode");
+            emit(base(0x5cb8000000000000ULL) | (u64{2} << 8) | (u64{3} << 10) | (u64{source} << 20) |
+                 (u64{insn.Bits(78, 2)} << 39));
+            break;
+        }
         case 0x304: { // F2F.F16.F32, scalar round-to-nearest conversion.
             if (insn.words[2] != 0x00200800 || insn.Bits(24, 8) ||
                 (insn.words[1] & ~0xc00000ffU))
@@ -919,9 +929,37 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
                      (u64{insn.Bits(64, 8)} << 20));
                 break;
             }
+            if (insn.Bits(24, 8) == 255 && insn.Bits(32, 8) == 255) {
+                // Both factors are RZ, so only the addend survives: a move with IMAD modifiers.
+                emit(0x5c10000000000000ULL | predicate | dest | (u64{255} << 8) |
+                     (u64{insn.Bits(64, 8)} << 20));
+                break;
+            }
             if ((insn.words[2] & ~0x2ffU) != 0x078e0000 || (insn.words[1] & ~0xffU))
                 return fail(index, "native integer register multiply mode");
             multiply_low(insn.Bits(24, 8), insn.Bits(32, 8), insn.Bits(64, 8), false);
+            break;
+        }
+        case 0x225: { // IMAD.WIDE.U32, register multiplier and 64-bit addend pair
+            const u32 a = insn.Bits(24, 8), b = insn.Bits(32, 8), c = insn.Bits(64, 8);
+            const u32 c_high = c == 255 ? 255 : c + 1;
+            // ponytail: the operand modifier byte (bits 72-79) is not checked
+            if ((insn.words[2] & 0xff00ff00U) != 0x07000000U || (insn.words[1] & ~0xffU) ||
+                (dest & 1) || dest >= 248 || (c != 255 && ((c & 1) || c >= 248)) || dest == c_high)
+                return fail(index, "native wide integer multiply mode");
+            // High word with the IMAD.HI base-2^16 sequence, then the low word, into R253/R252.
+            xmad(250, a, b, 255, false, false, 0, false);
+            xmad(251, a, b, 250, true, false, 2, false);
+            xmad(250, a, b, 251, false, true, 1, false);
+            xmad(252, a, b, 251, true, true, 2, false);
+            emit(0x3828000000000000ULL | predicate | 250 | (u64{250} << 8) | (u64{16} << 20));
+            emit(0x5c10000000000000ULL | predicate | 253 | (u64{250} << 8) | (u64{252} << 20));
+            xmad(250, a, b, 255, false, false, 0, false);
+            xmad(251, a, b, 255, true, false, 0, false);
+            xmad(251, a, b, 251, false, true, 0, false);
+            emit(0x5c18000000000000ULL | predicate | 252 | (u64{251} << 8) | (u64{250} << 20) | (u64{16} << 39));
+            emit(0x5c10000000000000ULL | predicate | dest | (u64{252} << 8) | (u64{c} << 20) | (u64{1} << 47));
+            emit(0x5c10000000000000ULL | predicate | (dest + 1) | (u64{253} << 8) | (u64{c_high} << 20) | (u64{1} << 43));
             break;
         }
         case 0x2a5: { // UIMAD.WIDE.U32 UR(d):UR(d+1) = URa * URb + URc:UR(c+1)
@@ -3429,7 +3467,7 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
                  (u64{insn.words[1] << 8} << 20) | (u64{insn.Bits(73, 1)} << 48));
             break;
         }
-        case 0x226: { // IDP.4A.S8.S8 Rd, Ra, Rb, Rc: the signed byte dot product plus Rc
+        case 0x226: case 0x227: { // IDP.4A.S8.S8 Rd, Ra, Rb, Rc: the signed byte dot product plus Rc
             const u32 a = insn.Bits(24, 8), b = insn.Bits(32, 8), c = insn.Bits(64, 8);
             if (insn.Bits(72, 4) || dest >= 246 || a >= 246 || b >= 246)
                 return fail(index, "native dot product mode");
@@ -3950,7 +3988,10 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
                 const bool carry_in = insn.Bits(74, 1) != 0;
                 const u32 carry_out = insn.Bits(81, 3);
                 const u32 a = insn.Bits(24, 8);
-                if ((carry_in && carry_out != 7) || (opcode == 0x210 && (insn.words[1] & ~0xffU)))
+                if ((carry_in && carry_out != 7) || (opcode == 0x210 && (insn.words[1] & ~(0xffU | 0x80000000U))) ||
+                    (opcode == 0xa10 && !valid_cbuf()) ||
+                    (rewritten_uniform && carry_out != 7 && carry_out > 1) ||
+                    (rewritten_uniform && carry_in && insn.Bits(87, 3) > 1 && insn.Bits(87, 3) != 7))
                     return fail(index, "native integer carry mode");
                 if (opcode == 0x810) {
                     emit(0x1c00000000000000ULL | predicate | 250 | (u64{a} << 8) | (u64{insn.words[1]} << 20));
@@ -3990,59 +4031,20 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
                 emit(base(0x5c10000000000000ULL) | (u64{250} << 8) | (u64{251} << 20));
                 break;
             }
-            // Three sources, negations or two carries: the sum builds up in R253 (.CC) with the carry
-            // count in R254 (.X). Pu/Pv (bits 81/84) are set when the count reaches 1/2, and IADD3.X
-            // adds both carry-ins (bits 87, 77). A negated source is ~x, plus 1 unless extended.
-            const bool extended = insn.Bits(74, 1) != 0;
-            const bool negate_a = insn.Bits(72, 1), negate_b = opcode != 0x810 && insn.Bits(63, 1), negate_c = insn.Bits(75, 1);
-            if ((extended || insn.Bits(81, 6) != 0x3f) &&
-                (insn.Bits(64, 8) != 255 || insn.Bits(84, 3) != 7 || negate_a || negate_b || negate_c ||
-                 (extended && insn.Bits(77, 4) != 15))) {
-                const u32 first_output = insn.Bits(81, 3), second_output = insn.Bits(84, 3);
-                if (rewritten_uniform || guarded_uniform || insn.Bits(73, 1) || insn.Bits(76, 1) ||
-                    (first_output != 7 && first_output == second_output) ||
-                    (!extended && (insn.Bits(77, 4) != 15 || insn.Bits(87, 4) != 15)) ||
-                    (opcode == 0x210 && (insn.words[1] & ~0x800000ffU)) || (opcode == 0xa10 && insn.Bits(62, 1)) ||
-                    (opcode == 0xc10 && (insn.words[1] & ~0x8000003fU)))
-                    return fail(index, "native three-input carry mode");
-                u32 a = insn.Bits(24, 8), b = operand(1, false), c = insn.Bits(64, 8);
-                const auto invert = [&](u32& source, u32 target) {
-                    emit(0x0400000000000000ULL | predicate | target | (u64{source} << 8) | (u64{0xffffffffU} << 20) | (u64{2} << 53));
-                    source = target;
-                };
-                if (negate_a) invert(a, 250);
-                if (negate_b) invert(b, 251);
-                if (negate_c) invert(c, 252);
-                const auto accumulate = [&](u32 source) {
-                    emit(0x5c10000000000000ULL | predicate | 253 | (u64{253} << 8) | (u64{source} << 20) | (u64{1} << 47));
-                    emit(0x5c10000000000000ULL | predicate | 254 | (u64{254} << 8) | (u64{255} << 20) | (u64{1} << 43));
-                };
-                emit(0x5c10000000000000ULL | predicate | 253 | (u64{a} << 8) | (u64{b} << 20) | (u64{1} << 47));
-                emit(0x5c10000000000000ULL | predicate | 254 | (u64{255} << 8) | (u64{255} << 20) | (u64{1} << 43));
-                accumulate(c);
-                if (extended) {
-                    for (const u32 carry : {insn.Bits(87, 4), insn.Bits(77, 4)}) {
-                        if (carry == 15) continue;
-                        mov_imm(250, 1);
-                        if (carry != 7)
-                            emit(0x5ca0000000000000ULL | predicate | 250 | (u64{250} << 8) | (u64{255} << 20) |
-                                 (u64{carry & 7} << 39) | (u64{carry >> 3} << 42));
-                        accumulate(250);
-                    }
-                } else if (const u32 ones = u32{negate_a} + u32{negate_b} + u32{negate_c}) {
-                    mov_imm(250, ones);
-                    accumulate(250);
-                }
-                if (dest != 255) emit(base(0x5c98000000000000ULL) | (u64{253} << 20) | (u64{15} << 39));
-                // An output that is also the guard predicate is written last.
-                const bool guard_first = (native_predicate & 7) != 7 && first_output == (native_predicate & 7);
-                for (const u32 output : {guard_first ? 1U : 0U, guard_first ? 0U : 1U}) {
-                    const u32 target = output ? second_output : first_output;
-                    if (target == 7) continue;
-                    mov_imm(250, output + 1);
-                    emit(0x5b60000000000000ULL | predicate | 7 | (u64{target} << 3) | (u64{254} << 8) |
-                         (u64{250} << 20) | (u64{7} << 39) | (u64{6} << 49));
-                }
+            if (!(insn.words[1] & ~(opcode == 0x210 ? 0xffU | 0x80000000U : 0xffffffffU)) &&
+                !insn.Bits(72, 2) &&
+                insn.Bits(81, 3) != 7 && !insn.Bits(74, 1) && insn.Bits(77, 4) == 15 &&
+                insn.Bits(87, 4) == 15) {
+                // IADD3 R, P[, Q], a, b, [-]c: the carry of a + b in P and of that + c in Q.
+                const u32 a = insn.Bits(24, 8), c = insn.Bits(64, 8);
+                const u32 b = opcode == 0x210 ? insn.Bits(32, 8) : operand(1, false);
+                emit(0x5c10000000000000ULL | predicate | 250 | (u64{a} << 8) | (u64{b} << 20));
+                unsigned_less(insn.Bits(81, 3), 250, a);
+                emit(0x5c10000000000000ULL | predicate | 251 | (u64{255} << 8) | (u64{c} << 20) |
+                     (u64{insn.Bits(75, 1)} << 48));
+                emit(0x5c10000000000000ULL | predicate | 252 | (u64{250} << 8) | (u64{251} << 20));
+                if (insn.Bits(84, 3) != 7) unsigned_less(insn.Bits(84, 3), 252, 250);
+                emit(base(0x5c98000000000000ULL) | (u64{15} << 39) | (u64{252} << 20));
                 break;
             }
             if ((opcode == 0xa10 || opcode == 0xc10) && insn.Bits(81, 3) != 7) { // cbuf or uniform b
