@@ -334,7 +334,12 @@ bool DmaPusher::Step() {
                         }
                     }
                 }
-                if (flushed_parameters) {
+                // The compute class only reads current_dirty for the older class's launch, which
+                // its native (QMD) mode never reaches: no need to wait for the back to compute it.
+                const bool native_compute =
+                    kepler_payload &&
+                    static_cast<Engines::KeplerCompute*>(engine_state)->IsNativeMode();
+                if (flushed_parameters || native_compute) {
                     engine_state->current_dirty = false;
                 } else if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
                     // The caches behind IsMemoryDirty belong to the split's back thread.
