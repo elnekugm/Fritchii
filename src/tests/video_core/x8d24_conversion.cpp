@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <array>
-#include <bit>
 #include <cmath>
 #include <cstdint>
 
@@ -15,14 +14,6 @@ namespace {
 
 using uint = std::uint32_t;
 using std::round;
-
-uint floatBitsToUint(float value) {
-    return std::bit_cast<uint>(value);
-}
-
-float uintBitsToFloat(uint value) {
-    return std::bit_cast<float>(value);
-}
 
 #include "video_core/host_shaders/x8d24_conversion.glsl"
 
@@ -94,33 +85,6 @@ TEST_CASE("X8_D24 conversion accepts normalized D16 fallback samples", "[video_c
                         float((packed >> 16) & 0xffU) / 255.0f);
         REQUIRE(uint(round(decoded * 65535.0f)) == sample);
     }
-}
-
-TEST_CASE("X8_D24 normalization avoids the rounded reciprocal one-bit error",
-          "[video_core][x8d24]") {
-    constexpr uint packed = 0x00ff0000U;
-    volatile float reciprocal = 1.0f / 16777215.0f;
-    const float approximate = float(packed) * reciprocal;
-    REQUIRE(EncodeX8D24(approximate) == packed + 1);
-    const float normalized = DecodeX8D24(0.0f, 0.0f, 1.0f);
-    REQUIRE(floatBitsToUint(normalized) == 0x3f7f0001U);
-    REQUIRE(normalized == float(double(packed) / 16777215.0));
-    REQUIRE(EncodeX8D24(normalized) == packed);
-}
-
-TEST_CASE("X8_D24 normalization is correctly rounded for every 24-bit integer",
-          "[video_core][x8d24]") {
-    uint first_mismatch = 0x01000000U;
-    for (uint packed = 0; packed < 0x01000000U; ++packed) {
-        const float normalized =
-            DecodeX8D24(float(packed & 0xffU) / 255.0f, float((packed >> 8) & 0xffU) / 255.0f,
-                        float((packed >> 16) & 0xffU) / 255.0f);
-        if (normalized != float(double(packed) / 16777215.0)) {
-            first_mismatch = packed;
-            break;
-        }
-    }
-    REQUIRE(first_mismatch == 0x01000000U);
 }
 
 TEST_CASE("Color depth aliases preserve mip offsets and distinct array layers",

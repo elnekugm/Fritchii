@@ -102,7 +102,7 @@ Getting a picture needs every one of these; the display buffer (0x91f41000, 3840
 | reserved GPR as a source | `211 f73b7211 00000000 078f18ff`, `831 d88d7831 3a003a00 0000008d` | the program's own operands live in R216-R254, where the lowering keeps uniforms and scratch: needs register remapping |
 | MUFU operation 9 | `308 000c7308 0000000c 00002400` | SM86 MUFU op 9 |
 | LDGSTS.E.BYPASS.128 | `fae 020d7fae 00000000 0e101c48` | LDG.128 + STS.128 split |
-| F2I variant 0x312 | `312 00027312 00000002 00301000` | opcode 0x312 has no case yet |
+| I2F variant 0x312 | `312 00027312 00000002 00301000` | opcode 0x312 has no case yet |
 | CALL with another link setup | `944 00007944 00002d00 03c00000` | the preceding move is not the `0x7802` form the lowering expects |
 
 Done since the last table: IADD3 with one or two carry predicates and a third-source carry-in, LEA.HI.X with a constant base, LEA.HI with a uniform base, HFMA2.RELU with a predicate output, USHF over UR0-UR21, IDP.4A.S8.S8.
@@ -111,7 +111,7 @@ Done since the last table: IADD3 with one or two carry predicates and a third-so
 
 | Shader | Instruction | What is missing |
 |---|---|---|
-| 0x19a2a1d000 | `312 00027312 00000002 00301000` | opcode 0x312 (F2I sibling of 0x311) has no case |
+| 0x19a2a1d000 | `312 00027312 00000002 00301000` | opcode 0x312 (I2F, the inverse direction of 0x311) has no case |
 | 0x11504cb000 | `fae 020d7fae 00000000 0e101c48` | LDGSTS.E.BYPASS.128 needs a LDG.128 + STS.128 split |
 | 0x1150686000 | `308 000c7308 0000000c 00002400` | MUFU operation 9 |
 | 0x1150562000 | `831 d88d7831 3a003a00 0000008d` | operand in R216-R254: needs register remapping |

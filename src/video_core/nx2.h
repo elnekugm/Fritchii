@@ -230,6 +230,18 @@ inline std::atomic<u64> g_nx2_guest_reads_handed{};
     return false;
 }
 
+template <typename Drain, typename Translate, typename Flush>
+void Nx2SynchronizeGpuWrittenCommands(GPUVAddr address, size_t size, Drain&& drain,
+                                     Translate&& translate, Flush&& flush) {
+    if (size == 0) return;
+    drain();
+    if (Nx2HasGpuWrittenPage(address, size, translate)) flush();
+}
+
+// NVN2 queues release their progress values into the second page of a two-page GPU-accessible
+// region and GPU acquires read the same offsets in the first page (the CPU polls the second).
+// Something on the console copies one into the other; until that is known, the puller mirrors
+// releases that land in a second page. Every queue has such a region, so keep a small table.
 inline constexpr size_t Nx2MaxSemaphoreRegions = 32;
 inline std::array<std::atomic<u64>, Nx2MaxSemaphoreRegions> g_nx2_semaphore_regions{}; // starts
 

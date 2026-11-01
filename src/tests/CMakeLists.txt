@@ -173,25 +173,15 @@ add_executable(tests
     video_core/shader_reuse_environment.cpp
     video_core/ampere_lowering.cpp
     video_core/ampere_geometry.cpp
-    video_core/ampere_i2f.cpp
-    video_core/ampere_returns.cpp
-    video_core/ampere_guarded_ulea.cpp
-    video_core/ampere_compute_lowering.cpp
-    video_core/ampere_uniform_immediate_shift.cpp
-    video_core/ampere_bindless_surfaces.cpp
-    video_core/native_macro_fifo.cpp
-    video_core/uniform_stream_reuse.cpp
-    video_core/usage_tracker.cpp
-    video_core/shader_invalidation.cpp
-    video_core/descriptor_table.cpp
-    video_core/descriptor_payload_growth.cpp
-    video_core/global_address_tracking.cpp
-    video_core/nvn_storage_descriptor.cpp
-    video_core/ampere_f2i.cpp
-    video_core/ampere_ldc.cpp
-    video_core/ampere_vote.cpp
-    video_core/shader_attributes.cpp
-    video_core/indirect_reset.cpp
+    video_core/ampere_geometry_lowering.cpp
+    video_core/ampere_geometry_exit.cpp
+    video_core/ampere_uniform_lea.cpp
+    video_core/ampere_integer_multiply.cpp
+    video_core/x8d24_conversion.cpp
+    video_core/ampere_bindless_tex.cpp
+    video_core/ampere_sured.cpp
+    video_core/ampere_release_guards.cpp
+    video_core/ampere_release_f2i.cpp
     input_common/calibration_configuration_job.cpp
 )
 

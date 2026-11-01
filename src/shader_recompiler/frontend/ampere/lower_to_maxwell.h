@@ -308,14 +308,10 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 insn.Bits(16, 8) <= *active_link && *active_link < insn.Bits(16, 8) + written)
                 return fail(index, "native callee overwrites link register");
         }
-        RegisterPressure pressure{insn};
-        bool requires_shadow = false;
+        // Scratch values and emulated uniform state occupy reserved high GPRs.
+        // Reject native accesses that could alias that state.
         for (u32 bit : {16U, 24U, 32U, 64U}) {
-            if (opcode == 0x81c) break;
-            // Bits 32-39 name a register in register forms and in these opcodes: TEX/TLD, TXD's
-            // gradients, and the data operand of the stores, ISBEWR (0x927), the global atomic
-            // (0x9a8), RED (0x98e) and SURED (0x59f), all listed with operand 32 in RegisterPressure.
-            if (bit == 32 && insn.Bits(9, 3) != 1 && opcode != 0xb60 && opcode != 0xb66 && opcode != 0xb6c && opcode != 0xf6c && opcode != 0x986 && opcode != 0x987 && opcode != 0xf66 && opcode != 0x988 && opcode != 0x927 && opcode != 0x9a8 && opcode != 0x98e && opcode != 0x59f) continue;
+            if (bit == 32 && insn.Bits(9, 3) != 1 && opcode != 0xb60 && opcode != 0xb66 && opcode != 0xf60) continue;
             const u32 reg = insn.Bits(bit, 8);
             if (reg >= (uses_uniform_bank ? high_uniform_base : 246U) && reg < 255)
                 requires_shadow = true;
@@ -573,33 +569,8 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             xmad(250, a, b, c, false, false, 0, immediate);
             xmad(251, a, b, 255, true, false, 0, immediate);
             xmad(251, a, b, 251, false, true, 0, immediate);
-            emit(base(0x5c18000000000000ULL) | (u64{251} << 8) |
-                (u64{250} << 20) | (u64{16} << 39));
-        };
-        const auto right_shift_u64_low = [&](u32 target, u32 low, u32 high, u32 shift) {
-            mov_imm(250, 32);
-            emit(0x5c10000000000000ULL | predicate | 251 | (u64{250} << 8) |
-                 (u64{shift} << 20) | (u64{1} << 48));
-            emit(0x5c28000000000000ULL | predicate | 250 | (u64{low} << 8) | (u64{shift} << 20));
-            emit(0x5c48000000000000ULL | predicate | 251 | (u64{high} << 8) | (u64{251} << 20));
-            emit(0x5c40000000000000ULL | predicate | 250 | (u64{250} << 8) |
-                 (u64{251} << 20) | (u64{1} << 41) | (u64{7} << 48));
-            emit(0x1c00000000000000ULL | predicate | 251 | (u64{shift} << 8) |
-                 (u64{0xffffffe0U} << 20));
-            emit(0x5c28000000000000ULL | predicate | 251 | (u64{high} << 8) | (u64{251} << 20));
-            emit(0x5c40000000000000ULL | predicate | target | (u64{250} << 8) |
-                 (u64{251} << 20) | (u64{1} << 41) | (u64{7} << 48));
-        };
-        // The carry of a 64-bit add as a value: 1 when the predicate (or its negate) holds.
-        // Unsigned x < y into predicate pd: the carry out of x + y
-        const auto unsigned_less = [&](u32 pd, u32 x, u32 y) {
-            emit(0x5b60000000000000ULL | predicate | 7 | (u64{pd} << 3) | (u64{x} << 8) |
-                 (u64{y} << 20) | (u64{7} << 39) | (u64{1} << 49));
-        };
-        const auto carry_value = [&](u32 pred, u32 negate) {
-            mov_imm(253, 1);
-            emit(0x5ca0000000000000ULL | predicate | 253 | (u64{253} << 8) | (u64{255} << 20) |
-                 (u64{pred} << 39) | (u64{negate} << 42));
+            emit(0x5c18000000000000ULL | predicate | (target == ~0U ? dest : target) | (u64{251} << 8) |
+                 (u64{250} << 20) | (u64{16} << 39));
         };
         const auto multiply_high = [&](u32 a, u32 b, bool is_signed) {
             xmad(250, a, b, 255, false, false, 0, false);
@@ -609,7 +580,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             emit(0x3828000000000000ULL | predicate | 250 | (u64{250} << 8) | (u64{16} << 20));
             emit(0x5c10000000000000ULL | predicate | 249 | (u64{250} << 8) | (u64{252} << 20));
             if (is_signed) {
-                for (const auto& [value, other] : {std::pair{a, b}, std::pair{b, a}}) {
+                for (const auto [value, other] : {std::pair{a, b}, std::pair{b, a}}) {
                     emit(0x3828000000000000ULL | predicate | 246 | (u64{value} << 8) |
                          (u64{31} << 20) | (u64{1} << 48));
                     emit(0x5c40000000000000ULL | predicate | 246 | (u64{246} << 8) |
@@ -631,40 +602,30 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                  (u64{pred} << 39) | (u64{negate} << 42));
         };
         switch (opcode) {
-        case 0x625: case 0x825: { // IMAD.WIDE: Rd:Rd+1 = Ra * Rb + c[bank][offset]
-            const u32 a = insn.Bits(24, 8), b = insn.Bits(64, 8);
-            // ponytail: the operand modifiers in bits 77-83 and 90 are dropped
-            if (bank() >= 18 || (dest & 1) || dest >= 246)
+        case 0x225: case 0x625: case 0x825: {
+            const u32 a = insn.Bits(24, 8);
+            const u32 c = insn.Bits(64, 8);
+            if ((insn.words[2] & ~0x2ffU) != 0x078e0000U || (dest & 1) || dest >= 246 ||
+                (opcode == 0x225 && (insn.words[1] & ~0xffU)) ||
+                (opcode == 0x625 && (!valid_cbuf() || insn.Bits(59, 5))) ||
+                (opcode != 0x625 && c != 255 && ((c & 1) || c >= 246)))
                 return fail(index, "native wide multiply mode");
-            const bool signed_mult = opcode == 0x625;
-            // High word first, into R249, from base-2^16 partial products (as IMAD.HI above), so a
-            // and b are read before Rd (which may alias them) is written; then the low word, then
-            // the 64-bit constant addend: the carry of the low add goes into the high word.
-            xmad(250, a, b, 255, false, false, 0, false);
-            xmad(251, a, b, 250, true, false, 2, false);
-            xmad(250, a, b, 251, false, true, 1, false);
-            xmad(252, a, b, 251, true, true, 2, false);
-            emit(0x3828000000000000ULL | predicate | 250 | (u64{250} << 8) | (u64{16} << 20));
-            emit(0x5c10000000000000ULL | predicate | 249 | (u64{250} << 8) | (u64{252} << 20));
-            if (signed_mult) {
-                // The unsigned high word is too large by b for every negative a.
-                emit(0x5b60000000000000ULL | predicate | 7 | (u64{5} << 3) | (u64{255} << 8) |
-                     (u64{a} << 20) | (u64{1} << 48) | (u64{1} << 49)); // P5 = (RZ < a), signed
-                if (b != 255)
-                    emit(0x5c10000000000000ULL | (u64{5} << 16) | 249 | (u64{249} << 8) |
-                         (u64{b} << 20));
+            const u32 b = opcode == 0x625 ? c : opcode == 0x825 ? 248U : insn.Bits(32, 8);
+            if (opcode == 0x825) mov_imm(b, insn.words[1]);
+            multiply_high(a, b, insn.Bits(73, 1));
+            multiply_low(a, b, 255, false, 247);
+            if (opcode == 0x625) {
+                emit(0xef90000000000000ULL | predicate | 252 | (u64{255} << 8) |
+                     (u64{insn.Bits(38, 16)} << 20) | (u64{bank()} << 36) | (u64{5} << 48));
+            } else {
+                emit(0x5c98000000000000ULL | predicate | 252 | (u64{c} << 20) | (u64{15} << 39));
+                emit(0x5c98000000000000ULL | predicate | 253 |
+                     (u64{c == 255 ? 255U : c + 1} << 20) | (u64{15} << 39));
             }
-            multiply_low(a, b, 255, false);
-            // LDC.64 R252 = c[bank][RZ + offset] (the address register must be RZ, not R0).
-            emit(0xef90000000000000ULL | predicate | 252 | (u64{255} << 8) |
-                 (u64{insn.Bits(38, 16)} << 20) | (u64{bank()} << 36) | (u64{5} << 48));
-            emit(0x5c10000000000000ULL | predicate | dest | (u64{dest} << 8) | (u64{252} << 20));
-            emit(0x5b60000000000000ULL | predicate | 7 | (u64{6} << 3) | (u64{dest} << 8) |
-                 (u64{252} << 20) | (u64{7} << 39) | (u64{1} << 49)); // P6 = dest < c_lo
-            emit(0x5c10000000000000ULL | predicate | 249 | (u64{249} << 8) | (u64{253} << 20));
-            carry_value(6, 0);
-            emit(0x5c10000000000000ULL | predicate | 249 | (u64{249} << 8) | (u64{253} << 20));
-            emit(0x5c10000000000000ULL | predicate | (dest + 1) | (u64{249} << 8) | (u64{255} << 20));
+            emit(0x5c10000000000000ULL | predicate | dest | (u64{247} << 8) |
+                 (u64{252} << 20) | (u64{1} << 47));
+            emit(0x5c10000000000000ULL | predicate | (dest + 1) | (u64{249} << 8) |
+                 (u64{253} << 20) | (u64{1} << 43));
             break;
         }
 case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, so the high word is the value over 2^32, the low the rest. A 64-bit divide starts from 2^64 / x this way (the auto-exposure of 04007EF01F8AE000's Lighting.bfsha)
@@ -940,28 +901,6 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
             multiply_low(insn.Bits(24, 8), insn.Bits(32, 8), insn.Bits(64, 8), false);
             break;
         }
-        case 0x225: { // IMAD.WIDE.U32, register multiplier and 64-bit addend pair
-            const u32 a = insn.Bits(24, 8), b = insn.Bits(32, 8), c = insn.Bits(64, 8);
-            const u32 c_high = c == 255 ? 255 : c + 1;
-            // ponytail: the operand modifier byte (bits 72-79) is not checked
-            if ((insn.words[2] & 0xff00ff00U) != 0x07000000U || (insn.words[1] & ~0xffU) ||
-                (dest & 1) || dest >= 248 || (c != 255 && ((c & 1) || c >= 248)) || dest == c_high)
-                return fail(index, "native wide integer multiply mode");
-            // High word with the IMAD.HI base-2^16 sequence, then the low word, into R253/R252.
-            xmad(250, a, b, 255, false, false, 0, false);
-            xmad(251, a, b, 250, true, false, 2, false);
-            xmad(250, a, b, 251, false, true, 1, false);
-            xmad(252, a, b, 251, true, true, 2, false);
-            emit(0x3828000000000000ULL | predicate | 250 | (u64{250} << 8) | (u64{16} << 20));
-            emit(0x5c10000000000000ULL | predicate | 253 | (u64{250} << 8) | (u64{252} << 20));
-            xmad(250, a, b, 255, false, false, 0, false);
-            xmad(251, a, b, 255, true, false, 0, false);
-            xmad(251, a, b, 251, false, true, 0, false);
-            emit(0x5c18000000000000ULL | predicate | 252 | (u64{251} << 8) | (u64{250} << 20) | (u64{16} << 39));
-            emit(0x5c10000000000000ULL | predicate | dest | (u64{252} << 8) | (u64{c} << 20) | (u64{1} << 47));
-            emit(0x5c10000000000000ULL | predicate | (dest + 1) | (u64{253} << 8) | (u64{c_high} << 20) | (u64{1} << 43));
-            break;
-        }
         case 0x2a5: { // UIMAD.WIDE.U32 UR(d):UR(d+1) = URa * URb + URc:UR(c+1)
             const u32 a = uniform_register(insn.Bits(24, 8)), b = uniform_register(insn.Bits(32, 8));
             const u32 c = insn.Bits(64, 8);
@@ -987,95 +926,24 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
             emit(0x5c10000000070000ULL | d_low | (u64{250} << 8) | (u64{255} << 20));
             break;
         }
-        case 0x226: { // IDP.2A.LO.U16.U8: a.lo16 * b.byte0 + a.hi16 * b.byte1 + c
-            if ((insn.words[2] & ~0xffU) != 0x1000 || (insn.words[1] & ~0xffU))
-                return fail(index, "native packed dot-product mode");
-            const u32 a = insn.Bits(24, 8), b = insn.Bits(32, 8), c = insn.Bits(64, 8);
-            for (u32 component = 0; component < 2; ++component) {
-                emit(0x3828000000000000ULL | predicate | (250 + component) | (u64{b} << 8) | (u64{component * 8} << 20));
-                emit(0x0400000000000000ULL | predicate | (250 + component) | (u64{250 + component} << 8) | (u64{0xff} << 20));
-            }
-            xmad(252, a, 250, c, false, false, 0, false);
-            xmad(static_cast<u32>(dest), a, 251, 252, true, false, 0, false);
-            break;
-        }
-        case 0x225: case 0x227: case 0x625: case 0x825: case 0x827: case 0xa27: {
-            // IMAD.HI Rd / IMAD.WIDE Rd:Rd+1 = a * b + c:c+1 (.U32 or signed, bit 73), with an optional
-            // carry-out (bits 81-83). b is a register, an immediate (0x8xx) or a cbuf (0xa27); 0x625 takes
-            // b from bits 64-71 and adds a cbuf pair.
-            const bool wide = opcode == 0x225 || opcode == 0x625 || opcode == 0x825;
-            const bool immediate = opcode == 0x825 || opcode == 0x827, signed_product = insn.Bits(73, 1);
-            const u32 c = opcode == 0x625 ? 255U : insn.Bits(64, 8), carry_output = insn.Bits(81, 3);
-            if ((insn.words[2] & ~0x000e02ffU) != 0x07800000 ||
-                ((opcode == 0x225 || opcode == 0x227) && (insn.words[1] & ~0xffU)) ||
-                ((opcode == 0xa27 || opcode == 0x625) && (!valid_cbuf() || insn.Bits(62, 2))) ||
-                (opcode == 0x625 && insn.Bits(38, 16) > 0xfff8) || (c != 255 && (c & 1)) ||
-                (wide && (dest == 255 || (dest & 1))) || (signed_product && carry_output != 7))
+        case 0x227: case 0xa27: case 0x827: {
+            if ((insn.words[2] & ~0x2ffU) != 0x078e0000U || dest >= 246 ||
+                (opcode == 0x227 && (insn.words[1] & ~0xffU)) ||
+                (opcode == 0xa27 && (!valid_cbuf() || insn.Bits(59, 5))))
                 return fail(index, "native high multiply mode");
             const u32 a = insn.Bits(24, 8);
-            const u32 b = immediate ? insn.words[1] : opcode == 0xa27 ? 254U : insn.Bits(opcode == 0x625 ? 64 : 32, 8);
-            if (opcode == 0xa27) emit(0x4c98000000000000ULL | predicate | 254 | (u64{15} << 39) | cbuf());
-            if (signed_product) {
-                // The signed high word is the unsigned one minus (a < 0 ? b : 0) + (b < 0 ? a : 0),
-                // which R253 holds (R252 is free until the multiplication).
-                const u32 b_register = immediate ? 254U : b;
-                if (immediate) mov_imm(254, b);
-                emit(0x3828000000000000ULL | predicate | 253 | (u64{a} << 8) | (u64{31} << 20) | (u64{1} << 48));
-                emit(0x5c40000000000000ULL | predicate | 253 | (u64{253} << 8) | (u64{b_register} << 20) | (u64{7} << 48));
-                emit(0x3828000000000000ULL | predicate | 252 | (u64{b_register} << 8) | (u64{31} << 20) | (u64{1} << 48));
-                emit(0x5c40000000000000ULL | predicate | 252 | (u64{252} << 8) | (u64{a} << 20) | (u64{7} << 48));
-                emit(0x5c10000000000000ULL | predicate | 253 | (u64{253} << 8) | (u64{252} << 20));
+            const u32 b = opcode == 0x227 ? insn.Bits(32, 8) : 248U;
+            if (opcode == 0x827) mov_imm(b, insn.words[1]);
+            if (opcode == 0xa27) {
+                emit(0x4c98000000000000ULL | predicate | b | (u64{15} << 39) | cbuf());
             }
-            // Base-2^16 long multiplication. Each intermediate sum fits U32.
-            xmad(250, a, b, 255, false, false, 0, immediate);
-            xmad(251, a, b, 250, true, false, 2, immediate);
-            xmad(250, a, b, 251, false, true, 1, immediate);
-            xmad(252, a, b, 251, true, true, 2, immediate);
-            emit(0x3828000000000000ULL | predicate | 250 | (u64{250} << 8) | (u64{16} << 20));
-            if (signed_product)
-                emit(0x5c10000000000000ULL | predicate | 250 | (u64{250} << 8) | (u64{253} << 20) | (u64{1} << 48));
-            if (!wide && c == 255 && carry_output == 7) {
-                emit(base(0x5c10000000000000ULL) | (u64{250} << 8) | (u64{252} << 20));
-                break;
-            }
-            // High word in R253 and low word in R250 (as UIMAD.WIDE.U32), then c:c+1 is added.
-            emit(0x5c10000000000000ULL | predicate | 253 | (u64{250} << 8) | (u64{252} << 20));
-            xmad(250, a, b, 255, false, false, 0, immediate);
-            xmad(251, a, b, 255, true, false, 0, immediate);
-            xmad(251, a, b, 251, false, true, 0, immediate);
-            emit(0x5c18000000000000ULL | predicate | 250 | (u64{251} << 8) | (u64{250} << 20) | (u64{16} << 39));
-            u32 c_low = c, c_high = c == 255 ? 255U : c + 1;
-            if (opcode == 0x625) {
-                emit(0x4c98000000000000ULL | predicate | 252 | (u64{15} << 39) | cbuf());
-                emit(0x4c98000000000000ULL | predicate | 254 | (u64{15} << 39) | (cbuf() + (u64{1} << 20)));
-                c_low = 252;
-                c_high = 254;
-            }
-            const u32 high = wide ? static_cast<u32>(dest) + 1 : static_cast<u32>(dest);
-            emit(0x5c10000000000000ULL | predicate | 250 | (u64{250} << 8) | (u64{c_low} << 20) | (u64{1} << 47));
-            if (carry_output == 7) {
-                emit(0x5c10000000000000ULL | predicate | high | (u64{253} << 8) | (u64{c_high} << 20) | (u64{1} << 43));
-                if (wide) emit(base(0x5c10000000000000ULL) | (u64{250} << 8) | (u64{255} << 20));
-                break;
-            }
-            // Maxwell IADD has no .X with .CC: R251 takes the low carry, R254 counts the high word's.
-            emit(0x5c10000000000000ULL | predicate | 251 | (u64{255} << 8) | (u64{255} << 20) | (u64{1} << 43));
-            emit(0x5c10000000000000ULL | predicate | 253 | (u64{253} << 8) | (u64{c_high} << 20) | (u64{1} << 47));
-            emit(0x5c10000000000000ULL | predicate | 254 | (u64{255} << 8) | (u64{255} << 20) | (u64{1} << 43));
-            emit(0x5c10000000000000ULL | predicate | 253 | (u64{253} << 8) | (u64{251} << 20) | (u64{1} << 47));
-            emit(0x5c10000000000000ULL | predicate | 254 | (u64{254} << 8) | (u64{255} << 20) | (u64{1} << 43));
-            emit(0x5c98000000000000ULL | predicate | high | (u64{253} << 20) | (u64{15} << 39));
-            if (wide) emit(base(0x5c98000000000000ULL) | (u64{250} << 20) | (u64{15} << 39));
-            emit(0x5b60000000000000ULL | predicate | 7 | (u64{carry_output} << 3) | (u64{254} << 8) |
-                 (u64{255} << 20) | (u64{7} << 39) | (u64{5} << 49));
+            multiply_high(a, b, insn.Bits(73, 1));
+            emit(base(0x5c10000000000000ULL) | (u64{249} << 8) |
+                 (u64{insn.Bits(64, 8)} << 20));
             break;
         }
         case 0x95c:
-            if (insn.words[0] != 0x795c || insn.words[1] != 4 || insn.words[2] != 0x00300000 ||
-                std::find(verified_traps.begin(), verified_traps.end(), index * sizeof(Instruction)) == verified_traps.end())
-                return fail(index, "native runtime breakpoint/trap");
-            emit(0x50b0000000000f00ULL | predicate);
-            break;
+            return fail(index, "native runtime breakpoint/trap");
         case 0xa24: { // IMAD, constant-buffer multiplier
             if ((insn.words[2] & ~0x2ffU) != 0x078e0000 || !valid_cbuf() || insn.Bits(62, 2))
                 return fail(index, "native integer constant-buffer multiply mode");
@@ -3401,21 +3269,19 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
                  (u64{insn.words[1] << 8} << 20) | (u64{insn.Bits(73, 1)} << 48));
             break;
         }
-        case 0x226: case 0x227: { // IDP.4A.S8.S8 Rd, Ra, Rb, Rc: the signed byte dot product plus Rc
+        case 0x226: {
             const u32 a = insn.Bits(24, 8), b = insn.Bits(32, 8), c = insn.Bits(64, 8);
-            if (insn.Bits(72, 4) || dest >= 246 || a >= 246 || b >= 246)
+            if ((insn.words[2] & ~0x6ffU) || (insn.words[1] & ~0xffU) || dest >= 246)
                 return fail(index, "native dot product mode");
-            emit(0x5c10000000000000ULL | predicate | dest | (u64{255} << 8) | (u64{c} << 20));
+            emit(0x5c98000000000000ULL | predicate | 249 | (u64{c} << 20) | (u64{15} << 39));
             for (u32 i = 0; i < 4; ++i) {
-                emit(0x3848000000000000ULL | predicate | 250 | (u64{a} << 8) | (u64{i * 8} << 20));
-                emit(0x3848000000000000ULL | predicate | 251 | (u64{b} << 8) | (u64{i * 8} << 20));
-                emit(0x3800000000000000ULL | predicate | 250 | (u64{250} << 8) | (u64{8} << 28) |
-                     (u64{1} << 48));
-                emit(0x3800000000000000ULL | predicate | 251 | (u64{251} << 8) | (u64{8} << 28) |
-                     (u64{1} << 48));
-                multiply_low(250, 251, 252, false);
-                emit(0x5c10000000000000ULL | predicate | dest | (u64{dest} << 8) | (u64{252} << 20));
+                emit(0x3800000000000000ULL | predicate | 247 | (u64{a} << 8) |
+                     (u64{i * 8} << 20) | (u64{8} << 28) | (u64{insn.Bits(73, 1)} << 48));
+                emit(0x3800000000000000ULL | predicate | 248 | (u64{b} << 8) |
+                     (u64{i * 8} << 20) | (u64{8} << 28) | (u64{insn.Bits(74, 1)} << 48));
+                multiply_low(247, 248, 249, false, 249);
             }
+            emit(base(0x5c98000000000000ULL) | (u64{249} << 20) | (u64{15} << 39));
             break;
         }
         case 0x299: { // USHF by a uniform amount, one register shifted (SHL/SHR, bit 75 wraps).
@@ -4046,14 +3912,33 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
             break;
         }
         case 0x944: { // Verified CALL.REL.NOINC with R55 holding the return PC
+            const auto terminal_float_tail = [&] {
+                if (index + 2 >= code.size()) return false;
+                for (size_t tail = index + 2; tail < code.size(); ++tail) {
+                    const auto& next = code[tail];
+                    if (next.words[3] & 0xc00001ffU) return false;
+                    if (next.words[0] == 0x794d && next.words[1] == 0 &&
+                        next.words[2] == 0x03800000)
+                        return true;
+                    const u32 form = next.words[0] & 0xffffU;
+                    if ((form != 0x7209 && form != 0x7809) ||
+                        (next.words[2] != 0x07810000 && next.words[2] != 0x03810000) ||
+                        (form == 0x7209 && next.words[1] > 255))
+                        return false;
+                }
+                return false;
+            };
             // A predicated NOINC forward transfer can terminate a loop at its
             // reconvergence point without a return-link setup or matching RET.
             if (native_predicate != 7 && (insn.words[0] & ~0xf000U) == 0x944 &&
                 insn.words[1] == 16 && insn.words[2] == 0x03c00000 &&
                 (insn.words[3] & 0xc00001ffU) == 0 &&
-                index + 2 < code.size() && (code[index + 1].words[0] & 0xfffU) == 0x947 &&
+                index + 2 < code.size() && code[index + 1].words[0] == 0x7947 &&
                 (code[index + 1].words[2] & ~0x3ffffU) == 0x03800000 &&
-                (code[index + 1].words[3] & 0xc00001ffU) == 0) {
+                (code[index + 1].words[3] & 0xc00001ffU) == 0 &&
+                (std::none_of(code.begin(), code.end(), [](const Instruction& candidate) {
+                    return candidate.Bits(0, 12) == 0x950;
+                }) || terminal_float_tail())) {
                 relocations.push_back({static_cast<u32>(result.instructions.size()), index + 2});
                 emit(0xe24000000000000fULL | predicate);
                 break;
