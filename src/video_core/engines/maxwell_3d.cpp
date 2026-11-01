@@ -2470,7 +2470,7 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
         VideoCommon::DrainSite::MacroDmaFlush);
     u32 changed{};
     for (u32 i = 0; i < words; ++i) {
-        const u32 word = memory_manager.Read<u32>(source + u64{i} * sizeof(u32));
+        const u32 word = dma_words[i];
         if (method == 0x158) {
             fs.parameters.push_back(word);
         } else if (ram + i < native_data_ram.size()) {
