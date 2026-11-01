@@ -97,37 +97,7 @@ Getting a picture needs every one of these; the display buffer (0x91f41000, 3840
 | reserved GPR as a source | `211 f73b7211 00000000 078f18ff`, `831 d88d7831 3a003a00 0000008d` | the program's own operands live in R216-R254, where the lowering keeps uniforms and scratch: needs register remapping |
 | MUFU operation 9 | `308 000c7308 0000000c 00002400` | SM86 MUFU op 9 |
 | LDGSTS.E.BYPASS.128 | `fae 020d7fae 00000000 0e101c48` | LDG.128 + STS.128 split |
-| I2F variant 0x312 | `312 00027312 00000002 00301000` | opcode 0x312 has no case yet |
+| F2I variant 0x312 | `312 00027312 00000002 00301000` | opcode 0x312 has no case yet |
 | CALL with another link setup | `944 00007944 00002d00 03c00000` | the preceding move is not the `0x7802` form the lowering expects |
 
 Done since the last table: IADD3 with one or two carry predicates and a third-source carry-in, LEA.HI.X with a constant base, LEA.HI with a uniform base, HFMA2.RELU with a predicate output, USHF over UR0-UR21, IDP.4A.S8.S8.
-
-## Still rejected (2026-11-01, 10 compute dispatches, 5 shaders, 5 instructions)
-
-| Shader | Instruction | What is missing |
-|---|---|---|
-| 0x19a2a1d000 | `312 00027312 00000002 00301000` | opcode 0x312 (I2F, the inverse direction of 0x311) has no case |
-| 0x11504cb000 | `fae 020d7fae 00000000 0e101c48` | LDGSTS.E.BYPASS.128 needs a LDG.128 + STS.128 split |
-| 0x1150686000 | `308 000c7308 0000000c 00002400` | MUFU operation 9 |
-| 0x1150562000 | `831 d88d7831 3a003a00 0000008d` | operand in R216-R254: needs register remapping |
-| 0x1150588000 | `211 f73b7211 00000000 078f18ff` | operand in R216-R254: needs register remapping |
-
-Just lowered: the CALL that sits after the main EXIT (a call inside the captured library region), now handled by the same linkage path.
-
-### Encoding notes for the last five
-
-I verified the MUFU operation field with the turingas assembler (sm_80): `w2 = op << 10`, COS=0, SIN=1, EX2=2, LG2=3, RCP=4, RSQ=5 — matching Eglantine's `operation = Bits(74, 6)`. Fortune's Weave uses operation **9** (`w2 = 0x00002400`), which turingas does not know and which has no Maxwell equivalent; it needs an expansion (for example tanh as (e^2x - 1)/(e^2x + 1) from EX2 and RCP).
-
-Reproduce an encoding the same way: write a two-line file with a `<params>` block and control codes (`--:-:-:-:1    MUFU.SIN R0, R1;`), assemble with `python3 -m turingas.main -i test.sass -o test.cubin -arch 80`, then read `.text.kern` from the cubin (16 bytes per instruction, low word first).
-
-## Still rejected (2026-11-01, 10 compute dispatches)
-
-| Shader | Instruction | What is missing |
-|---|---|---|
-| 0x11504cb000 | `fae 020d7fae 00000000 0e101c48` | LDGSTS.E.BYPASS.128 needs a LDG.128 + STS.128 split |
-| 0x1150686000 | `308 000c7308 0000000c 00002400` | MUFU operation 9, no Maxwell equivalent: needs an expansion |
-| 0x1150562000 | `831 d88d7831 3a003a00 0000008d` | operand in R216-R254: needs register remapping |
-| 0x1150588000 | `211 f73b7211 00000000 078f18ff` | operand in R216-R254: needs register remapping |
-| (library caller) | `20c 0600720c 00000004 03f26070` | a callee that overwrites the link register: nested calls in the captured library |
-
-Lowered in this round: `0x312` is I2F.U64.F32 with the rounding in bits 78-79 (verified against the turingas grammar, where `0x312` is the `I2F` 64-bit form), `0x227` is the second IDP.4A.S8.S8 form, `0x225`'s operand modifier byte is not fixed (0x0780/0x078e), `0x224` with both factors in RZ is a move, and IADD3 in `0x210` may set bit 63.

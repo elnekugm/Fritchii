@@ -3429,19 +3429,21 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
                  (u64{insn.words[1] << 8} << 20) | (u64{insn.Bits(73, 1)} << 48));
             break;
         }
-        case 0x226: {
+        case 0x226: { // IDP.4A.S8.S8 Rd, Ra, Rb, Rc: the signed byte dot product plus Rc
             const u32 a = insn.Bits(24, 8), b = insn.Bits(32, 8), c = insn.Bits(64, 8);
-            if ((insn.words[2] & ~0x6ffU) || (insn.words[1] & ~0xffU) || dest >= 246)
+            if (insn.Bits(72, 4) || dest >= 246 || a >= 246 || b >= 246)
                 return fail(index, "native dot product mode");
-            emit(0x5c98000000000000ULL | predicate | 249 | (u64{c} << 20) | (u64{15} << 39));
+            emit(0x5c10000000000000ULL | predicate | dest | (u64{255} << 8) | (u64{c} << 20));
             for (u32 i = 0; i < 4; ++i) {
-                emit(0x3800000000000000ULL | predicate | 247 | (u64{a} << 8) |
-                     (u64{i * 8} << 20) | (u64{8} << 28) | (u64{insn.Bits(73, 1)} << 48));
-                emit(0x3800000000000000ULL | predicate | 248 | (u64{b} << 8) |
-                     (u64{i * 8} << 20) | (u64{8} << 28) | (u64{insn.Bits(74, 1)} << 48));
-                multiply_low(247, 248, 249, false, 249);
+                emit(0x3848000000000000ULL | predicate | 250 | (u64{a} << 8) | (u64{i * 8} << 20));
+                emit(0x3848000000000000ULL | predicate | 251 | (u64{b} << 8) | (u64{i * 8} << 20));
+                emit(0x3800000000000000ULL | predicate | 250 | (u64{250} << 8) | (u64{8} << 28) |
+                     (u64{1} << 48));
+                emit(0x3800000000000000ULL | predicate | 251 | (u64{251} << 8) | (u64{8} << 28) |
+                     (u64{1} << 48));
+                multiply_low(250, 251, 252, false);
+                emit(0x5c10000000000000ULL | predicate | dest | (u64{dest} << 8) | (u64{252} << 20));
             }
-            emit(base(0x5c98000000000000ULL) | (u64{249} << 20) | (u64{15} << 39));
             break;
         }
         case 0x299: { // USHF by a uniform amount, one register shifted (SHL/SHR, bit 75 wraps).
@@ -3736,7 +3738,64 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
             }
             break;
         }
-        case 0x211: case 0x811: case 0xa11: case 0xc11: { // LEA (0xa11: cbuf, 0xc11: uniform Rb)
+        case 0xa11: { // LEA with constant base and carry predicate.
+            if (insn.Bits(80, 1) && insn.Bits(81, 3) == 7 && insn.Bits(64, 8) == 255 && insn.Bits(75, 5) &&
+                !insn.Bits(72, 1) && !insn.Bits(62, 2)) {
+                // LEA.HI Rd, Ra, c[b][o], RZ, s: c[b][o] + (Ra >> (32 - s)), as 0x211's high form;
+                // LEA.HI.X (bit 74) adds a carry predicate (bits 87-89, negate 90).
+                const u32 b = operand(1, false);
+                emit(0x3828000000000000ULL | predicate | 250 | (u64{insn.Bits(24, 8)} << 8) |
+                     (u64{32 - insn.Bits(75, 5)} << 20) | (u64{insn.Bits(73, 1)} << 48));
+                emit(0x5c10000000000000ULL | predicate | 250 | (u64{250} << 8) | (u64{b} << 20));
+                if (insn.Bits(74, 1)) {
+                    const u32 condition = insn.Bits(87, 3), negate = insn.Bits(90, 1);
+                    if (condition != 7 || !negate) {
+                        mov_imm(252, 1);
+                        emit(0x5c10000000000000ULL | (u64{(negate << 3) | condition} << 16) | 250 |
+                             (u64{250} << 8) | (u64{252} << 20));
+                    }
+                }
+                emit(base(0x5c10000000000000ULL) | (u64{250} << 8) | (u64{255} << 20));
+                break;
+            }
+            if (insn.Bits(74, 1)) {
+                // LEA.HI.X with a constant base: the shifted high word plus the carry predicate.
+                const u32 b = operand(1, false);
+                const u64 shift = (u64{32 - insn.Bits(75, 5)} << 20) | (u64{insn.Bits(73, 1)} << 48);
+                emit(0x3828000000000000ULL | predicate | 250 | (u64{insn.Bits(24, 8)} << 8) | shift);
+                emit(0x5c10000000000000ULL | predicate | 250 | (u64{250} << 8) | (u64{b} << 20));
+                carry_value(insn.Bits(87, 3), insn.Bits(90, 1));
+                emit(base(0x5c10000000000000ULL) | (u64{250} << 8) | (u64{253} << 20));
+                break;
+            }
+            if (insn.Bits(72, 1) || insn.Bits(80, 1) ||
+                insn.Bits(81, 3) == 7 || insn.Bits(62, 2))
+                return fail(index, "native constant LEA carry mode");
+            const u32 b = operand(1, false);
+            emit(base(0x5c18000000000000ULL) | (u64{insn.Bits(24, 8)} << 8) |
+                (u64{b} << 20) | (u64{insn.Bits(75, 5)} << 39));
+            emit(0x5b60000000000000ULL | predicate | 7 | (u64{insn.Bits(81, 3)} << 3) |
+                (dest << 8) | (u64{b} << 20) | (u64{7} << 39) | (u64{1} << 49));
+            break;
+        }
+        case 0xc11: {
+            const u32 b = uniform_register(insn.Bits(32, 8));
+            if (insn.Bits(80, 1) && !insn.Bits(72, 1) && !insn.Bits(62, 2) &&
+                insn.Bits(64, 8) == 255 && !(insn.words[1] & ~0xffU) && b != ~0U) {
+                // LEA.HI.X Rd, Ra, URb, RZ, s: the high word of Ra << s plus the uniform base.
+                const u64 shift = (u64{32 - insn.Bits(75, 5)} << 20) | (u64{insn.Bits(73, 1)} << 48);
+                emit(0x3828000000000000ULL | predicate | 250 | (u64{insn.Bits(24, 8)} << 8) | shift);
+                emit(base(0x5c10000000000000ULL) | (u64{250} << 8) | (u64{b} << 20));
+                break;
+            }
+            if ((insn.words[1] & ~0xffU) ||
+                (insn.words[2] & ~0xf800U) != 0x0f8e00ffU || b == ~0U)
+                return fail(index, "native uniform-source effective address mode");
+            emit(base(0x5c18000000000000ULL) | (u64{insn.Bits(24, 8)} << 8) |
+                 (u64{b} << 20) | (u64{insn.Bits(75, 5)} << 39));
+            break;
+        }
+        case 0x211: case 0x811: { // LEA low word, with optional uniform carry result
             if (insn.Bits(80, 1)) {
                 // LEA.HI Rd, Ra, Rb (or an immediate, 0x811), RZ, s: Rb + high word of (Ra << s);
                 // bit 73 sign-extends Ra. A register c (0x211) is the high word: Rb + ((Ra >> (32 - s)) | (Rc << s)).
@@ -4093,13 +4152,10 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
                 emit(0xe24000000000000fULL | predicate);
                 break;
             }
-            const bool adjacent = index != 0 &&
-                (code[index - 1].words[0] & ~0x00ff0000U) == 0x00007802 &&
-                code[index - 1].Bits(16, 8) < 250 &&
-                code[index - 1].words[1] == (index + 1) * 16 &&
-                code[index - 1].words[2] == 0xf00;
-            if (index == 0 || insn.words[0] != 0x7944 ||
-                (insn.words[2] & ~0x3ffffU) != 0x03c00000 || (!adjacent && !bounded_control))
+            if (main_exited || index == 0 || insn.words[0] != 0x7944 ||
+                (insn.words[2] & ~0x3ffffU) != 0x03c00000 ||
+                (code[index - 1].words[0] & ~0x00ff0000U) != 0x00007802 ||
+                code[index - 1].Bits(16, 8) >= 250)
                 return fail(index, "native call linkage mode");
             const u64 raw = insn.words[1] | (u64{insn.words[2] & 0x3ffff} << 32);
             const s64 relative = static_cast<s64>(raw << 14) >> 14;
