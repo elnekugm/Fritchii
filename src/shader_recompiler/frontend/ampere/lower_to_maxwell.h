@@ -575,6 +575,11 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                  (u64{251} << 20) | (u64{1} << 41) | (u64{7} << 48));
         };
         // The carry of a 64-bit add as a value: 1 when the predicate (or its negate) holds.
+        // Unsigned x < y into predicate pd: the carry out of x + y
+        const auto unsigned_less = [&](u32 pd, u32 x, u32 y) {
+            emit(0x5b60000000000000ULL | predicate | 7 | (u64{pd} << 3) | (u64{x} << 8) |
+                 (u64{y} << 20) | (u64{7} << 39) | (u64{1} << 49));
+        };
         const auto carry_value = [&](u32 pred, u32 negate) {
             mov_imm(253, 1);
             emit(0x5ca0000000000000ULL | predicate | 253 | (u64{253} << 8) | (u64{255} << 20) |
@@ -582,10 +587,9 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
         };
         switch (opcode) {
         case 0x625: case 0x825: { // IMAD.WIDE: Rd:Rd+1 = Ra * Rb + c[bank][offset]
-            const u32 a = insn.Bits(24, 8), b = insn.Bits(64, 8), slot = insn.Bits(72, 5);
+            const u32 a = insn.Bits(24, 8), b = insn.Bits(64, 8);
             // ponytail: the operand modifiers in bits 77-83 and 90 are dropped
-            if (insn.Bits(32, 8) || slot >= 18 || insn.Bits(40, 14) > 0x1fff || (dest & 1) ||
-                dest >= 246)
+            if (bank() >= 18 || (dest & 1) || dest >= 246)
                 return fail(index, "native wide multiply mode");
             const bool signed_mult = opcode == 0x625;
             // Low word, then the high word from base-2^16 partial products (as IMAD.HI above), then
@@ -598,8 +602,8 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             emit(0x3828000000000000ULL | predicate | 250 | (u64{250} << 8) | (u64{16} << 20));
             emit(0x5c18000000000000ULL | (u64{251} << 8) | (u64{250} << 20) | (u64{252} << 20) |
                  (u64{16} << 39));
-            emit(0xef90000000000000ULL | predicate | 252 | (u64{insn.Bits(40, 14) * 4} << 20) |
-                 (u64{slot} << 36) | (u64{5} << 48));
+            emit(0xef90000000000000ULL | predicate | 252 | (u64{insn.Bits(38, 16)} << 20) |
+                 (u64{bank()} << 36) | (u64{5} << 48));
             emit(0x5c10000000000000ULL | predicate | dest | (u64{dest} << 8) | (u64{252} << 20));
             emit(0x5b60000000000000ULL | predicate | 7 | (u64{6} << 3) | (u64{dest} << 8) |
                  (u64{252} << 20) | (u64{7} << 39) | (u64{1} << 49)); // P6 = dest < c_lo
