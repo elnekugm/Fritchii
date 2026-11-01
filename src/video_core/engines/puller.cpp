@@ -783,6 +783,32 @@ bool MetByQmdPrediction(DmaPusher& dma_pusher, const Puller::PendingAcquire& acq
     return true;
 }
 
+// Whether a Switch 2 acquire is met by the word as guest memory holds it now, before the split's
+// back catches up. Most are (command buffer gates the CPU released, counters other queues have
+// passed), and draining for each made the front wait for all queued work thousands of times a
+// second. Greater-or-equal counters only grow, so work still queued can't unmeet them; an equal
+// value met now is what a polling console channel would have seen (Nx2SemaphoreWaiters latches
+// the same way). Masks wait for the back as before. EDEN_NX2_ACQUIRE_PEEK=0 turns this off.
+bool MetBeforeDrain(DmaPusher& dma_pusher, GPUVAddr address, u32 operation, u32 value) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("EDEN_NX2_ACQUIRE_PEEK");
+        return env == nullptr || env[0] != '0';
+    }();
+    if (!enabled || !VideoCommon::GpuSplit::Get().Active()) {
+        return false;
+    }
+    const u32 current = dma_pusher.memory_manager.Read<u32>(address);
+    // Puller::GpuSemaphoreOperation values.
+    switch (operation) {
+    case Nx2SemaphoreWaiters::AcquireGequal:
+        return current >= value;
+    case Nx2SemaphoreWaiters::AcquireEqual:
+        return current == value;
+    default:
+        return false;
+    }
+}
+
 } // Anonymous namespace
 
 // `read_done` (optional): the back's position loaded before guest memory was read for `word`.
