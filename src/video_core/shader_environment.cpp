@@ -193,6 +193,10 @@ u32 GenericEnvironment::TextureBoundBuffer() const {
     return texture_bound;
 }
 
+u32 GenericEnvironment::SurfaceBoundBuffer() const {
+    return surface_bound != ~0U ? surface_bound : texture_bound;
+}
+
 u32 GenericEnvironment::LocalMemorySize() const {
     return local_memory_size;
 }
@@ -434,6 +438,7 @@ void GenericEnvironment::Serialize(std::ofstream& file) const {
                sizeof(num_cbuf_replacement_values))
         .write(reinterpret_cast<const char*>(&local_memory_size), sizeof(local_memory_size))
         .write(reinterpret_cast<const char*>(&texture_bound), sizeof(texture_bound))
+        .write(reinterpret_cast<const char*>(&surface_bound), sizeof(surface_bound))
         .write(reinterpret_cast<const char*>(&start_address), sizeof(start_address))
         .write(reinterpret_cast<const char*>(&cached_lowest), sizeof(cached_lowest))
         .write(reinterpret_cast<const char*>(&cached_highest), sizeof(cached_highest))
@@ -654,6 +659,9 @@ void GenericEnvironment::InitializeNativeCode(std::shared_ptr<const LoweredNativ
         // Native TEX carries its cbuf index explicitly; TEXS obtains it from the environment.
         texture_bound = lowered->texture_bound;
     }
+    if (lowered->surface_bound != ~0U) {
+        surface_bound = lowered->surface_bound;
+    }
     native_source_size = lowered->source_size;
     code = lowered->code;
     cached_lowest = 0;
@@ -843,6 +851,7 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
     auto result = std::make_shared<LoweredNativeCode>();
     result->native_program_key = Shader::Ampere::NativeProgramKey(native);
     result->texture_bound = lowered.required_texture_buffer;
+    result->surface_bound = lowered.required_surface_buffer;
     result->source_size = native_header_size + lowered.source_size;
     result->trap_prefix.assign(native.begin(), native.begin() + trap_count);
     auto& lowered_code = result->code;
@@ -1488,6 +1497,7 @@ void FileEnvironment::Deserialize(std::istream& file) {
               sizeof(num_cbuf_replacement_values))
         .read(reinterpret_cast<char*>(&local_memory_size), sizeof(local_memory_size))
         .read(reinterpret_cast<char*>(&texture_bound), sizeof(texture_bound))
+        .read(reinterpret_cast<char*>(&surface_bound), sizeof(surface_bound))
         .read(reinterpret_cast<char*>(&start_address), sizeof(start_address))
         .read(reinterpret_cast<char*>(&read_lowest), sizeof(read_lowest))
         .read(reinterpret_cast<char*>(&read_highest), sizeof(read_highest))
@@ -1800,6 +1810,10 @@ u32 FileEnvironment::SharedMemorySize() const {
 
 u32 FileEnvironment::TextureBoundBuffer() const {
     return texture_bound;
+}
+
+u32 FileEnvironment::SurfaceBoundBuffer() const {
+    return surface_bound != ~0U ? surface_bound : texture_bound;
 }
 
 std::array<u32, 3> FileEnvironment::WorkgroupSize() const {
