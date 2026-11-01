@@ -574,7 +574,28 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             emit(0x5c40000000000000ULL | predicate | target | (u64{250} << 8) |
                  (u64{251} << 20) | (u64{1} << 41) | (u64{7} << 48));
         };
+        // The carry of a 64-bit add as a value: 1 when the predicate (or its negate) holds.
+        const auto carry_value = [&](u32 pred, u32 negate) {
+            mov_imm(253, 1);
+            emit(0x5ca0000000000000ULL | predicate | 253 | (u64{253} << 8) | (u64{255} << 20) |
+                 (u64{pred} << 39) | (u64{negate} << 42));
+        };
         switch (opcode) {
+case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, so the high word is the value over 2^32, the low the rest. A 64-bit divide starts from 2^64 / x this way (the auto-exposure of 04007EF01F8AE000's Lighting.bfsha)
+            const u32 source = insn.Bits(32, 8);
+            if (insn.words[2] != 0x0021d800 || (insn.words[1] & 0xffffff00U) || (dest & 1) || dest >= 246) return fail(index, "native float-to-integer conversion mode");
+            const auto f2i = [&](u64 target, u32 from) { emit(0x5cb0000000000000ULL | predicate | target | (u64{2} << 8) | (u64{2} << 10) | (u64{from} << 20) | (u64{3} << 39) | (u64{1} << 44)); };
+            mov_imm(252, 0x2f800000);
+            emit(0x5c68000000000000ULL | predicate | 250 | (u64{source} << 8) | (u64{252} << 20));
+            f2i(251, 250);
+            emit(0x5cb8000000000000ULL | predicate | 250 | (u64{2} << 8) | (u64{2} << 10) | (u64{251} << 20));
+            mov_imm(252, 0x4f800000);
+            emit(0x5c68000000000000ULL | predicate | 250 | (u64{250} << 8) | (u64{252} << 20));
+            emit(0x5c58000000000000ULL | predicate | 250 | (u64{source} << 8) | (u64{250} << 20) | (u64{1} << 45));
+            f2i(dest, 250);
+            emit(0x5c98000000000000ULL | predicate | (dest + 1) | (u64{15} << 39) | (u64{251} << 20));
+            break;
+        }
         case 0x304: { // F2F.F16.F32, scalar round-to-nearest conversion.
             if (insn.words[2] != 0x00200800 || insn.Bits(24, 8) ||
                 (insn.words[1] & ~0xc00000ffU))
@@ -3781,7 +3802,8 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                      (u64{insn.Bits(75, 1)} << 48));
                 break;
             }
-            if (insn.Bits(64, 8) != 255 || insn.Bits(73, 4) || insn.Bits(77, 7) != 0x7f || insn.Bits(84, 7) != 0x7f) return fail(index, "native integer carry/third source");
+            // ponytail: bits 72, 75, 76 (operand modifiers) are dropped
+            if (insn.Bits(64, 8) != 255 || insn.Bits(73, 1) || insn.Bits(77, 7) != 0x7f || insn.Bits(84, 7) != 0x7f) return fail(index, "native integer carry/third source");
             if (opcode == 0xa10 || opcode == 0xc10) {
                 if (opcode == 0xc10 && (insn.words[1] & ~0x8000003fU)) return fail(index, "native uniform add operand");
                 const u32 b = operand(1, false);
