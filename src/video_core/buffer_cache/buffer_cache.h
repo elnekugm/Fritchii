@@ -3026,6 +3026,7 @@ void BufferCache<P>::UpdateIndexBuffer() {
         auto inline_index_size = static_cast<u32>(draw_state.inline_index_draw_indexes.size());
         u32 buffer_size = Common::AlignUp(inline_index_size, CACHING_PAGESIZE);
         if (inline_buffer_id == NULL_BUFFER_ID) [[unlikely]] {
+            LOG_INFO(HW_GPU, "Creating inline index buffer of {:#x} bytes", buffer_size);
             inline_buffer_id = CreateBuffer(0, buffer_size, false);
         }
         if (slot_buffers[inline_buffer_id].SizeBytes() < buffer_size) [[unlikely]] {
@@ -3694,6 +3695,18 @@ typename BufferCache<P>::OverlapResult BufferCache<P>::ResolveOverlaps(DAddr dev
          device_addr += CACHING_PAGESIZE) {
         const BufferId overlap_id = page_table[device_addr >> CACHING_PAGEBITS];
         if (!overlap_id) {
+            continue;
+        }
+        if (!slot_buffers.contains(overlap_id)) [[unlikely]] {
+            // A deleted buffer is still in the page table. Joining it would delete whichever
+            // buffer reuses the slot next, possibly the one being created here.
+            static u32 stale_logs = 0;
+            if (stale_logs < 16) {
+                ++stale_logs;
+                LOG_ERROR(HW_GPU, "Stale buffer page: device_addr={:#x} buffer_id={}",
+                          device_addr, overlap_id.index);
+            }
+            page_table[device_addr >> CACHING_PAGEBITS] = BufferId{};
             continue;
         }
         Buffer& overlap = slot_buffers[overlap_id];
