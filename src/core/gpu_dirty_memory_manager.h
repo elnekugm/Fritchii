@@ -35,6 +35,7 @@ public:
                 if (IsValid(tmp.address)) {
                     std::scoped_lock lk(guard);
                     back_buffer.emplace_back(tmp);
+                    has_back.store(true, std::memory_order_release);
                     current.exchange(t, std::memory_order_relaxed);
                     return;
                 }
@@ -76,6 +77,7 @@ public:
             std::scoped_lock lk(guard);
             TransformAddress t = current.exchange(default_transform, std::memory_order_relaxed);
             front_buffer.swap(back_buffer);
+            has_back.store(false, std::memory_order_relaxed);
             if (IsValid(t.address)) {
                 front_buffer.emplace_back(t);
             }
@@ -169,6 +171,7 @@ private:
     }
 
     std::atomic<TransformAddress> current{};
+    std::atomic<bool> has_back{}; ///< back_buffer holds entries (set and cleared under guard)
     std::mutex guard;
     std::mutex gather_guard;
     std::vector<TransformAddress> back_buffer;
