@@ -373,7 +373,8 @@ public:
     }
 
     // Threads this thread started on its own core at a lower priority (see SendSyncRequestImpl in
-    // svc_ipc.cpp). Only touched by the owning thread itself; each entry holds a reference.
+    // svc_ipc.cpp). Only touched by the owning thread itself (and Finalize); each entry holds a
+    // reference.
     std::vector<KThread*>& GetPendingStartedThreads() {
         return m_pending_started_threads;
     }
