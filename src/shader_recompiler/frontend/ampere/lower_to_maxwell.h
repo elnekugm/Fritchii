@@ -4152,10 +4152,14 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
                 emit(0xe24000000000000fULL | predicate);
                 break;
             }
-            if (main_exited || index == 0 || insn.words[0] != 0x7944 ||
+            // ponytail: a call from the post-exit library region is lowered like a main call;
+            // its return relies on the library RET.REL.NODEC base
+            if (index == 0 || insn.words[0] != 0x7944 ||
                 (insn.words[2] & ~0x3ffffU) != 0x03c00000 ||
                 (code[index - 1].words[0] & ~0x00ff0000U) != 0x00007802 ||
-                code[index - 1].Bits(16, 8) >= 250)
+                code[index - 1].Bits(16, 8) >= 250 ||
+                code[index - 1].words[1] != (index + 1) * 16 ||
+                code[index - 1].words[2] != 0xf00)
                 return fail(index, "native call linkage mode");
             const u64 raw = insn.words[1] | (u64{insn.words[2] & 0x3ffff} << 32);
             const s64 relative = static_cast<s64>(raw << 14) >> 14;
