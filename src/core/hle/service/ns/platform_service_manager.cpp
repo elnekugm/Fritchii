@@ -22,6 +22,7 @@
 #include "core/file_sys/system_archive/system_archive.h"
 #include "core/hle/kernel/k_shared_memory.h"
 #include "core/hle/kernel/kernel.h"
+#include "core/hle/kernel/svc_results.h"
 #include "core/hle/service/cmif_serialization.h"
 #include "common/alignment.h"
 #include "core/hle/service/filesystem/filesystem.h"
