@@ -38,9 +38,9 @@ struct LoweredProgram {
     std::vector<u32> source_instruction_offsets;
     u32 source_size{};
     u32 required_texture_buffer = ~0U;
-    // UR28 and up seen without a mirror: lowering again with this many registers below R216
-    // reserved for them (even, so pairs stay adjacent) maps them.
-    u32 high_uniform_registers{};
+    /// The constant buffer the surface stores read their descriptors from, when it differs from
+    /// the textures' one (a program may address both a texture and a surface table).
+    u32 required_surface_buffer = ~0U;
     u32 error_offset{};
     std::string_view error;
 
@@ -1695,83 +1695,18 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
             const u32 binding = insn.Bits(54, 5), offset = insn.Bits(40, 14);
             const u32 data = insn.Bits(32, 8), coordinate = insn.Bits(24, 8);
             const u32 dimension = insn.Bits(61, 3);
-            const u32 mask = insn.Bits(72, 4);
-            const u32 mode = insn.words[2] & ~0xf00U;
-            const u32 reserved = uses_uniform_bank ? high_uniform_base : 246U;
-            const bool strong = mode == 0x0010a000; // Strong stores are fenced on both sides.
-            if (!mask || (mode != 0x00100000 && !strong) || dimension == 2 || dimension > 5 ||
+            // Bits 72-75 carry the channel swizzle; a partial mask stores only those channels.
+            const u32 channels = insn.Bits(72, 4);
+            if ((insn.words[2] & ~0xf00U) != 0x00100000 || channels == 0 ||
+                (dimension != 1 && (dimension < 3 || dimension > 5)) ||
                 binding >= 18 || offset > 0x1fff || insn.Bits(59, 2) || data > 252 ||
-                coordinate > (dimension >= 4 ? 252U : dimension == 3 ? 253U : 254U) ||
-                (dimension < 2 && (coordinate >= reserved ||
-                                   data + static_cast<u32>(std::popcount(mask)) > reserved ||
-                                   (mask != 1 && mask != 3 && mask != 15))))
+                coordinate > (dimension >= 4 ? 252U : 253U))
                 return fail(index, "native formatted surface store mode");
-            // A second descriptor buffer: SUST.B with the handle, loaded from that buffer, in R250.
-            const bool bindless = !bind_texture_buffer(binding);
-            if (bindless) {
-                emit(0x4c98000000070000ULL | 250 | (u64{15} << 39) | (u64{offset} << 20) | (u64{binding} << 34));
-            }
-            if (strong) emit(0xef98000000000000ULL | predicate | (u64{1} << 8)); // MEMBAR.GL
+            if (result.required_surface_buffer != ~0U && result.required_surface_buffer != binding)
+                return fail(index, "native surface descriptor buffer conflict");
+            result.required_surface_buffer = binding;
             emit(0xeb20000000000000ULL | predicate | data | (u64{coordinate} << 8) |
-                (u64{mask} << 20) | (u64{dimension} << 33) |
-                (bindless ? u64{250} << 39 : (u64{offset} << 36) | (u64{1} << 51)));
-            if (strong) emit(0xef98000000000000ULL | predicate | (u64{1} << 8));
-            break;
-        }
-        case 0x593: {
-            const u32 binding = insn.Bits(54, 5), offset = insn.Bits(40, 14);
-            const u32 data = insn.Bits(32, 8), coordinate = insn.Bits(24, 8);
-            const u32 dimension = insn.Bits(61, 3), operation = insn.Bits(87, 4);
-            const u32 coordinates = dimension >= 4 ? 3U : dimension == 3 ? 2U : 1U;
-            const u32 reserved = uses_uniform_bank ? high_uniform_base : 246U;
-            if ((insn.words[2] & ~0x07800000U) != 0x001ee000 || operation > 8 ||
-                dimension == 2 || dimension > 5 || binding >= 18 || offset > 0x1fff ||
-                insn.Bits(59, 2) || coordinate + coordinates > reserved ||
-                (data != 255 && data >= reserved) || (dest != 255 && dest >= reserved) ||
-                (insn.words[3] & 0xc00001ffU))
-                return fail(index, "native formatted surface atomic mode");
-            if (result.required_texture_buffer != ~0U && result.required_texture_buffer != binding)
-                return fail(index, "native surface descriptor buffer conflict");
-            result.required_texture_buffer = binding;
-            emit(base(0xea00000000000000ULL) | (u64{coordinate} << 8) | (u64{data} << 20) |
-                 (u64{operation} << 29) | (u64{dimension} << 33) | (u64{offset} << 36));
-            break;
-        }
-        case 0x59f: { // SURED.D.STRONG.GPU.IGN U32, direct descriptor, buffer or 2D.
-            const u32 binding = insn.Bits(54, 5), offset = insn.Bits(40, 14);
-            const u32 data = insn.Bits(32, 8), coordinate = insn.Bits(24, 8);
-            const u32 dimension = insn.Bits(61, 3);
-            if ((insn.words[2] & ~0x03800000U) != 0x0010e000 || (dimension != 1 && dimension != 3) || binding >= 18 ||
-                offset > 0x1fff || insn.Bits(59, 2) || coordinate > 253)
-                return fail(index, "native surface reduction mode");
-            if (result.required_texture_buffer != ~0U && result.required_texture_buffer != binding)
-                return fail(index, "native surface descriptor buffer conflict");
-            result.required_texture_buffer = binding;
-            // Maxwell SURED: operand 0-7, coordinates 8-15, op 24, U32 zero at 20,
-            // type 33 (1 = buffer, 3 = 2D), bound offset 36, bound 51.
-            emit(0xeb40000000000000ULL | predicate | data | (u64{coordinate} << 8) |
-                (u64{insn.Bits(87, 3)} << 24) | (u64{dimension} << 33) | (u64{offset} << 36) | (u64{1} << 51));
-            break;
-        }
-        case 0x998: case 0x99c: { // SULD.P / SUST.P .2D/2D_ARRAY/3D.IGN, handle in a register (bits 64-71).
-            const bool store = opcode == 0x99c;
-            const u32 data = insn.Bits(store ? 32 : 16, 8);
-            const u32 coordinate = insn.Bits(24, 8), handle = insn.Bits(64, 8);
-            const u32 channels = insn.Bits(72, 4), dimension = insn.Bits(61, 3);
-            const u32 count = static_cast<u32>(std::popcount(channels));
-            const u32 reserved = uses_uniform_bank ? 216U : 246U;
-            if ((insn.words[1] & ~(store ? 0xe00000ffU : 0xe0000000U)) ||
-                (insn.words[2] & ~0xfffU) != (store ? 0x00100000U : 0x001e0000U) ||
-                (insn.words[3] & 0xc00001ffU) || dimension < 3 || dimension > 5 ||
-                channels == 0 || handle >= reserved || data + count > reserved ||
-                coordinate + (dimension >= 4 ? 3U : 2U) > reserved ||
-                (store && (dest != 0 || (channels != 1 && channels != 3 && channels != 15))) ||
-                (!store && (data % (count == 3 ? 4U : count))))
-                return fail(index, "native bindless formatted surface mode");
-            // Maxwell's bindless form: is_bound (bit 51) clear, the handle register at bit 39.
-            emit((store ? 0xeb20000000000000ULL : 0xeb00000000000000ULL) | predicate |
-                data | (u64{coordinate} << 8) | (u64{channels} << 20) |
-                (u64{dimension} << 33) | (u64{handle} << 39));
+                (u64{channels} << 20) | (u64{dimension} << 33) | (u64{offset} << 36) | (u64{1} << 51));
             break;
         }
         case 0x301: // BREV register.
@@ -2472,20 +2407,19 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
             }
             break;
         }
-        case 0xb6f: case 0x370: { // TXQ texture dimensions (0x370: TXQ.B).
-            // TXQ.B takes the handle in Ra and the level in Ra+1, as Maxwell's. Up to two outputs
-            // go to Rd, Rd+1 directly; more, or a second destination (bits 64-71) for the third and
-            // fourth, come out packed in scratch and are copied as for TEX.
-            const bool bindless = opcode == 0x370;
-            const u32 binding = insn.Bits(54, 5); // descriptor buffer, as for TLD
-            const u32 mask = insn.Bits(72, 4), components = static_cast<u32>(std::popcount(mask));
-            const u32 second_dest = insn.Bits(64, 8);
-            const bool direct = second_dest == 255;
-            if (insn.Bits(59, 5) != (bindless ? 1U : 0U) || mask == 0 || (direct && components > 2) ||
-                insn.Bits(76, 14) || insn.Bits(91, 1) || (!bindless && binding >= 18) ||
-                (bindless && (insn.Bits(32, 27) || insn.Bits(24, 8) >= 245)) ||
-                (!direct && (second_dest >= 245 || dest >= 245)) ||
-                insn.Bits(40, 14) > 0x1fff || (direct && components == 2 && (dest & 1)) || dest >= 254)
+        case 0x370: { // TXQ.B texture dimensions on a handle in a register (bindless).
+            if (insn.Bits(72, 4) == 0 || insn.Bits(72, 4) > 3 || insn.Bits(76, 14) ||
+                insn.Bits(91, 1) || dest >= 254 || (insn.Bits(72, 4) == 3 && (dest & 1)))
+                return fail(index, "native texture dimension query mode");
+            // Maxwell's TXQ (b) takes the handle from the register and one more for the LOD.
+            emit(0xdf50000000000000ULL | predicate | dest | (u64{insn.Bits(24, 8)} << 8) |
+                 (u64{1} << 22) | (u64{insn.Bits(72, 4)} << 31) | (u64{insn.Bits(90, 1)} << 49));
+            break;
+        }
+        case 0xb6f: { // TXQ texture dimensions, two packed scalar outputs.
+            if (insn.Bits(59, 5) || insn.Bits(64, 8) != 255 || insn.Bits(72, 4) == 0 || insn.Bits(72, 4) > 3 ||
+                insn.Bits(76, 14) || insn.Bits(91, 1) || insn.Bits(54, 5) >= 18 ||
+                insn.Bits(40, 14) > 0x1fff || (insn.Bits(72, 4) == 3 && (dest & 1)) || dest >= 254)
                 return fail(index, "native texture dimension query mode");
             if (!bindless) {
                 if (result.required_texture_buffer != ~0U && result.required_texture_buffer != binding)
@@ -4112,44 +4046,14 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
             break;
         }
         case 0x944: { // Verified CALL.REL.NOINC with R55 holding the return PC
-            const auto terminal_float_tail = [&] {
-                if (index + 2 >= code.size()) return false;
-                for (size_t tail = index + 2; tail < code.size(); ++tail) {
-                    const auto& next = code[tail];
-                    if (next.words[3] & 0xc00001ffU) return false;
-                    if (next.words[0] == 0x794d && next.words[1] == 0 &&
-                        next.words[2] == 0x03800000)
-                        return true;
-                    const u32 form = next.words[0] & 0xffffU;
-                    if ((form != 0x7209 && form != 0x7809) ||
-                        (next.words[2] != 0x07810000 && next.words[2] != 0x03810000) ||
-                        (form == 0x7209 && next.words[1] > 255))
-                        return false;
-                }
-                return false;
-            };
-            // A RET that could return to the instruction after this transfer. RETs after the main
-            // program's first unconditional EXIT belong to the called library functions (each with
-            // its own return link), which this transfer never enters. Inside a library function,
-            // any RET counts.
-            const auto return_can_reach = [&] {
-                for (const Instruction& candidate : code) {
-                    if (!main_exited && candidate.words[0] == 0x794d && candidate.words[1] == 0 &&
-                        candidate.words[2] == 0x03800000)
-                        return false;
-                    if (candidate.Bits(0, 12) == 0x950) return true;
-                }
-                return false;
-            };
             // A predicated NOINC forward transfer can terminate a loop at its
             // reconvergence point without a return-link setup or matching RET.
             if (native_predicate != 7 && (insn.words[0] & ~0xf000U) == 0x944 &&
                 insn.words[1] == 16 && insn.words[2] == 0x03c00000 &&
                 (insn.words[3] & 0xc00001ffU) == 0 &&
-                index + 2 < code.size() && code[index + 1].words[0] == 0x7947 &&
+                index + 2 < code.size() && (code[index + 1].words[0] & 0xfffU) == 0x947 &&
                 (code[index + 1].words[2] & ~0x3ffffU) == 0x03800000 &&
-                (code[index + 1].words[3] & 0xc00001ffU) == 0 &&
-                (!return_can_reach() || terminal_float_tail())) {
+                (code[index + 1].words[3] & 0xc00001ffU) == 0) {
                 relocations.push_back({static_cast<u32>(result.instructions.size()), index + 2});
                 emit(0xe24000000000000fULL | predicate);
                 break;

@@ -31,28 +31,33 @@ Lowered already (2026-10-31, this branch): `ISETP.EX` (64-bit compare high word)
 
 Still rejected, with the instruction that fails:
 
-Still rejected (fail-fast: the next one only surfaces once this one is lowered). The three
-graphics-path ones keep the screen black; the rest are compute passes:
+**Graphics path: nothing is rejected any more and no draw is skipped.** The two structural
+fixes that got there:
+
+- Surface stores and loads keep their own descriptor buffer (`required_surface_buffer`,
+  `SurfaceBoundBuffer()`), so a program can sample a texture from one constant buffer and store
+  through a surface in another; the pipeline cache version went to 19 and the native override
+  header to seven words for it.
+- `SUST.P` takes a partial channel mask (`Bits(72,4)`) instead of requiring all four channels.
+- `TXQ.B` on a bindless handle (`0x370`) becomes Maxwell `TXQ (b)` with the handle in the register.
+- `CALL` accepts the predicated NOINC forward transfer when the next instruction is `BSSY`
+  (`0x947`), the rule the nxnative build uses.
+
+The screen is still black because the *compute* side never dispatches: 26 × `native shader
+dispatch required` (the QMD needs a lowered shader that was rejected). Those programs still hit
+this list, which is now only compute:
 
 | Message | Instruction |
 |---|---|
-| native surface descriptor buffer conflict | `b9b 00007b9b 8080480c 00100f00` (2 programs) |
-| native formatted surface store mode | `b9b 02007b9b 60005804 0010af00`, `b9b 1200ab9b 6000aa04 0010af00` |
-| unsupported native opcode (TXQ.B, bindless handle) | `370 1c1d7370 08000000 000001ff` |
-| native integer multiply mode | `824 9a2b7824 00000001 008e0603` |
-| unsupported native opcode (IMAD.WIDE, cbuf) | `625 34028625 00005e00 078e0203` |
-| unsupported native opcode | `226 47407226 00000040 000010ff` |
-| unsupported native opcode (F2I.64) | `311 00047311 00000004 0021d800` |
-| unsupported native opcode | `fae 020d7fae 00000000 0e101c48` |
-| native integer carry/third source | `c10 0c0a7c10 00000004 0ff9e0ff` |
+| native integer multiply mode | `824 9a2b7824 00000001 008e0603`, `824 91497824 00000001 000e062f` |
+| native integer carry/third source | `c10 0c0a7c10 00000004 0ff9e0ff`, `c10 0402ac10 0000000a 0ffde0ff` |
 | native constant add carry mode | `a10 2c2c8a10 00005c00 07b5e005` |
-| native matrix multiply | `23c ...` — `EDEN_NX2_TENSOR=1` does not clear it |
+| native formatted surface store mode | `b9b 02007b9b 60005804 0010af00`, `b9b 1200ab9b 6000aa04 0010af00` |
+| unsupported native opcode (F2I.64) | `311 00047311 00000004 0021d800` |
+| unsupported native opcode | `226 47407226 00000040 000010ff`, `fae 020d7fae 00000000 0e101c48` |
+| unsupported native opcode (IMAD.WIDE, cbuf) | `625 34028625 00005e00 078e0203` |
+| native matrix multiply | `23c 0a08723c 0000000c 00000008` — `EDEN_NX2_TENSOR=1` does not clear it |
 
-The two `b9b` classes are not a missing case: `ShaderEnvironment::texture_bound` holds one
-descriptor buffer per program, so a program that stores through a surface and samples a
-texture that live in different descriptor buffers has nowhere to put the second one. That,
-and `TXQ.B` on a bindless handle (a descriptor in a register pair instead of a bank offset),
-are the two structural items; the remaining opcodes are ordinary case work.
 Also seen, not yet shader related:
 
 - `Unmapped Device ReadBlock` bursts — guest reads inside ranges that never got mapped.

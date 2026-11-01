@@ -37,15 +37,10 @@ inline std::vector<u8> EncodeProgramOverride(std::span<const Instruction> source
 }
 
 inline u32 ProgramOverrideSourceSize(std::span<const u8> bytes) {
-    std::array<u32, 6> header{};
+    std::array<u32, 7> header{};
     if (bytes.size() < sizeof(header)) return 0;
     std::memcpy(header.data(), bytes.data(), sizeof(header));
-    const bool has_surface = header[1] == 0x3330564f;
-    const bool mapped = has_surface || header[1] == 0x3230564f;
-    const size_t header_size = sizeof(header) + (has_surface ? sizeof(u32) : 0);
-    if (bytes.size() < header_size) return 0;
-    u32 surface = ~0U;
-    if (has_surface) std::memcpy(&surface, bytes.data() + sizeof(header), sizeof(surface));
+    const bool mapped = header[1] == 0x3330564f;
     if (header[0] != 0x4e454445 || (!mapped && header[1] != 0x3130564f) ||
         (mapped ? header[5] != header[2] / 16 : header[5] != 0) ||
         header[2] == 0 || header[2] % sizeof(Instruction) || header[2] > 1048576 ||
@@ -64,7 +59,7 @@ inline LoweredProgram DecodeProgramOverride(std::span<const u8> bytes,
         result.error = message;
         return result;
     };
-    std::array<u32, 6> header{};
+    std::array<u32, 7> header{};
     if (!ProgramOverrideSourceSize(bytes)) return fail("invalid native override header or length");
     std::memcpy(header.data(), bytes.data(), sizeof(header));
     const bool has_surface = header[1] == 0x3330564f;
@@ -88,10 +83,7 @@ inline LoweredProgram DecodeProgramOverride(std::span<const u8> bytes,
     }
     result.source_size = header[2];
     result.required_texture_buffer = header[4];
-    result.required_surface_buffer = ~0U;
-    if (has_surface) {
-        std::memcpy(&result.required_surface_buffer, bytes.data() + sizeof(header), sizeof(u32));
-    }
+    result.required_surface_buffer = header[6];
     return result;
 }
 

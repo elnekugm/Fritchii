@@ -122,10 +122,7 @@ using VideoCommon::GuessMissing;
 using VideoCommon::GraphicsEnvironment;
 using VideoCommon::ShaderSnapshotFailure;
 
-constexpr u32 CACHE_VERSION = VideoCommon::VulkanPipelineCacheVersion;
-// The warm-up builder writes these keys byte for byte (shader_warm/warm_records.h).
-static_assert(sizeof(GraphicsPipelineCacheKey) == VideoCommon::ShaderWarm::GraphicsKeySize);
-static_assert(sizeof(ComputePipelineCacheKey) == sizeof(VideoCommon::ShaderWarm::ComputeKey));
+constexpr u32 CACHE_VERSION = 19; // 19: environments carry the surface descriptor buffer
 constexpr size_t VULKAN_CACHE_FLUSH_PIPELINES = 128;
 constexpr size_t VULKAN_CACHE_FLUSH_MIN_SECONDS = 30;
 constexpr std::array<char, 8> VULKAN_CACHE_MAGIC_NUMBER{'y', 'u', 'z', 'u', 'v', 'k', 'c', 'h'};

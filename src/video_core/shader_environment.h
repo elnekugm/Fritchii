@@ -163,7 +163,7 @@ protected:
 
     u32 local_memory_size{};
     u32 texture_bound{};
-    u32 surface_bound = ~0U; ///< ~0U: unset, surfaces use texture_bound
+    u32 surface_bound{};
     u32 shared_memory_size{};
     std::array<u32, 3> workgroup_size{};
 
@@ -416,7 +416,7 @@ private:
     u32 local_memory_size{};
     u32 shared_memory_size{};
     u32 texture_bound{};
-    u32 surface_bound = ~0U; ///< ~0U: unset, surfaces use texture_bound
+    u32 surface_bound{};
     u32 read_lowest{};
     u32 read_highest{};
     u32 initial_offset{};
