@@ -634,13 +634,9 @@ void KeplerCompute::DescribeNativeResources(const NativeQmdScheduler::Descriptor
             const u32 tic_index = handle & 0xfffff;
             if (handle == 0 || tic_index == 0 || tic_index > regs.tic.limit) continue;
             const auto tic = GetTICEntry(tic_index);
-            // Traced (always): small images too, e.g. Kirby Air Riders' 33x33x33 colour table.
-            if (tic.Address() == 0 ||
-                (!always && (tic.Width() < 256 || tic.Height() < 256)) ||
-                (always && tic.Width() < 8)) continue;
-            LOG_INFO(HW_GPU, "    cbuf{}+{:#x} = {:#x}: tic {} address {:#x} {}x{}x{} type {} format {:#x} block {}",
+            if (tic.Address() == 0 || tic.Width() < 256 || tic.Height() < 256) continue;
+            LOG_INFO(HW_GPU, "    cbuf{}+{:#x} = {:#x}: tic {} address {:#x} {}x{} format {:#x} block {}",
                      slot, offset, handle, tic_index, tic.Address(), tic.Width(), tic.Height(),
-                     tic.Depth(), static_cast<u32>(tic.texture_type.Value()),
                      static_cast<u32>(tic.format.Value()), tic.IsBlockLinear());
         }
     }
@@ -688,43 +684,21 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
         if (tic_index > regs.tic.limit) return std::nullopt;
         return GetTICEntry(tic_index);
     };
-    const auto upscale_pair = [](const std::optional<Texture::TICEntry>& from,
-                                 const std::optional<Texture::TICEntry>& to) {
-        return from && to && from->format == to->format && from->Address() != 0 &&
-               to->Address() != 0 && to->Width() > from->Width() && from->IsBlockLinear() &&
-               to->IsBlockLinear();
+    const auto usable = [](const std::optional<Texture::TICEntry>& in,
+                           const std::optional<Texture::TICEntry>& out) {
+        return in && out && in->format == out->format && in->Address() != 0 &&
+               out->Address() != 0 && out->Width() > in->Width() && in->IsBlockLinear() &&
+               out->IsBlockLinear();
     };
-    std::optional<Texture::TICEntry> input = image(0x90), output = image(0xa0);
-    bool fortunes_weave = false;
-    if (!upscale_pair(input, output)) {
-        input = image(0x328);
-        output = image(0x348);
-        fortunes_weave = upscale_pair(input, output);
-    }
     // Title 4's version 458752 keeps the pair at cbuf0+0x60 (1280x720) and +0x70 (1920x1080); the
     // screen stayed the output's clear colour (blue) until camera mode skipped the pass.
-    if (!upscale_pair(input, output)) {
-        input = image(0x60);
-        output = image(0x70);
+    std::optional<Texture::TICEntry> input, output;
+    for (const auto [in_offset, out_offset] : {std::pair{0x90U, 0xa0U}, std::pair{0x60U, 0x70U}}) {
+        input = image(in_offset);
+        output = image(out_offset);
+        if (usable(input, output)) break;
     }
-    if (!upscale_pair(input, output)) {
-        input.reset();
-        output.reset();
-        for (u32 first = 0x80; first < 0x120 && !input; first += 4) {
-            const auto from = memory_manager.Read<u32>(cbuf_address + first) != 0 ? image(first)
-                                                                                    : std::nullopt;
-            for (u32 second = first + 4; from && second < 0x120; second += 4) {
-                if (memory_manager.Read<u32>(cbuf_address + second) == 0) continue;
-                const auto to = image(second);
-                if (upscale_pair(from, to)) {
-                    input = from;
-                    output = to;
-                    break;
-                }
-            }
-        }
-    }
-    if (!input || !output)
+    if (!usable(input, output))
         return false;
     using RTFormat = Tegra::RenderTargetFormat;
     RTFormat format{};

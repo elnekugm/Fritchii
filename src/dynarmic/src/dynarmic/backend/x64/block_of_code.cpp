@@ -61,34 +61,6 @@ namespace {
 
 constexpr size_t CONSTANT_POOL_SIZE = 2 * 1024 * 1024;
 constexpr size_t PRELUDE_COMMIT_SIZE = 16 * 1024 * 1024;
-#ifdef _WIN32
-constexpr size_t COMMIT_STEP = 4 * 1024 * 1024;
-
-// Reserves the code space; EnsureMemoryCommitted commits it as code is emitted. Xbyak's default
-// allocator commits all of it up front: 512 MiB per core, 3 GiB of commit charge for six cores
-// of which a game fills a fraction.
-struct ReservingAllocator final : Xbyak::Allocator {
-    uint8_t* alloc(size_t size) override {
-        return static_cast<uint8_t*>(VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS));
-    }
-    void free(uint8_t* p) override {
-        VirtualFree(p, 0, MEM_RELEASE);
-    }
-    bool useProtect() const override {
-        return false;
-    }
-};
-
-Xbyak::Allocator* CodeAllocator() {
-    // Never destroyed: code blocks may outlive static destruction.
-    static auto* const allocator = new ReservingAllocator;
-    return allocator;
-}
-#else
-Xbyak::Allocator* CodeAllocator() {
-    return nullptr;
-}
-#endif
 
 #ifdef _WIN32
 class CodeMemoryAllocator final : public Xbyak::Allocator {
@@ -124,7 +96,7 @@ void ProtectMemory(const void* base, size_t size, bool is_executable) {
 }
 #endif
 
-static HostFeature DetectHostFeatures() {
+HostFeature DetectHostFeatures() {
     HostFeature f{};
 #ifdef DYNARMIC_ENABLE_CPU_FEATURE_DETECTION
     using Cpu = Xbyak::util::Cpu;
@@ -134,12 +106,12 @@ static HostFeature DetectHostFeatures() {
     if (cpu_info.has(Cpu::tSSE42)) f |= HostFeature::SSE42;
     if (cpu_info.has(Cpu::tAVX)) f |= HostFeature::AVX;
     if (cpu_info.has(Cpu::tAVX2)) f |= HostFeature::AVX2;
-    // EDEN_NX2_AVX512=0 leaves the AVX-512 paths out, so the JIT emits the AVX2 code: Zen 4
-    // players crashed in Mario Kart World seconds after boot, and one of these paths already
-    // miscompiled (VectorCountLeadingZeros16). Read when the first JIT starts, after
-    // nx2_switches.txt.
+    // AVX-512 paths stay off unless EDEN_NX2_AVX512=1: Zen 4 players crashed in Mario Kart World
+    // seconds after boot by jumping to garbage, and one of these paths already miscompiled
+    // (VectorCountLeadingZeros16). Without them the JIT emits the AVX2 code every other tested CPU
+    // runs. Read when the first JIT starts, after nx2_switches.txt.
     const char* avx512 = std::getenv("EDEN_NX2_AVX512");
-    if (avx512 == nullptr || avx512[0] != '0') {
+    if (avx512 != nullptr && avx512[0] == '1') {
         if (cpu_info.has(Cpu::tAVX512F)) f |= HostFeature::AVX512F;
         if (cpu_info.has(Cpu::tAVX512CD)) f |= HostFeature::AVX512CD;
         if (cpu_info.has(Cpu::tAVX512VL)) f |= HostFeature::AVX512VL;
@@ -205,7 +177,11 @@ BlockOfCode::BlockOfCode(RunCodeCallbacks cb, JitStateInfo jsi, size_t total_cod
 #else
         , nullptr //Allow RWE
 #endif
-        , CodeAllocator())
+#ifdef _WIN32
+        , &code_memory_allocator)
+#else
+        , nullptr)
+#endif
     , constant_pool(*this, CONSTANT_POOL_SIZE)
     , jsi(jsi)
     , cb(std::move(cb))
@@ -262,9 +238,7 @@ size_t BlockOfCode::SpaceRemaining() const {
 void BlockOfCode::EnsureMemoryCommitted([[maybe_unused]] size_t codesize) {
 #ifdef _WIN32
     if (committed_size < size_ + codesize) {
-        // The code space is only reserved (CodeAllocator), so everything up to the end of the next
-        // emission has to be committed; in steps, as each VirtualAlloc call is a kernel call.
-        committed_size = std::min<size_t>(maxSize_, (std::max)(committed_size + COMMIT_STEP, size_ + codesize));
+        const size_t new_committed_size = std::min<size_t>(maxSize_, committed_size + codesize);
 #    ifdef DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT
         void* const memory = VirtualAlloc(top_, new_committed_size, MEM_COMMIT, PAGE_READWRITE);
 #    else
