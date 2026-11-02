@@ -937,7 +937,7 @@ bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 am
         // flush them on demand), and Mario Tennis Fever runs with Balanced fences by default.
         const bool should_sync =
             Settings::IsGPUFenceBehaviorBalanced() || Settings::IsGPUFenceBehaviorAccurate();
-        if (should_sync && DownloadsAtFence(*cpu_dest_address, amount)) {
+        if (should_sync && HasFenceDownload(*cpu_dest_address, amount)) {
             runtime.Finish();
         }
     }
