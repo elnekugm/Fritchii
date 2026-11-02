@@ -7,7 +7,6 @@
 #include <cstdlib>
 #include <memory>
 
-#include "common/scope_exit.h"
 #include "core/hle/service/server_manager.h"
 
 namespace Core {
@@ -32,12 +31,9 @@ inline void RunNx2GsvServer(Core::System& system) {
         return;
     }
     auto server_manager = std::make_unique<ServerManager>(system);
+    // Cleared by ~ServerManager before it goes away (also when refused at shutdown): later
+    // sessions fall back to the server of the session that creates them.
     g_nx2_gsv_server.store(server_manager.get(), std::memory_order_release);
-    // Cleared once the server stops (or is refused at shutdown): later sessions fall back to the
-    // server of the session that creates them.
-    SCOPE_EXIT {
-        g_nx2_gsv_server.store(nullptr, std::memory_order_release);
-    };
     ServerManager::RunServer(std::move(server_manager));
 }
 

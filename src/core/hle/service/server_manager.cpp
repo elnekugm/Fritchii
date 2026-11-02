@@ -21,6 +21,7 @@
 #include "core/hle/kernel/svc_results.h"
 #include "core/hle/service/hle_ipc.h"
 #include "core/hle/service/ipc_helpers.h"
+#include "core/hle/service/nx2_gsv_server.h"
 #include "core/hle/service/server_manager.h"
 #include "core/hle/service/sm/sm.h"
 
@@ -98,6 +99,11 @@ ServerManager::ServerManager(Core::System& system)
 }
 
 ServerManager::~ServerManager() {
+    // The Switch 2 graphics system server: stop handing it out before it goes away.
+    if (ServerManager* self = this; g_nx2_gsv_server.load(std::memory_order_acquire) == self) {
+        g_nx2_gsv_server.compare_exchange_strong(self, nullptr, std::memory_order_acq_rel);
+    }
+
     // Signal stop.
     m_stop_source.request_stop();
     m_wakeup_event->Signal(m_system.Kernel());
