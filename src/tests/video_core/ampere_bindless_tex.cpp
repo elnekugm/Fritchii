@@ -375,7 +375,12 @@ TEST_CASE("Ampere uniform bindless TEX admits only forward branches outside its 
         sample[0], sample[1], {{0x00047882, 0, 0, 0}}, Branch(-64), sample[2],
     }};
     REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(loop_clobber)));
-    for (const s32 relative : {-48, -16, 1, 1024}) {
+    // Loops after the texture are allowed while the span they rerun keeps the pair (Yoshi needs them).
+    for (const s32 relative : {-48, -16}) {
+        const std::array<Instruction, 4> loop{{sample[0], sample[1], Branch(relative), sample[2]}};
+        REQUIRE(static_cast<bool>(LowerToMaxwell(loop)));
+    }
+    for (const s32 relative : {1, 1024}) {
         const std::array<Instruction, 4> invalid{{sample[0], sample[1], Branch(relative), sample[2]}};
         const auto rejected = LowerToMaxwell(invalid);
         REQUIRE_FALSE(static_cast<bool>(rejected));
@@ -432,8 +437,10 @@ TEST_CASE("Ampere uniform bindless TEX preserves captured implicit LOD operands"
     }
 }
 
-TEST_CASE("Ampere uniform bindless TEX stops provenance at uniform writes and unknown opcodes",
+TEST_CASE("Ampere uniform bindless TEX stops provenance at writes to the handle pair",
           "[video_core][ampere][bindless_tex]") {
+    // Only writes that can reach UR4/UR5 break the pair: a uniform write to UR7 does not, and games
+    // in the shader dumps compute other uniform values between the shift and the texture.
     for (const u32 target : {4U, 5U, 7U}) {
         for (const Instruction clobber : {
                  Instruction{{0x00007ab9U | (target << 16), 0x00805a00, 0x800, 0}},
@@ -445,15 +452,22 @@ TEST_CASE("Ampere uniform bindless TEX stops provenance at uniform writes and un
                 sample[0], clobber, {{0x00097308, 1, 0x1000, 0}}, sample[1], sample[2],
             }};
             const auto lowered = LowerToMaxwell(code);
+            if (target == 7) {
+                REQUIRE(static_cast<bool>(lowered));
+                continue;
+            }
             REQUIRE_FALSE(static_cast<bool>(lowered));
             REQUIRE(lowered.error_offset == 48);
             REQUIRE(lowered.instructions.empty());
         }
     }
+    // MOV R0 writes a general register and @!PT padding never runs: neither can break the pair.
+    for (const Instruction harmless : {Instruction{{0x00007802, 0, 0xf00, 0}}, Instruction{{0x0000ffff, 0, 0, 0}}}) {
+        const std::array<Instruction, 4> code{{sample[0], harmless, sample[1], sample[2]}};
+        REQUIRE(static_cast<bool>(LowerToMaxwell(code)));
+    }
     for (const Instruction barrier : {
              Instruction{{0x00047ab9, 0x00805a00, 0xa00, 0}},
-             Instruction{{0x00007802, 0, 0xf00, 0}},
-             Instruction{{0x0000ffff, 0, 0, 0}},
          }) {
         const std::array<Instruction, 4> code{{sample[0], barrier, sample[1], sample[2]}};
         const auto lowered = LowerToMaxwell(code);
@@ -505,14 +519,15 @@ TEST_CASE("Ampere uniform bindless TEX preserves scalar and pair result masks",
     }
 }
 
-TEST_CASE("Ampere uniform bindless TEX bounds the provenance scan",
+TEST_CASE("Ampere uniform bindless TEX finds a shift far above the texture",
           "[video_core][ampere][bindless_tex]") {
-    for (const u32 count : {31U, 32U}) {
+    // A prologue may compute the pair long before the texture; games in the shader dumps need more than 32.
+    for (const u32 count : {31U, 32U, 200U}) {
         std::vector<Instruction> code{sample[0]};
         for (u32 i = 0; i < count; ++i) code.push_back({{0x09047220, 4, 0x0041c000, 0}});
         code.push_back(sample[1]);
         code.push_back(sample[2]);
-        REQUIRE(static_cast<bool>(LowerToMaxwell(code)) == (count == 31));
+        REQUIRE(static_cast<bool>(LowerToMaxwell(code)));
     }
 }
 
@@ -541,8 +556,8 @@ TEST_CASE("Ampere uniform bindless TEX rejects unverified handle pairs and contr
         code[0].words[bit / 32] ^= 1U << (bit % 32);
         REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(code)));
     }
-    for (const u32 opcode : {0x941U, 0x942U, 0x944U, 0x945U,
-                             0x949U, 0x950U, 0x958U}) {
+    // BSYNC, BREAK and BSSY are no-ops in the lowering and never transfer control.
+    for (const u32 opcode : {0x944U, 0x949U, 0x950U, 0x958U}) {
         const std::array<Instruction, 4> code{{sample[0], sample[1],
                                              {{0x7000U | opcode, 0, 0x03800000, 0}},
                                              sample[2]}};
@@ -551,6 +566,7 @@ TEST_CASE("Ampere uniform bindless TEX rejects unverified handle pairs and contr
         REQUIRE(lowered.error_offset == 16);
         REQUIRE(lowered.instructions.empty());
     }
+    // A branch into the window skips the shift; a loop before the shift does not touch the pair.
     for (const bool forward : {false, true}) {
         const std::array<Instruction, 4> code{{
             {{0x00002947, forward ? 16U : 0xfffffff0U,
@@ -558,6 +574,10 @@ TEST_CASE("Ampere uniform bindless TEX rejects unverified handle pairs and contr
             sample[0], sample[1], sample[2],
         }};
         const auto lowered = LowerToMaxwell(code);
+        if (!forward) {
+            REQUIRE(static_cast<bool>(lowered));
+            continue;
+        }
         REQUIRE_FALSE(static_cast<bool>(lowered));
         REQUIRE(lowered.error_offset == 32);
         REQUIRE(lowered.instructions.empty());
