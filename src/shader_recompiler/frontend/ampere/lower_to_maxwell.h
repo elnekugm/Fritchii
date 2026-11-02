@@ -47,6 +47,10 @@ struct LoweredProgram {
     explicit operator bool() const { return error.empty(); }
 };
 
+/// The tessellation stage a program runs in: it decides which patch attribute accesses mean
+/// something (the control stage writes patches and reads its own back, evaluation reads them).
+enum class TessellationStage { None, Control, Evaluation };
+
 // Lower only operations whose semantics are representable by the existing
 // Maxwell frontend. These are new instructions, not reinterpretations of the
 // native bytes. Scheduling/control words are added by the environment adapter.
@@ -3148,9 +3152,16 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
             if (address % 4 || address + components * 4 > 0x400 || insn.Bits(24, 8) != 255) {
                 return fail(index, "native attribute address or indexing");
             }
+            // The frontend reads only generic patches back, not the tessellation levels.
+            if (opcode == 0x321 && patch && address < 0x18)
+                return fail(index, "native tessellation level read");
+            // A control program writes only its own control point (the frontend's store target).
+            if (tessellation == TessellationStage::Control && opcode == 0x322 && !patch &&
+                insn.Bits(64, 8) != 255)
+                return fail(index, "native control point store to another vertex");
             // a[0x5c] has no Maxwell meaning (Ampere uses it for a per-primitive hint such as the
             // shading rate). Nothing reads it back; dropping the store keeps full-rate shading.
-            if (opcode == 0x322 && address == 0x5c && components == 1) break;
+            if (opcode == 0x322 && !patch && address == 0x5c && components == 1) break;
             u32 value_reg = opcode == 0x321 ? static_cast<u32>(dest) : insn.Bits(32, 8);
             if (value_reg == 255) {
                 if (opcode == 0x321) break; // load into RZ: nothing to do
@@ -3159,7 +3170,7 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
                 value_reg = 250;
             }
             if (value_reg + components > 255) return fail(index, "native attribute register range");
-            const u32 vertex = opcode == 0x321 ? insn.Bits(32, 8) : insn.Bits(64, 8);
+            // The frontend reads the own tessellation coordinate whatever the vertex.
             const u64 translated = (opcode == 0x321 ? 0xefd8000000000000ULL : 0xeff0000000000000ULL) |
                 predicate | value_reg | (u64{255} << 8) | (u64{address} << 20) |
                 (u64{patch} << 31) | (u64{output} << 32) |
