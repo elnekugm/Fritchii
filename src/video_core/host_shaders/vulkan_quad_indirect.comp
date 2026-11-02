@@ -1,0 +1,30 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#version 450
+
+// Turns a non-indexed indirect quad draw (vertex count, instance count, first vertex, first
+// instance) into an indexed one over the quad index buffer bound at its start.
+
+layout(local_size_x = 1) in;
+
+layout(std430, binding = 0) readonly buffer Input {
+    uint input_words[];
+};
+
+layout(std430, binding = 1) writeonly buffer Output {
+    uint indexed[5];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint max_vertices;
+    uint first_word;
+};
+
+void main() {
+    indexed[0] = min(input_words[first_word], max_vertices) / 4u * 6u;
+    indexed[1] = input_words[first_word + 1u];
+    indexed[2] = 0u;
+    indexed[3] = input_words[first_word + 2u]; // vertex offset: the first vertex
+    indexed[4] = input_words[first_word + 3u];
+}
