@@ -194,7 +194,8 @@ struct OverlapRangeSet<AddressType>::OverlapRangeSetImpl {
 
     template <typename Func>
     void ForEachInRange(AddressType base_address, size_t size, Func&& func) const {
-        if (m_split_ranges_set.empty()) {
+        // An empty query breaks the set's ordering: at address 0 it visits every range, inverted.
+        if (m_split_ranges_set.empty() || size == 0) {
             return;
         }
         const AddressType start_address = base_address;
