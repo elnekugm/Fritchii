@@ -25,6 +25,7 @@ class System;
 
 namespace FileSys {
 class NACP;
+class ProgramMetadata;
 } // namespace FileSys
 
 namespace Kernel {
@@ -328,6 +329,17 @@ public:
      * @return ResultStatus result of function
      */
     virtual ResultStatus ReadControlData(FileSys::NACP& control) {
+        return ResultStatus::ErrorNotImplemented;
+    }
+
+    /**
+     * Get the program metadata (main.npdm) of the title
+     *
+     * @param[out] out Reference to store the program metadata into
+     *
+     * @return ResultStatus result of function
+     */
+    virtual ResultStatus ReadProgramMetadata(FileSys::ProgramMetadata& out) {
         return ResultStatus::ErrorNotImplemented;
     }
 

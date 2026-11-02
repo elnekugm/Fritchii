@@ -608,6 +608,20 @@ ResultStatus AppLoader_DeconstructedRomDirectory::ReadIcon(std::vector<u8>& out_
     return ResultStatus::Success;
 }
 
+ResultStatus AppLoader_DeconstructedRomDirectory::ReadProgramMetadata(FileSys::ProgramMetadata& out) {
+    const auto npdm = dir != nullptr ? dir->GetFile("main.npdm") : nullptr;
+    if (npdm == nullptr) {
+        return ResultStatus::ErrorMissingNPDM;
+    }
+
+    if (const auto result = metadata.Load(npdm); result != ResultStatus::Success) {
+        return result;
+    }
+
+    out = metadata;
+    return ResultStatus::Success;
+}
+
 ResultStatus AppLoader_DeconstructedRomDirectory::ReadProgramId(u64& out_program_id) {
     out_program_id = title_id;
     return ResultStatus::Success;

@@ -183,8 +183,18 @@ bool IsSwitch2Program(const FileSys::VirtualFile& file, u64 program_id, std::siz
     }
     const auto dir = file != nullptr ? file->GetContainingDirectory() : nullptr;
     const auto npdm = dir != nullptr ? dir->GetFile("main.npdm") : nullptr;
-    return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
-           metadata.IsSwitch2();
+    if (npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success) {
+        return metadata.IsSwitch2();
+    }
+
+    // NSP/XCI and installed NCAs keep the NPDM in the program NCA's ExeFS.
+    const auto loader = Loader::GetLoader(system, file, program_id, program_index);
+    if (loader == nullptr ||
+        loader->ReadProgramMetadata(metadata) != Loader::ResultStatus::Success) {
+        return false;
+    }
+
+    return metadata.IsSwitch2();
 }
 
 } // namespace
