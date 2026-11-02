@@ -5,14 +5,17 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <cinttypes>
+#include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include "common/common_funcs.h"
-#include "common/game_presets.h"
 #include "common/hex_util.h"
 #include "common/logging.h"
 #include "common/lz4_compression.h"
@@ -20,7 +23,6 @@
 #include "common/settings.h"
 #include "common/swap.h"
 #include "core/core.h"
-#include "core/arm/dynarmic/window_trace.h"
 #include "core/file_sys/patch_manager.h"
 #include "core/hle/kernel/code_set.h"
 #include "core/hle/kernel/k_page_table.h"
@@ -48,6 +50,87 @@ static_assert(sizeof(MODHeader) == 0x1c, "MODHeader has incorrect size.");
 
 constexpr u32 PageAlignSize(u32 size) {
     return static_cast<u32>((size + Core::Memory::YUZU_PAGEMASK) & ~Core::Memory::YUZU_PAGEMASK);
+}
+
+// The Switch 2 SDK's nn::vi::detail::DefaultDisplay::QueryVrrSupported learns VRR support from a
+// display mode capability event Eden never signals, so it reports none. Title 4 then assumes a fixed
+// 60 Hz display and its speed swings with the frame rate; told VRR works, it enables it and times
+// its frames itself. Make the exported function store true and succeed (any SDK version: found by
+// name). EDEN_NX2_REPORT_VRR=0 leaves it alone.
+void ReportVrrSupported(std::span<u8> image, std::string_view module_name) {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_REPORT_VRR");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (!enabled || image.size() < 8) {
+        return;
+    }
+    const auto read32 = [&](u64 offset) -> std::optional<u32> {
+        if (offset + 4 > image.size()) return std::nullopt;
+        u32 value;
+        std::memcpy(&value, image.data() + offset, 4);
+        return value;
+    };
+    const auto read64 = [&](u64 offset) -> std::optional<u64> {
+        if (offset + 8 > image.size()) return std::nullopt;
+        u64 value;
+        std::memcpy(&value, image.data() + offset, 8);
+        return value;
+    };
+    const auto mod0 = read32(4);
+    if (!mod0 || read32(*mod0) != Common::MakeMagic('M', 'O', 'D', '0')) {
+        return;
+    }
+    const auto dynamic_rel = read32(*mod0 + 4);
+    if (!dynamic_rel) {
+        return;
+    }
+    u64 symtab = 0, strtab = 0, strsz = 0, hash = 0;
+    for (u64 entry = *mod0 + static_cast<s32>(*dynamic_rel);; entry += 16) {
+        const auto tag = read64(entry), value = read64(entry + 8);
+        if (!tag || !value || *tag == 0) break;
+        switch (*tag) {
+        case 4: hash = *value; break;    // DT_HASH
+        case 5: strtab = *value; break;  // DT_STRTAB
+        case 6: symtab = *value; break;  // DT_SYMTAB
+        case 10: strsz = *value; break;  // DT_STRSZ
+        default: break;
+        }
+    }
+    if (symtab == 0 || strtab == 0) {
+        return;
+    }
+    // DT_HASH gives the symbol count; with only DT_GNU_HASH (the Switch 2 SDK) the table runs up
+    // to the string table, which follows it.
+    std::optional<u32> count = hash != 0 ? read32(hash + 4) : std::nullopt;
+    if (!count && strtab > symtab) {
+        count = static_cast<u32>((strtab - symtab) / 24);
+    }
+    if (!count) {
+        return;
+    }
+    constexpr std::string_view Target = "_ZNK2nn2vi6detail14DefaultDisplay17QueryVrrSupportedEPb";
+    for (u32 index = 0; index < *count; ++index) {
+        const u64 symbol = symtab + u64{index} * 24;
+        const auto name_offset = read32(symbol);
+        const auto value = read64(symbol + 8);
+        if (!name_offset || !value || *value == 0 || *name_offset + Target.size() >= strsz ||
+            strtab + *name_offset + Target.size() >= image.size()) {
+            continue;
+        }
+        const auto* name = reinterpret_cast<const char*>(image.data() + strtab + *name_offset);
+        if (std::string_view{name, Target.size()} != Target || name[Target.size()] != '\0') {
+            continue;
+        }
+        // mov w8, #1; strb w8, [x1]; mov w0, #0; ret
+        static constexpr std::array<u32, 4> Code{0x52800028, 0x39000028, 0x52800000, 0xd65f03c0};
+        if (*value + sizeof(Code) > image.size()) {
+            return;
+        }
+        std::memcpy(image.data() + *value, Code.data(), sizeof(Code));
+        LOG_INFO(Loader, "{}: QueryVrrSupported at {:#x} now reports VRR support", module_name, *value);
+        return;
+    }
 }
 } // Anonymous namespace
 
@@ -189,80 +272,8 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
 
         std::copy(pi_header.begin() + sizeof(NSOHeader), pi_header.end(), patchable_section.data());
     }
-
-    // Ocarina of Time's high refresh rate patch (Settings oot_high_refresh): where its speed scale
-    // word ended up, for the present pacing (nx2_gsv.h), and whether it applied at all.
-    constexpr u64 OcarinaOfTimeProgramId = 0x0400486024DEC000ULL;
-    const bool oot_main = name == "main" && process.GetProgramId() == OcarinaOfTimeProgramId;
-    std::optional<size_t> oot_high_refresh_scale;
-    if (oot_main) {
-        oot_high_refresh_scale = FileSys::OotHighRefreshScaleOffset(
-            std::span<const u8>{codeset.memory}.subspan(module_start));
-    }
-
-    // Mario Kart World selects a 1- or 2-vblank frame mode in its main loop. Force its native
-    // 30 FPS mode, or let it choose dynamically using the whole frame time (CPU + GPU wait).
-    // Match the instruction sequence instead of relying on a title-version-specific address.
-    const bool mkw_dynamic = Settings::values.mkw_dynamic_fps.GetValue();
-    bool mkw_dynamic_fps_patch_applied = false;
-    if ((mkw_dynamic || Settings::values.mkw_30fps.GetValue()) && name == "main" &&
-        process.GetProgramId() == Settings::MarioKartWorldProgramId) {
-        constexpr u32 ModeLoadInsn = 0xB9421268; // ldr w8, [x19, #0x210]
-        const u32 mode = mkw_dynamic ? 0U : 2U;
-        const u32 mode_instruction = 0x52800008U | (mode << 5); // mov w8, #mode
-        const auto& text = nso_header.segments[0];
-        u8* const code = codeset.memory.data() + module_start + text.location;
-        const size_t count = text.size / sizeof(u32);
-        const auto word = [code](size_t index) {
-            u32 value;
-            std::memcpy(&value, code + index * sizeof(u32), sizeof(value));
-            return value;
-        };
-        size_t mode_site = 0;
-        size_t mode_matches = 0;
-        for (size_t i = 2; i + 8 < count; ++i) {
-            if (word(i) != ModeLoadInsn || word(i - 2) != 0x6B01013F || // cmp w9, w1
-                (word(i - 1) & 0xFF00001F) != 0x54000001 ||             // b.ne
-                (word(i + 1) & 0xFF00001F) != 0x35000008) {             // cbnz w8
-                continue;
-            }
-            for (size_t j = i + 2; j < i + 8; ++j) {
-                if (word(j) == 0x52A84E08) { // mov w8, #60.0f
-                    mode_site = i;
-                    ++mode_matches;
-                    break;
-                }
-            }
-        }
-
-        size_t frame_time_site = 0;
-        size_t frame_time_matches = 0;
-        if (mode_matches == 1 && mkw_dynamic) {
-            for (size_t i = mode_site + 1; i < mode_site + 32 && i < count; ++i) {
-                if ((word(i) & 0xFFFFFFE0) == 0xF9409660) { // ldr xN, [x19, #0x128]
-                    frame_time_site = i;
-                    ++frame_time_matches;
-                }
-            }
-        }
-
-        if (mode_matches == 1 && (!mkw_dynamic || frame_time_matches == 1)) {
-            std::memcpy(code + mode_site * sizeof(u32), &mode_instruction,
-                        sizeof(mode_instruction));
-            if (mkw_dynamic) {
-                const u32 whole_frame_time = 0xF9407660 | (word(frame_time_site) & 0x1F);
-                std::memcpy(code + frame_time_site * sizeof(u32), &whole_frame_time,
-                            sizeof(whole_frame_time));
-                mkw_dynamic_fps_patch_applied = true;
-            }
-            LOG_INFO(Loader, "Mario Kart World: {} FPS mode enabled (main+{:#x})",
-                     mkw_dynamic ? "dynamic" : "30",
-                     text.location + mode_site * sizeof(u32));
-        } else {
-            LOG_WARNING(Loader,
-                        "Mario Kart World FPS patch skipped (mode matches {}, frame-time matches {})",
-                        mode_matches, frame_time_matches);
-        }
+    if (name == "sdk") {
+        ReportVrrSupported(std::span{codeset.memory}.subspan(module_start), name);
     }
 
 #ifdef HAS_NCE
@@ -336,40 +347,8 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
     }
 
     // Load codeset for current process
-    if (name == "sdk") {
-        const bool matching_sdk =
-            Core::WindowTrace::Enabled() && process.GetProgramId() == Core::WindowTrace::ProgramId &&
-            Common::HexToString(std::span{nso_header.build_id}.first(20)) ==
-                "41D4DE4A3B78214AD20C896960DF0E5EA0ED595F";
-        Core::WindowTrace::sessions.Reset(&process, matching_sdk ? load_base : 0);
-        if (Core::WindowTrace::Enabled()) {
-            const auto session = Core::WindowTrace::sessions.Find(&process);
-            LOG_INFO(Loader, "Star Fox window trace: matching SDK={} base={:#x} session={}",
-                     matching_sdk, matching_sdk ? load_base : 0, session ? session->id : 0);
-        }
-    }
     LOG_INFO(Loader, "Module {} loaded at {:#x} (size {:#x})", nso_file.GetName(), load_base, image_size);
     process.LoadModule(system.Kernel(), std::move(codeset), load_base);
-    if (name == "main" && process.GetProgramId() == Settings::MarioKartWorldProgramId) {
-        process.SetMkwDynamicFpsPatchApplied(mkw_dynamic_fps_patch_applied);
-    }
-    if (oot_main) {
-        const u64 scale_address =
-            oot_high_refresh_scale ? load_base + module_start + *oot_high_refresh_scale : 0;
-        process.SetOotHighRefreshScaleAddress(scale_address);
-        Settings::SetOotHighRefreshPatched(scale_address != 0);
-        // Ctrl+U switches the mode live (FileSys::SwitchOotHighRefreshLive), where its state fits.
-        const auto& data = nso_header.segments[2];
-        const u64 bss_start = u64{data.location} + data.size;
-        process.SetOotMainCodeAddress(
-            FileSys::OotHighRefreshStateInBss(bss_start, bss_start + data.bss_size)
-                ? load_base + module_start
-                : 0);
-        if (scale_address != 0) {
-            LOG_INFO(Loader, "Ocarina of Time: high refresh rate patch on, speed scale at {:#x}",
-                     scale_address);
-        }
-    }
     return load_base + image_size;
 }
 
