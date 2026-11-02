@@ -72,23 +72,23 @@ public:
                 return {};
             }
         }
-        const auto before = Effective();
+        auto before = Capture(gpu, size);
         Trim(gpu, size);
         const auto position = std::upper_bound(mappings.begin(), mappings.end(), gpu,
                                                [](u64 address, const Range& range) {
             return address < range.gpu;
         });
         mappings.insert(position, {gpu, cpu, size});
-        return {true, 0, Difference(before)};
+        return {true, 0, Difference(before, gpu, size)};
     }
 
     Update Unmap(u64 gpu, u64 size) {
         if (!Valid(gpu, size)) {
             return {};
         }
-        const auto before = Effective();
+        auto before = Capture(gpu, size);
         Trim(gpu, size);
-        return {true, 0, Difference(before)};
+        return {true, 0, Difference(before, gpu, size)};
     }
 
     Update Acquire(u64 address, u64 size) {
@@ -100,19 +100,21 @@ public:
                 return {};
             }
         }
-        const auto before = Effective();
+        auto before = Capture(address, size);
         const u64 id = next_lease++;
         leases.emplace(id, Range{address, address, size});
-        return {true, id, Difference(before)};
+        return {true, id, Difference(before, address, size)};
     }
 
     Update Release(u64 id) {
-        if (!leases.contains(id)) {
+        const auto lease = leases.find(id);
+        if (lease == leases.end()) {
             return {};
         }
-        const auto before = Effective();
-        leases.erase(id);
-        return {true, 0, Difference(before)};
+        const Range range = lease->second;
+        auto before = Capture(range.gpu, range.size);
+        leases.erase(lease);
+        return {true, 0, Difference(before, range.gpu, range.size)};
     }
 
     bool UsesBacking(u64 cpu, u64 size) const {
@@ -201,13 +203,58 @@ private:
         return std::nullopt;
     }
 
-    std::vector<Change> Difference(const std::vector<Range>& before) const {
-        const auto after = Effective();
-        std::vector<u64> boundaries;
-        for (const auto* ranges : {&before, &after}) {
-            for (const auto& range : *ranges) {
-                boundaries.push_back(range.gpu);
-                boundaries.push_back(range.gpu + range.size);
+    // The ranges reaching [gpu, gpu + size). An update only changes that window, so comparing it
+    // alone gives the same changes as comparing the whole table (thousands of ranges, once per
+    // map or unmap while a course streams in).
+    struct Window {
+        std::vector<Range> mappings;
+        std::vector<Range> leases;
+    };
+
+    Window Capture(u64 gpu, u64 size) const {
+        Window window;
+        auto it = std::upper_bound(mappings.begin(), mappings.end(), gpu,
+                                   [](u64 address, const Range& range) {
+            return address < range.gpu;
+        });
+        if (it != mappings.begin()) {
+            --it;
+        }
+        for (; it != mappings.end() && it->gpu < gpu + size; ++it) {
+            if (Overlaps(gpu, size, it->gpu, it->size)) {
+                window.mappings.push_back(*it);
+            }
+        }
+        for (const auto& [id, range] : leases) {
+            if (Overlaps(gpu, size, range.gpu, range.size)) {
+                window.leases.push_back(range);
+            }
+        }
+        return window;
+    }
+
+    static std::optional<u64> Lookup(const Window& window, u64 gpu) {
+        if (const auto cpu = Lookup(window.mappings, gpu)) {
+            return cpu;
+        }
+        for (const auto& range : window.leases) {
+            if (gpu >= range.gpu && gpu - range.gpu < range.size) {
+                return gpu;
+            }
+        }
+        return std::nullopt;
+    }
+
+    std::vector<Change> Difference(const Window& before, u64 gpu, u64 size) const {
+        const Window after = Capture(gpu, size);
+        const u64 end = gpu + size;
+        std::vector<u64> boundaries{gpu, end};
+        for (const auto* window : {&before, &after}) {
+            for (const auto* ranges : {&window->mappings, &window->leases}) {
+                for (const auto& range : *ranges) {
+                    boundaries.push_back((std::max)(range.gpu, gpu));
+                    boundaries.push_back((std::min)(range.gpu + range.size, end));
+                }
             }
         }
         Sort(boundaries);
@@ -219,7 +266,7 @@ private:
             if (old_cpu == new_cpu) {
                 continue;
             }
-            const bool native = new_cpu && !Lookup(mappings, start);
+            const bool native = new_cpu && !Lookup(after.mappings, start);
             const bool map = new_cpu.has_value();
             const u64 cpu = new_cpu.value_or(old_cpu.value_or(0));
             const u64 size = boundaries[i] - start;
