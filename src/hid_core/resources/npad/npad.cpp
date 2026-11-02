@@ -280,6 +280,9 @@ void NPad::InitNewlyAddedController(Kernel::KernelCore& kernel, u64 aruid, Core:
         shared_memory->fullkey_color.attribute = ColorAttribute::Ok;
         shared_memory->joycon_color.attribute = ColorAttribute::Ok;
         shared_memory->style_tag.joycon_dual.Assign(1);
+        // ponytail: a dual pad also claims the guessed Joy-Con 2 bit; it must already be set when the
+        // game narrows its supported set to 0x1000 later, no reconnect happens then.
+        shared_memory->style_tag.joycon2_dual.Assign(1);
         if (controller.is_dual_left_connected) {
             shared_memory->joycon_color.left = body_colors.left;
             shared_memory->battery_level_left = battery_level.left.battery_level;
@@ -662,6 +665,7 @@ void NPad::OnUpdate(Kernel::KernelCore& kernel, const Core::Timing::CoreTiming& 
 
 Result NPad::SetSupportedNpadStyleSet(Kernel::KernelCore& kernel, u64 aruid, Core::HID::NpadStyleSet supported_style_set) {
     std::scoped_lock lock{mutex};
+    LOG_INFO(Service_HID, "SetSupportedNpadStyleSet {:#x}", static_cast<u32>(supported_style_set));
     hid_core.SetSupportedStyleTag({supported_style_set});
     const Result result = npad_resource.SetSupportedNpadStyleSet(aruid, supported_style_set);
     if (result.IsSuccess()) {
