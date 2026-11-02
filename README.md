@@ -12,9 +12,13 @@
 
 # Lichii
 
-Lichii is an experimental, open-source Nintendo Switch and Switch 2 emulator written in C++. It builds on Eglantine, Eden, yuzu and Sudachi, preserving their contributions while developing this fork's game compatibility and renderer fixes.
+| Branch | Channel | Release name |
+|---|---|---|
+| `mario-tennis-fever` | stable | `v0.<minor>.<patch>`, regular release |
+| `nx2` | mirror of zortos293/Eglantine | no releases from this fork |
 
-This is an independent fork, not an official release of those upstream projects. Lichii is not affiliated with Nintendo.
+`.github/version` sets the minor version; CI counts the patch up. The former experimental branch
+`mario-tennis-fever-perf` was merged into `mario-tennis-fever` in 0.5.
 
 ## Downloads and setup
 
@@ -117,7 +121,7 @@ sudo pacman -Syu --needed base-devel boost catch2 cmake enet ffmpeg fmt git glsl
 
 Ubuntu 26.04, Debian 13 and other distributions: see [docs/Deps.md](docs/Deps.md).
 
-Clone `main`, configure and build:
+Clone `mario-tennis-fever`, configure and build:
 
 ```sh
 git clone https://github.com/MythosOfs/Orchid.git
