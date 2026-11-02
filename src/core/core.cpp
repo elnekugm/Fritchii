@@ -12,35 +12,24 @@
 #include "audio_core/audio_core.h"
 #include "common/fs/fs.h"
 #include "common/logging.h"
-#include "common/nx2_sampler.h"
 #include "common/adpf.h"
-#include "common/game_fps.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
-#include "common/shutdown_progress.h"
 #include "common/string_util.h"
 #include "core/arm/exclusive_monitor.h"
 #include "core/core.h"
-#include "core/arm/debug.h"
 
 #include "launch_timestamp_cache.h"
 #include "core/core_timing.h"
 #include "core/cpu_manager.h"
 #include "core/debugger/debugger.h"
-#include "core/debugger/nx2_debug_tools.h"
 #include "core/device_memory.h"
-#include "core/file_sys/card_image.h"
-#include "core/file_sys/content_archive.h"
 #include "core/file_sys/fs_filesystem.h"
-#include "core/file_sys/nup_container.h"
-#include "core/loader/loose_directory.h"
 #include "core/file_sys/patch_manager.h"
 #include "core/file_sys/program_metadata.h"
 #include "core/file_sys/registered_cache.h"
-#include "core/file_sys/romfs.h"
 #include "core/file_sys/romfs_factory.h"
 #include "core/file_sys/savedata_factory.h"
-#include "core/file_sys/submission_package.h"
 #include "core/file_sys/vfs/vfs_concat.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/gpu_dirty_memory_manager.h"
@@ -56,7 +45,6 @@
 #include "core/hle/service/am/process_creation.h"
 #include "core/hle/service/apm/apm_controller.h"
 #include "core/hle/service/filesystem/filesystem.h"
-#include "core/hle/service/filesystem/romfs_controller.h"
 #include "core/hle/service/glue/glue_manager.h"
 #include "core/hle/service/glue/time/static.h"
 #include "core/hle/service/psc/time/static.h"
@@ -69,7 +57,6 @@
 #include "core/hle/service/sm/sm.h"
 #include "core/internal_network/network.h"
 #include "core/loader/loader.h"
-#include "core/loader/nx.h"
 #include "core/memory.h"
 #include "core/memory/cheat_engine.h"
 #include "core/perf_stats.h"
@@ -79,7 +66,6 @@
 #include "hid_core/hid_core.h"
 #include "network/network.h"
 #include "video_core/host1x/host1x.h"
-#include "video_core/nx2_precompile.h"
 #include "video_core/renderer_base.h"
 #include "video_core/video_core.h"
 
@@ -120,9 +106,6 @@ FileSys::VirtualFile GetGameFileFromPath(const FileSys::VirtualFilesystem& vfs,
     }
 
     if (Common::FS::IsDir(path)) {
-        if (const auto main = Loader::ResolveLooseProgramPath(std::filesystem::path{Common::FS::ToU8String(path)})) {
-            return vfs->OpenFile(Common::FS::PathToUTF8String(*main), FileSys::OpenMode::Read);
-        }
         return vfs->OpenFile(path + "/main", FileSys::OpenMode::Read);
     }
 
@@ -131,75 +114,13 @@ FileSys::VirtualFile GetGameFileFromPath(const FileSys::VirtualFilesystem& vfs,
 
 namespace {
 
-// Detect the platform before initializing the kernel memory layout and guest clock.
-bool IsSwitch2Program(const FileSys::VirtualFile& file, u64 program_id, std::size_t program_index) {
-    FileSys::ProgramMetadata metadata;
-    if (FileSys::NupContainer::IsNupFile(file)) {
-        FileSys::NupContainer nup{file};
-        if (nup.GetStatus() != Loader::ResultStatus::Success) {
-            return false;
-        }
-        const auto base = nup.FindBasePackage();
-        const auto update = nup.FindBestUpdatePackage();
-        std::optional<std::size_t> program;
-        if (update && nup.GetExeFSDir(*update) != nullptr) {
-            program = update;
-        } else if (base && nup.GetExeFSDir(*base) != nullptr) {
-            program = base;
-        }
-        const auto exefs = program ? nup.GetExeFSDir(*program) : nullptr;
-        const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
-        return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
-               metadata.IsSwitch2();
-    }
-    const auto type = file != nullptr ? Loader::IdentifyFile(file) : Loader::FileType::Unknown;
-    if (type == Loader::FileType::NX) {
-        return Loader::AppLoader_NX::ReadPlatform(file, program_id) == 2;
-    }
-    if (type == Loader::FileType::XCI || type == Loader::FileType::XCZ) {
-        const FileSys::XCI xci{file, program_id, program_index};
-        if (xci.GetStatus() != Loader::ResultStatus::Success) {
-            return false;
-        }
-        const auto partition = xci.GetSecurePartitionNSP();
-        const auto program = partition != nullptr
-                                 ? partition->GetNCA(xci.GetProgramTitleID(),
-                                                     FileSys::ContentRecordType::Program)
-                                 : nullptr;
-        const auto exefs = program != nullptr ? program->GetExeFS() : nullptr;
-        const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
-        return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
-               metadata.IsSwitch2();
-    }
-    if (type == Loader::FileType::NSP || type == Loader::FileType::NSZ) {
-        const FileSys::NSP nsp{file, program_id, program_index};
-        if (nsp.GetStatus() != Loader::ResultStatus::Success) {
-            return false;
-        }
-        auto exefs = nsp.GetExeFS();
-        if (!nsp.IsExtractedType()) {
-            const auto program =
-                nsp.GetNCA(nsp.GetProgramTitleID(), FileSys::ContentRecordType::Program);
-            exefs = program != nullptr ? program->GetExeFS() : nullptr;
-        }
-        const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
-        return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
-               metadata.IsSwitch2();
-    }
+// Switch 2 titles boot as a loose ExeFS, with main.npdm next to main.
+bool IsSwitch2Program(const FileSys::VirtualFile& file) {
     const auto dir = file != nullptr ? file->GetContainingDirectory() : nullptr;
     const auto npdm = dir != nullptr ? dir->GetFile("main.npdm") : nullptr;
-    if (npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success) {
-        return metadata.IsSwitch2();
-    }
-
-    // NSP/XCI and installed NCAs keep the NPDM in the program NCA's ExeFS.
-    const auto loader = Loader::GetLoader(system, file, program_id, program_index);
-    if (loader == nullptr ||
-        loader->ReadProgramMetadata(metadata) != Loader::ResultStatus::Success) {
-        return false;
-    }
-
-    return metadata.IsSwitch2();
+    FileSys::ProgramMetadata metadata;
+    return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
+           metadata.IsSwitch2();
 }
 
 } // namespace
@@ -242,6 +163,8 @@ struct System::Impl {
         const bool must_reinitialize =
             !device_memory.has_value() ||
             is_multicore != Settings::values.use_multi_core.GetValue() ||
+            // Any change of size: the device memory was made for the old one. Switch 2 titles force
+            // 12 GiB, and with 6-10 GiB configured the kernel handed out memory past its end.
             memory_layout != Settings::values.memory_layout_mode.GetValue();
 
         if (!must_reinitialize) {
@@ -261,22 +184,14 @@ struct System::Impl {
             return;
         }
 
-        // The settings and time services start on the emulated cores, which only run once the
-        // game has finished loading (shaders included). Waiting for them here froze the UI
-        // thread for the whole loading screen when settings were applied during it. If they
-        // are not up yet there is nothing to refresh: they read the current settings when
-        // they start.
-        auto& service_manager = system.ServiceManager();
         auto settings_service =
-            service_manager.GetService<Service::Set::ISystemSettingsServer>("set:sys");
+            system.ServiceManager().GetService<Service::Set::ISystemSettingsServer>("set:sys",
+                                                                                    true);
         auto static_service_a =
-            service_manager.GetService<Service::Glue::Time::StaticService>("time:a");
+            system.ServiceManager().GetService<Service::Glue::Time::StaticService>("time:a", true);
+
         auto static_service_s =
-            service_manager.GetService<Service::PSC::Time::StaticService>("time:s");
-        if (!settings_service || !static_service_a || !static_service_s) {
-            LOG_INFO(Core, "Time services not started yet, they will use the current settings");
-            return;
-        }
+            system.ServiceManager().GetService<Service::PSC::Time::StaticService>("time:s", true);
 
         std::shared_ptr<Service::PSC::Time::SystemClock> user_clock;
         static_service_a->GetStandardUserSystemClock(&user_clock);
@@ -396,18 +311,13 @@ struct System::Impl {
     }
 
     SystemResultStatus Load(System& system, Frontend::EmuWindow& emu_window, const std::string& filepath, Service::AM::FrontendAppletParameters& params) {
-        Settings::tennis_fps_active.store(0, std::memory_order_relaxed);
-        Settings::tennis_fps_nro_base.store(0, std::memory_order_relaxed);
-        Settings::wonder_fps_active.store(0, std::memory_order_relaxed);
-        Settings::wonder_dynamic_fps_active.store(false, std::memory_order_relaxed);
         if (params.launch_type == Service::AM::LaunchType::FrontendInitiated) {
             fs_controller.InitTempStorage();
         }
 
         const bool switch2_program =
             virtual_filesystem != nullptr &&
-            IsSwitch2Program(GetGameFileFromPath(virtual_filesystem, filepath), params.program_id,
-                             params.program_index);
+            IsSwitch2Program(GetGameFileFromPath(virtual_filesystem, filepath));
         Settings::SetCurrentProgramIsSwitch2(switch2_program);
         Settings::SetAstcRecompressionOverride(std::nullopt);
 
@@ -466,23 +376,16 @@ struct System::Impl {
             LOG_ERROR(Core, "Failed to read title for ROM!");
         }
 
-        Common::Log::SetGameLog(params.program_id, name == "Unknown program" ? "" : name);
         LOG_INFO(Core, "Loading {} ({:016X}) ...", name, params.program_id);
 
         // Expose program id to dump sites and other global readers.
         Settings::SetCurrentProgramID(params.program_id);
-        // The per-title GPU decisions (Nx2NeedsBufferDownloads) need it before the first fence;
-        // the nvhost-ctrl-gpu query that also sets it may come later or not at all.
-        Tegra::g_nx2_program_id = params.program_id;
 
         // Track launch time for frontend launches
         LaunchTimestampCache::SaveLaunchTimestamp(params.program_id);
 
         // Make the process created be the application
         kernel.SetApplicationProcess(process->GetHandle());
-
-        // Title defaults the renderer reads while it is created.
-        GameSettings::LoadEarlyOverrides(params.program_id);
 
         // Set up the rest of the system.
         SystemResultStatus init_result{SetupForApplicationProcess(system, emu_window)};
@@ -493,32 +396,10 @@ struct System::Impl {
         }
         // Waiting for GPU before initializing CPU
         cpu_manager.Initialize();
-        Core::StartPkpSampler(system); // ponytail: EDEN_PKP_BT diagnostics only
 
         // Initialize cheat engine
         if (cheat_engine) {
             cheat_engine->Initialize();
-        }
-
-        // EDEN_NX2_PRECOMPILE: the game's files, for assembling a precompile recipe (#895) on the
-        // pipeline cache's preparation thread. The RomFS as the process reads it, update included.
-        if (VideoCommon::Nx2Precompile::Mode() != 0) {
-            const u64 process_id = process->GetHandle()->GetProcessId();
-            VideoCommon::Nx2Precompile::SetGameFiles(
-                params.program_id, [this, process_id]() -> std::vector<FileSys::VirtualDir> {
-                    Service::FileSystem::ProgramId program{};
-                    std::shared_ptr<Service::FileSystem::SaveDataController> save;
-                    std::shared_ptr<Service::FileSystem::RomFsController> romfs;
-                    if (fs_controller.OpenProcess(&program, &save, &romfs, process_id).IsError() ||
-                        !romfs) {
-                        return {};
-                    }
-                    auto dir = FileSys::ExtractRomFS(romfs->OpenRomFSCurrentProcess());
-                    if (!dir) {
-                        return {};
-                    }
-                    return {std::move(dir)};
-                });
         }
 
         // Register with applet manager
@@ -534,14 +415,10 @@ struct System::Impl {
             }
         }
 
-        {
-            // Frontend timers poll GetAndResetPerfStats from their own threads.
-            std::scoped_lock lk{perf_stats_mutex};
-            perf_stats.emplace(params.program_id);
-            // Reset counters and set time origin to current frame
-            perf_stats->GetAndResetStats(core_timing.GetGlobalTimeUs());
-            perf_stats->BeginSystemFrame();
-        }
+        perf_stats.emplace(params.program_id);
+        // Reset counters and set time origin to current frame
+        GetAndResetPerfStats();
+        perf_stats->BeginSystemFrame();
 
         const FileSys::PatchManager pm(params.program_id, system.GetFileSystemController(), system.GetContentProvider());
         auto const metadata = pm.GetControlMetadata();
@@ -559,15 +436,10 @@ struct System::Impl {
             game_info.version = title_version;
             room_member->SendGameInfo(game_info);
         }
-        debug_service = Nx2Debug::MaybeStartService(system, name, params.program_id);
-        Nx2Sampler::StartFromEnvironment();
         return SystemResultStatus::Success;
     }
 
     void ShutdownMainProcess() {
-        debug_service.reset();
-        // Waits for a call in progress (it opens the RomFS, a quick step).
-        VideoCommon::Nx2Precompile::SetGameFiles(0, {});
         SetShuttingDown(true);
         Common::ADPF::Shutdown();
 
@@ -583,31 +455,19 @@ struct System::Impl {
         stop_event.request_stop();
         core_timing.SyncPause(false);
         Network::CancelPendingSocketOperations();
-        // Stop the cheat engine before the services go: its timing event reads HID through the
-        // service manager, and the timer thread keeps running during shutdown.
-        cheat_engine.reset();
         kernel.SuspendEmulation(true);
         kernel.CloseServices();
-        // Each step done tells the frontend the teardown still moves (see
-        // Common::ShutdownProgress); the GPU's (pipeline caches) reports its own steps.
-        Common::NoteShutdownProgress();
         kernel.ShutdownCores();
-        Common::NoteShutdownProgress();
         services.reset();
         service_manager.reset();
         fs_controller.Reset();
+        cheat_engine.reset();
         core_timing.ClearPendingEvents();
         app_loader.reset();
-        Common::NoteShutdownProgress();
         audio_core.reset();
-        Common::NoteShutdownProgress();
         gpu_core.reset();
-        Common::NoteShutdownProgress();
         host1x_core.reset();
-        {
-            std::scoped_lock lk{perf_stats_mutex};
-            perf_stats.reset();
-        }
+        perf_stats.reset();
         cpu_manager.Shutdown();
         debugger.reset();
         kernel.Shutdown();
@@ -638,7 +498,6 @@ struct System::Impl {
     }
 
     PerfStatsResults GetAndResetPerfStats() {
-        std::scoped_lock lk{perf_stats_mutex};
         if (!perf_stats) {
             return {};
         }
@@ -673,7 +532,6 @@ struct System::Impl {
     std::optional<Service::KernelHelpers::ServiceContext> general_channel_context;
     std::optional<Service::Event> general_channel_event;
     std::optional<Core::PerfStats> perf_stats;
-    std::mutex perf_stats_mutex;
     std::optional<Tegra::Host1x::Host1x> host1x_core;
     std::optional<Core::DeviceMemory> device_memory;
     std::optional<AudioCore::AudioCore> audio_core;
@@ -709,8 +567,6 @@ struct System::Impl {
     bool exit_locked : 1 = false;
     bool exit_requested : 1 = false;
     bool nvdec_active : 1 = false;
-    /// EDEN_NX2_DEBUG_SERVER; the last member, so it stops before anything it reads goes away.
-    std::unique_ptr<Nx2Debug::Service> debug_service;
 
     void EnsureGeneralChannelInitialized(System& system) {
         if (!general_channel_event) {
@@ -805,15 +661,6 @@ size_t System::GetCurrentHostThreadID() const {
 
 std::span<GPUDirtyMemoryManager> System::GetGPUDirtyMemoryManager() {
     return impl->gpu_dirty_memory_managers;
-}
-
-bool System::HasGPUDirtyMemory() {
-    for (const auto& manager : impl->gpu_dirty_memory_managers) {
-        if (manager.HasPending()) {
-            return true;
-        }
-    }
-    return false;
 }
 
 void System::GatherGPUDirtyMemory(std::function<void(PAddr, size_t)>& callback) {

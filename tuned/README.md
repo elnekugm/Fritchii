@@ -81,6 +81,22 @@ cmake --build build/pgo-use --target yuzu
 
 To train your own profile, build with `tuned/pgo-gen-cache.cmake`, run with `LLVM_PROFILE_FILE` set, play for a while, then merge the output with `llvm-profdata merge -o tuned/eglantine.profdata`. A profile trained on your own games and CPU should suit you better than the one included here.
 
+## 30FPS PATCH
+
+The 30FPS PATCH release limits the game to 30 fps. It uses this source with `tuned/nx2_switches-30fps.txt` as `nx2_switches.txt` beside the exe. `EDEN_NX2_PRESENT_HZ=<rate>` sets the limit; without it, the game is held to 60 as usual.
+
+## Build 104 merge
+
+The source now also includes the changes from [Djihads80/Eglantine build-104](https://github.com/Djihads80/Eglantine/releases/tag/build-104). Sparse texture tile mapping (`nx2:gpu 216`) is included but off by default, because it ran about 15-20% slower on an RTX 3050. `EDEN_NX2_SPARSE_REMAP=1` in `nx2_switches.txt` turns it on.
+
+## Performance build
+
+This source sends work to the host GPU every 128 draws instead of every 4096 (`EDEN_NX2_FLUSH_DRAWS`), skips waits on semaphores already met in memory (`EDEN_NX2_ACQUIRE_PEEK=0` restores them), runs at high process priority (`EDEN_NX2_HIGH_PRIORITY=0` turns that off) and uses a profile retrained on Mario Kart World. The semaphore changes and the benchmark logging (`EDEN_BENCH_LOG`, `EDEN_TAS_AUTOSTART`) come from [shintasku/selevet-eglantine-linux](https://github.com/shintasku/selevet-eglantine-linux).
+
+## Performance build 2
+
+This source fetches GPU-written command lists in one batch per GPU wait instead of one wait each (`EDEN_NX2_CMD_BATCH=0` restores that), and skips the wait for a semaphore when a release that meets it is already queued for the split GPU thread (`EDEN_NX2_ACQUIRE_QUEUED=0` restores that). The release turns on `EDEN_NX2_QMD_ACQUIRE_SKIP=1` in `nx2_switches.txt`. Changing the memory layout now restarts the emulated system. `EDEN_NX2_CMD_STATS=1` logs the GPU waits every 10 seconds, and `EDEN_NX2_SHADOW_SKIP=N` (off) redraws shadow maps every N frames.
+
 ## License and AI disclosure
 
 GPL-3.0-or-later, the same as the projects it's based on. See `LICENSE.txt`.
