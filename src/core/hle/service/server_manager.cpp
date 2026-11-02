@@ -7,6 +7,8 @@
 #include <utility>
 
 #include "common/scope_exit.h"
+#include <map>
+#include <mutex>
 
 #include "core/core.h"
 #include "core/hle/kernel/k_client_port.h"
@@ -26,6 +28,15 @@
 #include "core/hle/service/sm/sm.h"
 
 namespace Service {
+
+// ponytail: diagnostics only (EDEN_PKP_BT sampler). Server session -> service name; entries never removed.
+static std::mutex g_diag_mutex;
+static std::map<const Kernel::KServerSession*, const char*> g_diag_names;
+const char* DiagSessionServiceName(const Kernel::KServerSession* session) {
+    std::scoped_lock lk{g_diag_mutex};
+    const auto it = g_diag_names.find(session);
+    return it == g_diag_names.end() ? "?" : it->second;
+}
 
 enum class UserDataTag {
     Port,
@@ -144,6 +155,11 @@ void ServerManager::RunServer(std::unique_ptr<ServerManager>&& server_manager) {
 
 Result ServerManager::RegisterSession(Kernel::KServerSession* server_session,
                                       std::shared_ptr<SessionRequestManager> manager) {
+    // ponytail: diagnostics only (EDEN_PKP_BT sampler maps a blocked session back to its service name).
+    if (manager && manager->HasSessionHandler()) {
+        std::scoped_lock lk{g_diag_mutex};
+        g_diag_names[server_session] = manager->SessionHandler().diag_service_name;
+    }
     // We are taking ownership of the server session, so don't open it.
     auto* session = new Session(m_system.Kernel(), server_session, std::move(manager));
 
