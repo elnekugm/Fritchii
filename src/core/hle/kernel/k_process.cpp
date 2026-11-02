@@ -4,8 +4,10 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <random>
 #include "common/scope_exit.h"
+#include "common/cpu_features.h"
 #include "common/settings.h"
 #include "core/arm/dynarmic/arm_dynarmic.h"
 #include "core/arm/dynarmic/dynarmic_exclusive_monitor.h"
@@ -1261,6 +1263,16 @@ Result KProcess::LoadFromMetadata(KernelCore& kernel, const FileSys::ProgramMeta
 
     // Assign remaining properties.
     m_ideal_core_id = metadata.GetMainThreadCore();
+
+    // Boot only detects loose ExeFS dumps as Switch 2. NSP/XCI/installed titles are known here,
+    // from the NPDM, before the CPU interfaces read the counter frequency.
+    if (m_is_switch2 && std::getenv("EDEN_NX2_CNTFRQ") == nullptr &&
+        Common::g_wall_clock.GetGuestCNTFRQ() != Common::WallClock::Switch2CNTFRQ) {
+        Common::g_wall_clock.SetGuestCNTFRQ(Common::WallClock::Switch2CNTFRQ);
+        Settings::SetCurrentProgramIsSwitch2(true);
+        LOG_INFO(Kernel, "Switch 2 NPDM: guest counter frequency {} Hz",
+                 Common::WallClock::Switch2CNTFRQ);
+    }
 
     // Set up emulation context.
     this->InitializeInterfaces(kernel);
