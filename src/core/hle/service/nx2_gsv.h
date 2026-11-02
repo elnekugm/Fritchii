@@ -3272,6 +3272,10 @@ private:
                 m_handed = 0;
                 value = reached;
             } else {
+                m_free.push_back(image);
+                if (release_fence) {
+                    m_release_fences[image] = *release_fence;
+                }
                 value = m_sync_base + ++m_handed;
             }
             if (Nx2VideoTraceEnabled()) {
@@ -4122,6 +4126,8 @@ private:
     std::vector<u8> m_configuration;
     u32 m_width{};
     u32 m_height{};
+    u32 m_out_width{};  ///< Size of the last frame written
+    u32 m_out_height{};
     u32 m_handed{}; ///< Output images handed out (registered or released) so far
     u64 m_frames_out{};
     u64 m_decoded_frames{};
