@@ -12,6 +12,21 @@ namespace Tegra {
 
 namespace Host1x {
 
+// The puller's fence action and the 3D sync_info register take the syncpoint id from the guest's
+// command stream (24 and 16 bits): an id past the table indexed unrelated memory as an action list
+// and crashed in Increment.
+static bool IsValidSyncpoint(u32 syncpoint_id) {
+    if (syncpoint_id < SyncpointManager::NUM_MAX_SYNCPOINTS) [[likely]] {
+        return true;
+    }
+    static std::atomic_flag logged;
+    if (!logged.test_and_set()) {
+        LOG_ERROR(HW_GPU, "Syncpoint {} is out of range, increment dropped (logged once)",
+                  syncpoint_id);
+    }
+    return false;
+}
+
 SyncpointManager::ActionHandle SyncpointManager::RegisterAction(
     std::atomic<u32>& syncpoint, std::list<RegisteredAction>& action_storage, u32 expected_value,
     std::function<void()>&& action) {
