@@ -2178,6 +2178,24 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
             emit(0xef58000000000000ULL | predicate | 248 | (u64{shared} << 8) | (u64{soff} << 20) | (u64{6} << 48));
             break;
         }
+        case 0x9af: // LDGDEPBAR: the copies below complete before they return, so the commit group is already done.
+            break;
+        case 0xfae: { // LDGSTS.E.BYPASS.128 [Ra+soff], [Rg.64+goff], Pp: 16-byte async global->shared copy.
+            // Done as a synchronous LDG + STS through R248-R251. Word0: Ra 16-23, Rg 24-31; word1: goff 0-11
+            // (signed), soff 12-31; Pp 87-90 is the copy predicate, false zero-fills the destination (the
+            // predicated cp.async form). Descriptors are dropped as in LDG.
+            const u32 shared = insn.Bits(16, 8), global = insn.Bits(24, 8);
+            const s32 goff = static_cast<s32>(insn.words[1] << 20) >> 20;
+            const u32 soff = insn.words[1] >> 12;
+            if (native_predicate != 7 || (global & 1) || global >= 246 || shared >= 246 || soff > 0xffffU)
+                return fail(index, "native async copy mode");
+            for (u32 i = 0; i < 4; ++i) mov_imm(248 + i, 0);
+            const u64 copy_guard = u64{(insn.Bits(90, 1) << 3) | insn.Bits(87, 3)} << 16;
+            emit(0xeed0000000000000ULL | copy_guard | 248 | (u64{global} << 8) |
+                 (u64{static_cast<u32>(goff) & 0xffffffU} << 20) | (u64{1} << 45) | (u64{6} << 48));
+            emit(0xef58000000000000ULL | predicate | 248 | (u64{shared} << 8) | (u64{soff} << 20) | (u64{6} << 48));
+            break;
+        }
         case 0x386: case 0x986: { // Global store of 32/64/128 bits, 64-bit address.
             u32 data = insn.Bits(32, 8);
             const u32 size = insn.Bits(73, 3);
