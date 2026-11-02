@@ -199,6 +199,18 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
             // whole host GPU queue (about 7 ms, 45 instead of 60 fps in combat).
             Settings::values.preemptive_cpu_reads = true;
             break;
+        case TitleID::HyruleWarriorsAgeOfImprisonment:
+            // Game time follows the guest counter, which a faster CPU clock scales (Boost ran the
+            // game at 1.7x speed); low accuracy for the GPU thread split. Balanced fences signal
+            // syncpoints once the host GPU is done: earlier, the game reads GPU-written buffers
+            // right away and each read waits for the whole host GPU queue.
+            OverrideIfGlobal(Settings::values.cpu_clock, Settings::CpuClock::Normal);
+            OverrideIfGlobal(Settings::values.gpu_accuracy, Settings::GpuAccuracy::Low);
+            OverrideIfGlobal(Settings::values.gpu_fence_behavior, Settings::GpuFenceBehavior::Balanced);
+            // The game reads GPU-written buffer pages every frame; each ordered read waited for the
+            // whole host GPU queue (about 7 ms, 45 instead of 60 fps in combat).
+            Settings::values.preemptive_cpu_reads = true;
+            break;
         default:
             break;
     }

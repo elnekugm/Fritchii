@@ -668,6 +668,12 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         TraceDrawFailure(reason);
         static std::set<std::tuple<u64, u64, std::string_view>> seen;
         const auto& regs = maxwell3d->regs;
+        if (g_yo.enabled) {
+            ++g_yo.skips[std::string{reason}];
+            if (g_yo.draw_log.size() < 3000) {
+                g_yo.draw_log += fmt::format("!{:x}({}) ", regs.rt[0].Address(), reason);
+            }
+        }
         const u64 vs = (u64{regs.pipelines[1].reserved[0] & 0xff} << 32) | regs.pipelines[1].reserved[1];
         const u64 ps = (u64{regs.pipelines[5].reserved[0] & 0xff} << 32) | regs.pipelines[5].reserved[1];
         if (frame_dump.Capturing()) {
@@ -1950,6 +1956,12 @@ void RasterizerVulkan::Clear(u32 layer_count) {
     const bool use_stencil = regs.clear_surface.S;
     if (!use_color && !use_depth && !use_stencil) {
         return;
+    }
+    if (g_yo.enabled) {
+        ++g_yo.clears;
+        g_yo.Begin("clear");
+        const auto& rt = regs.rt[regs.clear_surface.RT % 8];
+        g_yo.NoteRT(gpu_memory->GpuToCpuAddress(rt.Address()).value_or(rt.Address()), static_cast<u32>(rt.format), rt.width, rt.height);
     }
 
     std::scoped_lock lock{texture_cache.mutex};
@@ -3729,6 +3741,11 @@ bool RasterizerVulkan::HasDrawTransformFeedback() {
 bool RasterizerVulkan::AccelerateSurfaceCopy(const Tegra::Engines::Fermi2D::Surface& src,
                                              const Tegra::Engines::Fermi2D::Surface& dst,
                                              const Tegra::Engines::Fermi2D::Config& copy_config) {
+    if (g_yo.enabled) {
+        ++g_yo.copies;
+        g_yo.Begin("fermi2d");
+        g_yo.NoteRT(gpu_memory->GpuToCpuAddress(dst.Address()).value_or(dst.Address()), static_cast<u32>(dst.format), dst.width, dst.height);
+    }
     std::scoped_lock lock{texture_cache.mutex};
     return texture_cache.BlitImage(dst, src, copy_config);
 }
@@ -3873,6 +3890,28 @@ std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
     std::scoped_lock lock{texture_cache.mutex};
     const auto [image_view, scaled] =
         texture_cache.TryFindFramebufferImageView(config, framebuffer_addr);
+    if (g_yo.enabled) {
+        const auto t = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_yo.start).count();
+        if (t >= 40.0) {
+            std::string skips;
+            for (const auto& [reason, count] : g_yo.skips) {
+                skips += fmt::format("{}x{} ", reason, count);
+            }
+            const u64 pick = g_yo.pick_cpu ? g_yo.pick_cpu : framebuffer_addr;
+            const std::string draw_log = g_yo.draw_log;
+            const auto writer = g_yo.last_writer.find(pick);
+            const auto mods = g_yo.window_mods.count(pick) ? g_yo.window_mods[pick] : 0U;
+            LOG_INFO(HW_GPU, "YO present t={:.1f} addr={:#x} accel={} draws={} skipped=[{}] clears={} "
+                     "dispatches={} copies={} rts=[{}] presented_img={:#x} mods_on_it={} last_writer_of_it={} seq=[{}] pick={}", t, framebuffer_addr,
+                     image_view != nullptr, g_yo.draws, skips, g_yo.clears, g_yo.dispatches,
+                     g_yo.copies, g_yo.rts, pick, mods, writer != g_yo.last_writer.end() ? writer->second : std::string{"none"}, draw_log, g_yo.pick);
+        }
+        g_yo.draws = g_yo.clears = g_yo.dispatches = g_yo.copies = 0;
+        g_yo.skips.clear();
+        g_yo.rts.clear();
+        g_yo.window_mods.clear();
+        g_yo.draw_log.clear();
+    }
     static u32 display_trace_count{};
     static const bool frame_capture = std::getenv("EDEN_NATIVE_FRAME_CAPTURE") != nullptr;
     if (frame_capture && display_trace_count++ < 64) {
