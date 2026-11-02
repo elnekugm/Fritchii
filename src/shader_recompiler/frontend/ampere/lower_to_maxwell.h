@@ -3987,6 +3987,19 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
                 }
                 return false;
             };
+            // A RET that could return to the instruction after this transfer. RETs after the main
+            // program's first unconditional EXIT belong to the called library functions (each with
+            // its own return link), which this transfer never enters. Inside a library function,
+            // any RET counts.
+            const auto return_can_reach = [&] {
+                for (const Instruction& candidate : code) {
+                    if (!main_exited && candidate.words[0] == 0x794d && candidate.words[1] == 0 &&
+                        candidate.words[2] == 0x03800000)
+                        return false;
+                    if (candidate.Bits(0, 12) == 0x950) return true;
+                }
+                return false;
+            };
             // A predicated NOINC forward transfer can terminate a loop at its
             // reconvergence point without a return-link setup or matching RET.
             if (native_predicate != 7 && (insn.words[0] & ~0xf000U) == 0x944 &&
@@ -3995,9 +4008,7 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
                 index + 2 < code.size() && code[index + 1].words[0] == 0x7947 &&
                 (code[index + 1].words[2] & ~0x3ffffU) == 0x03800000 &&
                 (code[index + 1].words[3] & 0xc00001ffU) == 0 &&
-                (std::none_of(code.begin(), code.end(), [](const Instruction& candidate) {
-                    return candidate.Bits(0, 12) == 0x950;
-                }) || terminal_float_tail())) {
+                (!return_can_reach() || terminal_float_tail())) {
                 relocations.push_back({static_cast<u32>(result.instructions.size()), index + 2});
                 emit(0xe24000000000000fULL | predicate);
                 break;
