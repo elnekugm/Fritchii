@@ -67,6 +67,11 @@ public:
         return m_core_index;
     }
 
+    // ponytail: diagnostics only (EDEN_PKP_BT sampler reads a running core's context racily).
+    Core::ArmInterface* GetArmInterface() const {
+        return m_arm_interface;
+    }
+
 private:
     class ScopedGuard;
 

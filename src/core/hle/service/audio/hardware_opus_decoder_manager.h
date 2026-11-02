@@ -21,6 +21,13 @@ using AudioCore::OpusDecoder::OpusMultiStreamParametersEx;
 using AudioCore::OpusDecoder::OpusParameters;
 using AudioCore::OpusDecoder::OpusParametersEx;
 
+// ponytail: hwacod::IClientSession (Switch 2 hwopus cmd 100 result). Cmds 0/1/10 not implemented yet.
+class IHardwareAudioCodecClientSession final : public ServiceFramework<IHardwareAudioCodecClientSession> {
+public:
+    explicit IHardwareAudioCodecClientSession(Core::System& system_)
+        : ServiceFramework{system_, "hwacod::IClientSession"} {}
+};
+
 class IHardwareOpusDecoderManager final : public ServiceFramework<IHardwareOpusDecoderManager> {
 public:
     explicit IHardwareOpusDecoderManager(Core::System& system_);
@@ -52,6 +59,8 @@ private:
     Result GetWorkBufferSizeExEx(Out<u32> out_size, OpusParametersEx params);
     Result GetWorkBufferSizeForMultiStreamExEx(
         Out<u32> out_size, InLargeData<OpusMultiStreamParametersEx, BufferAttr_HipcPointer> params);
+    // Switch 2 only: cmd 100 takes no input and returns hwacod::IClientSession (vtable confirmed in sdk NSO).
+    Result Unknown100(Out<SharedPointer<IHardwareAudioCodecClientSession>> out_session);
 
     Core::System& system;
     AudioCore::OpusDecoder::OpusDecoderManager impl;

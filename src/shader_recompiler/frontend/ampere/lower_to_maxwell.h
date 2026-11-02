@@ -97,6 +97,9 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             if (relative < -0x800000 || relative > 0x7fffff) return fail(index, "lowered branch distance");
             result.instructions[relocation.output_index] |= (static_cast<u64>(relative) & 0xffffff) << 20;
         }
+        // A vector source (up to four registers) must end below the high uniform bank.
+        if (high_uniform_bank && highest_source + 4 > 180)
+            return fail(index, "native program registers overlap high uniform registers");
         result.source_size = (index + 1) * sizeof(Instruction);
         return result;
     };
@@ -2289,9 +2292,16 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
             const bool is_signed = insn.Bits(72, 1);
             u32 source = opcode == 0xb05 ? materialize(2, 0, 252, absolute, negate)
                        : opcode == 0xd05 ? uniform_register(insn.Bits(32, 8)) : insn.Bits(32, 8);
+            const bool absolute = opcode != 0xb05 && insn.Bits(62, 1);
+            const bool negate = opcode != 0xb05 && insn.Bits(63, 1);
             if (half) {
                 extract_half({source, insn.Bits(60, 1) ? 3U : 2U, false, false}, 0, 252);
                 source = 252;
+            } else if (absolute || negate) {
+                // FADD R249 = (-)|Rs| + RZ applies the modifiers before the conversion.
+                emit(0x5c58000000000000ULL | predicate | 249 | (u64{source} << 8) | (u64{255} << 20) |
+                     (u64{absolute} << 46) | (u64{negate} << 48));
+                source = 249;
             }
             if (opcode == 0x305 && (absolute || negate))
                 source = materialize(0, source, 249, absolute, negate);
@@ -2820,6 +2830,20 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
             }
             const u32 components = static_cast<u32>(std::popcount(mask));
             const bool split = second_dest != 255;
+            if (insn.Bits(79, 1)) {
+                // .F16: (c0, c1) packed into the first destination, (c2, c3) into the second.
+                const auto pack = [&](u32 target, u32 low, u32 high) {
+                    if (target == 255) return;
+                    emit(0x5ca8000000000000ULL | predicate | 246 | (u64{1} << 8) | (u64{2} << 10) | (u64{low} << 20));
+                    emit(0x5ca8000000000000ULL | predicate | 247 | (u64{1} << 8) | (u64{2} << 10) | (u64{high} << 20));
+                    emit(0x5c18000000000000ULL | predicate | target | (u64{247} << 8) | (u64{246} << 20) | (u64{16} << 39));
+                };
+                pack(static_cast<u32>(dest), 250, components > 1 ? 251U : 255U);
+                if (components > 2)
+                    pack(split ? second_dest : (dest == 255 ? 255U : static_cast<u32>(dest) + 1), 252,
+                         components > 3 ? 253U : 255U);
+                break;
+            }
             for (u32 i = 0; i < components; ++i) {
                 u32 target = 255;
                 if (!split || i < 2) target = dest == 255 ? 255U : static_cast<u32>(dest) + i;

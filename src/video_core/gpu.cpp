@@ -331,7 +331,7 @@ struct GPU::Impl {
             const char* value = std::getenv("EDEN_NX2_UNSAFE_PREEMPTIVE_READS");
             return value != nullptr && std::strcmp(value, "1") == 0;
         }();
-        if (unsafe_preemptive_reads && g_nx2_ampere.load(std::memory_order_relaxed) &&
+        if ((unsafe_preemptive_reads || Settings::values.preemptive_cpu_reads) && g_nx2_ampere.load(std::memory_order_relaxed) &&
             system.GetCurrentHostThreadID() < Core::Hardware::NUM_CPU_CORES) {
             auto area = renderer->ReadRasterizer()->GetFlushArea(addr, size);
             if (area.preemtive) {

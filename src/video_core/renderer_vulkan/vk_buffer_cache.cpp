@@ -395,6 +395,8 @@ BufferCacheRuntime::BufferCacheRuntime(const Device& device_, MemoryAllocator& m
       staging_pool{staging_pool_}, guest_descriptor_queue{guest_descriptor_queue_},
       quad_index_pass(device, scheduler, descriptor_pool, staging_pool,
                       compute_pass_descriptor_queue),
+      quad_indirect_pass(device, scheduler, descriptor_pool, staging_pool,
+                         compute_pass_descriptor_queue),
       multi_range_buffers(device_) {
     const VkDriverIdKHR driver_id = device.GetDriverID();
     const bool enable_vertex_repack = VertexRepackEnabled();
@@ -911,6 +913,14 @@ void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 fir
         quad_strip_index_buffer->UpdateBuffer(first + count);
         quad_strip_index_buffer->BindBuffer(first);
     }
+}
+
+void BufferCacheRuntime::BindQuadIndirect(VkBuffer src_buffer, u32 src_offset) {
+    // shortcut: an indirect quad draw stops at 2^18 vertices; raise it if a title draws more.
+    constexpr u32 max_vertices = 1U << 18;
+    quad_array_index_buffer->UpdateBuffer(max_vertices);
+    quad_indirect_args = quad_indirect_pass.Convert(src_buffer, src_offset, max_vertices);
+    quad_array_index_buffer->BindBuffer(0);
 }
 
 void BufferCacheRuntime::BindVertexBuffer(u32 index, VkBuffer buffer, u32 offset, u32 size, u32 stride) {

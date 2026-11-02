@@ -20,6 +20,7 @@
 #include "common/string_util.h"
 #include "core/arm/exclusive_monitor.h"
 #include "core/core.h"
+#include "core/arm/debug.h"
 
 #include "launch_timestamp_cache.h"
 #include "core/core_timing.h"
@@ -469,6 +470,7 @@ struct System::Impl {
         }
         // Waiting for GPU before initializing CPU
         cpu_manager.Initialize();
+        Core::StartPkpSampler(system); // ponytail: EDEN_PKP_BT diagnostics only
 
         // Initialize cheat engine
         if (cheat_engine) {

@@ -7,9 +7,20 @@
 #include "common/demangle.h"
 #include "core/arm/debug.h"
 #include "core/arm/symbols.h"
+#include "core/core.h"
+#include "core/hle/kernel/k_client_session.h"
 #include "core/hle/kernel/k_process.h"
+#include "core/hle/kernel/k_session.h"
+#include "core/hle/kernel/k_server_session.h"
 #include "core/hle/kernel/k_thread.h"
+#include "core/hle/kernel/kernel.h"
+#include "core/hle/kernel/physical_core.h"
+#include "core/hle/service/hle_ipc.h"
+#include "core/hle/service/service.h"
 #include "core/memory.h"
+
+#include <chrono>
+#include <thread>
 
 namespace Core {
 
@@ -352,6 +363,105 @@ std::vector<BacktraceEntry> GetBacktraceFromContext(Kernel::KProcess* process,
 std::vector<BacktraceEntry> GetBacktrace(const Kernel::KThread* thread) {
     Kernel::Svc::ThreadContext ctx = thread->GetContext();
     return GetBacktraceFromContext(thread->GetOwnerProcess(), ctx);
+}
+
+// ponytail: diagnostics only. Decodes the SVC a thread last entered (for blocked threads that is the wait).
+void LogLastSvc(System& system, Kernel::KProcess* app, const Kernel::KThread& thread) {
+    auto& mem = system.ApplicationMemory();
+    auto& kernel = system.Kernel();
+    const u32 id = thread.GetLastSvc();
+    const auto& a = thread.GetLastSvcArgs();
+    LOG_INFO(Core, "PKP   t{} last svc {:#x} [0]={:#x} [1]={:#x} [2]={:#x} [3]={:#x}",
+             thread.GetThreadId(), id, a[0], a[1], a[2], a[3]);
+    switch (id) {
+    case 0x21: { // SendSyncRequest(session): cmd buf is the caller's TLS, dumped raw (words 0..8)
+        std::string words;
+        for (int i = 0; i < 9; i++) {
+            words += fmt::format(" [{}]={:#x}", i, mem.Read32(thread.GetTlsAddress() + 4 * i));
+        }
+        LOG_INFO(Core, "PKP   t{} cmd_buf{}", thread.GetThreadId(), words);
+        auto client = app->GetHandleTable().GetObjectWithoutPseudoHandle<Kernel::KClientSession>(
+            kernel, static_cast<Handle>(a[0]));
+        if (client.IsNull() || client->GetParent() == nullptr) {
+            LOG_INFO(Core, "PKP   t{} session handle {:#x} not a client session", thread.GetThreadId(), a[0]);
+            break;
+        }
+        std::string name = "?";
+        if (auto mgr = client->GetParent()->GetServerSession().GetManager(); mgr && mgr->HasSessionHandler()) {
+            if (auto* sf = dynamic_cast<Service::ServiceFrameworkBase*>(&mgr->SessionHandler())) {
+                name = std::string(sf->GetServiceName());
+            }
+        }
+        LOG_INFO(Core, "PKP   t{} SendSyncRequest handle {:#x} port='{}'", thread.GetThreadId(), a[0], name);
+        break;
+    }
+    case 0x18: { // WaitSynchronization(out_index, handles ptr = x1, num = x2, timeout = x3)
+        for (u64 i = 0; i < std::min<u64>(a[2], 64); i++) {
+            const u32 h = mem.Read32(a[1] + 4 * i);
+            auto obj = app->GetHandleTable().GetObjectWithoutPseudoHandle<Kernel::KAutoObject>(kernel, static_cast<Handle>(h));
+            LOG_INFO(Core, "PKP   t{} WaitSync [{}] handle {:#x} type='{}'", thread.GetThreadId(), i, h,
+                     obj.IsNull() ? "<none>" : obj->GetTypeName());
+        }
+        break;
+    }
+    case 0x1a: // ArbitrateLock(thread handle, address, tag)
+    case 0x34: // WaitForAddress(address, arb_type, value, timeout)
+        LOG_INFO(Core, "PKP   t{} {} address={:#x}", thread.GetThreadId(),
+                 id == 0x1a ? "ArbitrateLock" : "WaitForAddress", a[id == 0x1a ? 1 : 0]);
+        break;
+    default:
+        break;
+    }
+}
+
+// ponytail: diagnostics only. Racy snapshot (no scheduler lock, no pause); fine for a one-off trace.
+void StartPkpSampler(System& system) {
+    if (std::getenv("EDEN_PKP_BT") == nullptr) {
+        return;
+    }
+    std::thread([&system] {
+        const auto t0 = std::chrono::steady_clock::now();
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            if (t < 10.0) {
+                continue;
+            }
+            auto* app = system.ApplicationProcess();
+            if (app == nullptr || system.IsShuttingDown()) {
+                return;
+            }
+            for (auto& thread : app->GetThreadList()) {
+                Kernel::Svc::ThreadContext ctx = thread.GetContext();
+                const s32 core = thread.GetActiveCore();
+                const bool running = thread.GetState() == Kernel::ThreadState::Runnable &&
+                                     core >= 0 && core < 6;
+                if (running) {
+                    system.Kernel().PhysicalCore(core).GetArmInterface()->GetContext(ctx);
+                }
+                LOG_INFO(Core, "PKP t={:.1f} thread {} state={} core={} pc={:#x} lr={:#x} sp={:#x}",
+                         t, thread.GetThreadId(), GetThreadState(&thread), core, ctx.pc, ctx.lr,
+                         ctx.sp);
+                if (!running) {
+                    LogLastSvc(system, app, thread);
+                }
+                int depth = 0;
+                for (const auto& e : GetBacktraceFromContext(app, ctx)) {
+                    if (depth++ >= 16) {
+                        break;
+                    }
+                    LOG_INFO(Core, "PKP   t{} {}+{:#x} ({:#x})", thread.GetThreadId(), e.module,
+                             e.offset, e.address);
+                }
+                // ponytail: raw regs + the word at [x25+0x2c0] and [x21+...] that t143's lock code reads.
+                const auto& r = ctx.r;
+                LOG_INFO(Core, "PKP   t{} x0={:#x} x8={:#x} x19={:#x} x21={:#x} x25={:#x} x26={:#x} x27={:#x} w25_2c0={:#x} x21_0={:#x}",
+                         thread.GetThreadId(), r[0], r[8], r[19], r[21], r[25], r[26], r[27],
+                         r[25] ? system.ApplicationMemory().Read32(r[25] + 0x2c0) : 0,
+                         r[21] ? system.ApplicationMemory().Read32(r[21]) : 0);
+            }
+        }
+    }).detach();
 }
 
 } // namespace Core

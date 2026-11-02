@@ -1422,6 +1422,21 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
         const u64 vs = (u64{regs.pipelines[1].reserved[0] & 0xff} << 32) | regs.pipelines[1].reserved[1];
         if (std::find(skip_list.begin(), skip_list.end(), vs) != skip_list.end()) return;
     }
+    // A runaway macro can leave text in the draw registers (counts near 2^31). Such a draw keeps
+    // the host GPU busy until the kernel's ring timeout resets the device, taking the desktop down.
+    {
+        const auto& draw_state = maxwell3d->draw_manager.draw_state;
+        const u64 first = is_indexed ? draw_state.index_buffer.first : draw_state.vertex_buffer.first;
+        const u64 count = is_indexed ? draw_state.index_buffer.count : draw_state.vertex_buffer.count;
+        if (first + count > (u64{1} << 26) || instance_count > (1U << 20)) {
+            static bool logged = false;
+            if (!std::exchange(logged, true)) {
+                LOG_WARNING(Render_Vulkan, "Skipping corrupt draw: first={} count={} instances={}",
+                            first, count, instance_count);
+            }
+            return;
+        }
+    }
     // EDEN_NX2_RT_TRACE: log the first draw to every distinct colour target (debug aid).
     if (static const bool trace = std::getenv("EDEN_NX2_RT_TRACE") != nullptr; trace) {
         static std::set<std::tuple<GPUVAddr, u32, u32, u64, u64>> seen;
@@ -2962,6 +2977,25 @@ void RasterizerVulkan::FlushAndInvalidateRegion(DAddr addr, u64 size,
 }
 
 void RasterizerVulkan::WaitForIdle() {
+    // Hyrule Warriors sends ~200 a frame, each draining the GPU and ending the render pass; one
+    // with nothing recorded since the last waits for nothing new.
+    static u64 waits{};
+    static u64 skipped{};
+    if ((++waits & 0xffff) == 0) {
+        LOG_INFO(Render_Vulkan, "Wait for idle: {} of the last 65536 skipped", std::exchange(skipped, 0));
+    }
+    // TEMP: EDEN_NX2_WFI=0 drops the wait entirely (A/B test: the caches insert their own barriers).
+    static const bool wfi_off = [] {
+        const char* value = std::getenv("EDEN_NX2_WFI");
+        return value && value[0] == '0';
+    }();
+    if (scheduler.RecordCount() == wfi_record_count || wfi_off) {
+        ++skipped;
+        if (wfi_off) {
+            query_cache.NotifyWFI();
+        }
+        return;
+    }
     // Everything but wait pixel operations. This intentionally includes FRAGMENT_SHADER_BIT because
     // fragment shaders can still write storage buffers.
     VkPipelineStageFlags flags =
@@ -2993,6 +3027,7 @@ void RasterizerVulkan::WaitForIdle() {
         cmdbuf.PipelineBarrier(flags, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, WFI_BARRIER);
     });
     fence_manager.SignalOrdering();
+    wfi_record_count = scheduler.RecordCount();
 }
 
 void RasterizerVulkan::FragmentBarrier() {

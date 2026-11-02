@@ -177,4 +177,11 @@ Result IHardwareOpusDecoderManager::GetWorkBufferSizeForMultiStreamExEx(
     R_SUCCEED();
 }
 
+Result IHardwareOpusDecoderManager::Unknown100(
+    Out<SharedPointer<IHardwareAudioCodecClientSession>> out_session) {
+    LOG_WARNING(Service_Audio, "Switch 2 hwopus cmd 100 called, returning hwacod IClientSession");
+    *out_session = std::make_shared<IHardwareAudioCodecClientSession>(system);
+    R_SUCCEED();
+}
+
 } // namespace Service::Audio

@@ -236,6 +236,11 @@ public:
         return true;
     }
 
+    /// Commands recorded so far (any kind), to tell whether anything was recorded since.
+    [[nodiscard]] u64 RecordCount() const noexcept {
+        return record_count;
+    }
+
     /// Returns the current command buffer tick.
     [[nodiscard]] u64 CurrentTick() const noexcept {
         return master_semaphore->CurrentTick();
@@ -536,6 +541,7 @@ private:
     DeferredClear deferred_clear;
 
     std::unique_ptr<CommandChunk> chunk;
+    u64 record_count{};
     std::function<void()> on_submit;
 
     State state;

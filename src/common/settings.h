@@ -574,6 +574,10 @@ struct Values {
 
     GpuAccuracy current_gpu_accuracy{GpuAccuracy::High};
 
+    /// Set per title by Core::GameSettings::LoadOverrides: guest CPU reads of GPU-written buffer
+    /// pages that are already copied back at fences use that copy instead of waiting for the GPU.
+    bool preemptive_cpu_reads{false};
+
     SwitchableSetting<DmaAccuracy, true> dma_accuracy{linkage,
                                                       DmaAccuracy::Default,
                                                       "dma_accuracy",

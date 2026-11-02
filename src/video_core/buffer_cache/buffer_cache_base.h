@@ -523,6 +523,13 @@ public:
 
     [[nodiscard]] std::pair<Buffer*, u32> GetDrawIndirectBuffer();
 
+    /// A single non-indexed indirect quad draw, which backends without quads draw indexed.
+    [[nodiscard]] bool IsQuadIndirectDraw() const {
+        return current_draw_indirect && !current_draw_indirect->is_indexed &&
+               !current_draw_indirect->include_count && !current_draw_indirect->is_byte_count &&
+               maxwell3d->draw_manager.draw_state.topology == Maxwell::PrimitiveTopology::Quads;
+    }
+
     template <typename Func>
     void BufferOperations(Func&& func) {
         do {
