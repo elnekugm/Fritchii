@@ -61,6 +61,16 @@ public:
 private:
     static constexpr std::size_t NPAD_COUNT = 10;
 
+    // The IC information isn't read from the controller. Report the ranges of the Joy-Con and Pro
+    // Controller sensors (2000 dps, 8 g): games set up sensor fusion from them, and Nintendo Switch
+    // Sports aborts in nerd::GyroPointingStateDetector when they are 0.
+    static constexpr Core::HID::SixAxisSensorIcInformation DefaultIcInformation() {
+        Core::HID::SixAxisSensorIcInformation info{};
+        info.angular_rate = 2000.0f;
+        info.acceleration_range = 8.0f;
+        return info;
+    }
+
     struct SixaxisParameters {
         bool is_fusion_enabled{true};
         bool unaltered_passthrough{false};
