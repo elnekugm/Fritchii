@@ -76,8 +76,10 @@ struct ShaderTranslationKey {
     bool y_negate;
     bool tess_clockwise;
     bool dual_source_blend;
+    /// The render target layer is offset by the viewport index (geometry stages only).
+    bool layer_viewport_relative;
     /// Always zero: makes the padding explicit, so the key can be compared and hashed as bytes.
-    std::array<u8, 2> zero_padding;
+    std::array<u8, 1> zero_padding;
 
     bool operator==(const ShaderTranslationKey& rhs) const noexcept;
 };
