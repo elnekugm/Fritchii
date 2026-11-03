@@ -210,6 +210,10 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
             // The game reads GPU-written buffer pages every frame; each ordered read waited for the
             // whole host GPU queue (about 7 ms, 45 instead of 60 fps in combat).
             Settings::values.preemptive_cpu_reads = true;
+            // GPU accuracy High kept the GPU thread split off; fps drops below 30 then slowed the
+            // game itself down. Low + no reactive flushing (as Mario Tennis Fever) keeps it at speed.
+            OverrideIfGlobal(Settings::values.gpu_accuracy, Settings::GpuAccuracy::Low);
+            OverrideIfGlobal(Settings::values.use_reactive_flushing, false);
             break;
         default:
             break;
