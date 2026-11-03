@@ -153,7 +153,7 @@ public:
     /// Wakes the timer thread: `event`, and on Windows the high resolution wait's wake handle.
     void Wake();
     u64 event_fifo_id = 0;
-    s64 pause_end_time{};
+    std::atomic<s64> pause_end_time{};
     /// Cycle timing
     u64 cpu_ticks{};
     s64 downcount{};
