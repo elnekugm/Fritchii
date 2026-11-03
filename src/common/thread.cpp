@@ -969,8 +969,9 @@ bool Event::WaitFor(const std::chrono::nanoseconds time) {
                 } else
                     return false; //timeout
             }
-            bool expected = true;
-            if (is_set.compare_exchange_weak(expected, false, std::memory_order_release))
+            // Interrupts and unrelated writes to the monitored cache line can wake
+            // MWAITX. Only the event predicate or the actual deadline ends the wait.
+            if (consume_signal())
                 return true;
         }
     }
@@ -1011,12 +1012,20 @@ bool Event::WaitFor(const std::chrono::nanoseconds time) {
 #else
 bool Event::WaitFor(const std::chrono::nanoseconds time) {
 #ifdef _WIN32
+    const auto consume_signal = [this] {
+        bool expected = true;
+        return is_set.compare_exchange_strong(expected, false, std::memory_order_acq_rel);
+    };
+    if (consume_signal()) {
+        return true;
+    }
+    if (time <= std::chrono::nanoseconds::zero()) {
+        return false;
+    }
     auto const end = Common::g_wall_clock.GetTimeNS() + time;
     while (!is_set.load() && end > Common::g_wall_clock.GetTimeNS())
         Common::Windows::SleepForOneTick();
-    if (is_set.load())
-        Reset();
-    return true;
+    return consume_signal();
 #else
     std::unique_lock lk{mutex};
     const auto now = std::chrono::steady_clock::now();
