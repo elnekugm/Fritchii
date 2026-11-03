@@ -812,6 +812,28 @@ bool MetBeforeDrain(DmaPusher& dma_pusher, GPUVAddr address, u32 operation, u32 
     return pending && *pending >= value;
 }
 
+// Releases queued for the split's back (GpuSplit::NoteQueuedRelease). Donkey Kong Bananza drained
+// the back at ~40% of its front's time on acquires the 3D engine's queued releases meet.
+void NoteQueuedRelease(DmaPusher& dma_pusher, GPUVAddr address, u32 payload) {
+    if (!Tegra::Nx2AcquireQueuedEnabled() || !VideoCommon::GpuSplit::Get().Active()) {
+        return;
+    }
+    if (const auto device = dma_pusher.memory_manager.GpuToCpuAddress(address)) {
+        VideoCommon::GpuSplit::Get().NoteQueuedRelease(*device, payload);
+    }
+}
+
+std::optional<u32> QueuedReleasePayload(DmaPusher& dma_pusher, GPUVAddr address) {
+    if (!Tegra::Nx2AcquireQueuedEnabled() || !VideoCommon::GpuSplit::Get().Active()) {
+        return std::nullopt;
+    }
+    const auto device = dma_pusher.memory_manager.GpuToCpuAddress(address);
+    if (!device) {
+        return std::nullopt;
+    }
+    return VideoCommon::GpuSplit::Get().QueuedRelease(*device);
+}
+
 } // Anonymous namespace
 
 // `read_done` (optional): the back's position loaded before guest memory was read for `word`.

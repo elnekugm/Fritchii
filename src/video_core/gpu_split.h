@@ -904,6 +904,30 @@ public:
         return WaitFor((std::min)(position, write_position), site);
     }
 
+    /// Semaphore releases the front sent that the back has not executed yet (front thread only).
+    /// An acquire one of them meets needs no drain: the back runs the release, then the work after
+    /// the acquire, in order, and the host queue keeps that order. Call right after sending one.
+    void NoteQueuedRelease(u64 device_address, u32 payload) {
+        queued_releases[device_address] = {payload, write_position};
+    }
+    /// The payload of a queued release to `device_address` the back has not executed yet.
+    [[nodiscard]] std::optional<u32> QueuedRelease(u64 device_address) {
+        if (queued_releases.empty()) {
+            return std::nullopt;
+        }
+        const auto it = queued_releases.find(device_address);
+        if (it == queued_releases.end()) {
+            return std::nullopt;
+        }
+        // Executed (memory is the authority now), or sent before the split restarted.
+        if (consumed.load(std::memory_order_acquire) >= it->second.sent ||
+            it->second.sent > write_position) {
+            queued_releases.erase(it);
+            return std::nullopt;
+        }
+        return it->second.payload;
+    }
+
 private:
     friend struct GpuSplitTestAccess;
 
