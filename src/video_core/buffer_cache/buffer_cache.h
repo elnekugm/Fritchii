@@ -1122,6 +1122,7 @@ void BufferCache<P>::BindHostGeometryBuffers(bool is_indexed) {
         const auto& draw_state = maxwell3d->draw_manager.draw_state;
         if (IsQuadIndirectDraw()) {
             // The vertex count is in GPU memory: converted below, once that is synchronized.
+            runtime.ReserveQuadIndirect();
         } else if (draw_state.topology == Maxwell::PrimitiveTopology::Quads ||
                    draw_state.topology == Maxwell::PrimitiveTopology::QuadStrip) {
             runtime.BindQuadIndexBuffer(draw_state.topology, draw_state.vertex_buffer.first,

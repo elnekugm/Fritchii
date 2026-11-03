@@ -915,15 +915,23 @@ void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 fir
     }
 }
 
+// shortcut: an indirect quad draw stops at 2^18 vertices; raise it if a title draws more.
+constexpr u32 MAX_INDIRECT_QUAD_VERTICES = 1U << 18;
+
+void BufferCacheRuntime::ReserveQuadIndirect() {
+    // UpdateBuffer submits the command buffer when it grows. Grown in BindArrayIndirect, after the
+    // vertex buffers were bound, the first indirect quad draw ran in a new command buffer without
+    // them: a device loss on drivers without nullDescriptor (Hyrule Warriors after a movie skip).
+    quad_array_index_buffer->UpdateBuffer(MAX_INDIRECT_QUAD_VERTICES);
+}
+
 void BufferCacheRuntime::BindArrayIndirect(VkBuffer src_buffer, u32 src_offset, bool quads) {
     if (!quads) {
         array_indirect_args = quad_indirect_pass.Convert(src_buffer, src_offset, 0);
         return;
     }
-    // shortcut: an indirect quad draw stops at 2^18 vertices; raise it if a title draws more.
-    constexpr u32 max_vertices = 1U << 18;
-    quad_array_index_buffer->UpdateBuffer(max_vertices);
-    array_indirect_args = quad_indirect_pass.Convert(src_buffer, src_offset, max_vertices);
+    array_indirect_args =
+        quad_indirect_pass.Convert(src_buffer, src_offset, MAX_INDIRECT_QUAD_VERTICES);
     quad_array_index_buffer->BindBuffer(0);
 }
 
