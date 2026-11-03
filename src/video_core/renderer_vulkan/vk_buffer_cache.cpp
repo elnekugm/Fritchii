@@ -915,11 +915,15 @@ void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 fir
     }
 }
 
-void BufferCacheRuntime::BindQuadIndirect(VkBuffer src_buffer, u32 src_offset) {
+void BufferCacheRuntime::BindArrayIndirect(VkBuffer src_buffer, u32 src_offset, bool quads) {
+    if (!quads) {
+        array_indirect_args = quad_indirect_pass.Convert(src_buffer, src_offset, 0);
+        return;
+    }
     // shortcut: an indirect quad draw stops at 2^18 vertices; raise it if a title draws more.
     constexpr u32 max_vertices = 1U << 18;
     quad_array_index_buffer->UpdateBuffer(max_vertices);
-    quad_indirect_args = quad_indirect_pass.Convert(src_buffer, src_offset, max_vertices);
+    array_indirect_args = quad_indirect_pass.Convert(src_buffer, src_offset, max_vertices);
     quad_array_index_buffer->BindBuffer(0);
 }
 

@@ -1133,9 +1133,9 @@ void BufferCache<P>::BindHostGeometryBuffers(bool is_indexed) {
     if (current_draw_indirect) {
         BindHostDrawIndirectBuffers();
         if constexpr (!HAS_FULL_INDEX_AND_PRIMITIVE_SUPPORT) {
-            if (!is_indexed && IsQuadIndirectDraw()) {
+            if (!is_indexed && IsArrayIndirectDraw()) {
                 const auto [buffer, offset] = GetDrawIndirectBuffer();
-                runtime.BindQuadIndirect(buffer->Handle(), offset);
+                runtime.BindArrayIndirect(buffer->Handle(), offset, IsQuadIndirectDraw());
             }
         }
     }

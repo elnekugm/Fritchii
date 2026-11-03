@@ -530,6 +530,15 @@ public:
                maxwell3d->draw_manager.draw_state.topology == Maxwell::PrimitiveTopology::Quads;
     }
 
+    /// A single non-indexed indirect draw, or a quad one. Backends without quads check its record
+    /// on the GPU first: it can hold words the guest GPU never wrote.
+    [[nodiscard]] bool IsArrayIndirectDraw() const {
+        return IsQuadIndirectDraw() ||
+               (current_draw_indirect && !current_draw_indirect->is_indexed &&
+                !current_draw_indirect->include_count && !current_draw_indirect->is_byte_count &&
+                current_draw_indirect->max_draw_counts == 1);
+    }
+
     template <typename Func>
     void BufferOperations(Func&& func) {
         do {
