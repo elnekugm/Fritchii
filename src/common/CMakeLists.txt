@@ -100,6 +100,7 @@ add_library(
     overflow.h
     page_table.cpp
     page_table.h
+    paged_scalar.h
     param_package.cpp
     param_package.h
     parent_of_member.h

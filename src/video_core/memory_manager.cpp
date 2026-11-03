@@ -15,6 +15,7 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/logging.h"
+#include "common/paged_scalar.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_page_table.h"
 #include "core/hle/kernel/k_process.h"
@@ -395,19 +396,18 @@ T MemoryManager::Read(GPUVAddr addr) const {
         }
     }
 
-    if (auto page_pointer{GetPointer(addr)}; page_pointer) {
-        // NOTE: Avoid adding any extra logic to this fast-path block
-        T value;
-        std::memcpy(&value, page_pointer, sizeof(T));
-        return value;
-    }
-
-    static std::atomic<u32> reported{};
-    if (reported.fetch_add(1) < 16) {
-        LOG_ERROR(HW_GPU, "Read{} of unmapped GPU address {:#x}", sizeof(T) * 8, addr);
-    }
-
-    return {};
+    // A host pointer is only valid within its 4 KiB device page, even inside a big GPU page.
+    return Common::ReadPagedScalar<T>(addr, [&](GPUVAddr address) {
+        const u8* const page_pointer = GetPointer(address);
+        if (!page_pointer) {
+            static std::atomic<u32> reported{};
+            if (reported.fetch_add(1) < 16) {
+                LOG_ERROR(HW_GPU, "Read{} of unmapped GPU address {:#x}", sizeof(T) * 8,
+                          address);
+            }
+        }
+        return page_pointer;
+    });
 }
 
 template <typename T>
