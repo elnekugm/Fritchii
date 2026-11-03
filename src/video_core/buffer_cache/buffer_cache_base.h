@@ -755,6 +755,8 @@ private:
 
     void TouchBuffer(Buffer& buffer, BufferId buffer_id) noexcept;
 
+    void RefreshMultiRangeSegments(std::vector<MultiRangeSegment>& pool);
+
     bool SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 size);
 
     /// EDEN_NX2_EXP59 & 8: before the full walk, counts and logs what the dirty-word walk would
