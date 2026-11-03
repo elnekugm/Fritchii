@@ -131,6 +131,7 @@ add_executable(tests
     common/multi_level_page_table.cpp
     common/page_table.cpp
     common/param_package.cpp
+    common/queue_lifetime.cpp
     common/range_map.cpp
     common/range_set_move.cpp
     common/ring_buffer.cpp
