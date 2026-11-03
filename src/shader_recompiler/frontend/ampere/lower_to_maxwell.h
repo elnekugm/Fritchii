@@ -2332,8 +2332,10 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
             const bool is_signed = insn.Bits(72, 1);
             u32 source = opcode == 0xb05 ? materialize(2, 0, 252, absolute, negate)
                        : opcode == 0xd05 ? uniform_register(insn.Bits(32, 8)) : insn.Bits(32, 8);
-            const bool absolute = opcode != 0xb05 && insn.Bits(62, 1);
-            const bool negate = opcode != 0xb05 && insn.Bits(63, 1);
+            // Constant-buffer sources carry them at the same bits (Pokopia's shadow pass reads
+            // |c[3][0xd0]|); they were dropped for the word forms and rejected for the others.
+            const bool absolute = insn.Bits(62, 1);
+            const bool negate = insn.Bits(63, 1);
             if (half) {
                 extract_half({source, insn.Bits(60, 1) ? 3U : 2U, false, false}, 0, 252);
                 source = 252;
