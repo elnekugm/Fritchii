@@ -153,12 +153,13 @@ void CoreTiming::ClearPendingEvents() {
 }
 
 void CoreTiming::Pause(bool is_paused) {
-    paused = is_paused;
-    pause_event.Set();
-
     if (!is_paused) {
+        // Store the boundary before clearing paused: the timer thread runs Advance as soon as
+        // it reads paused == false, and that (sequentially consistent) load makes it visible.
         pause_end_time.store(GetGlobalTimeNs().count(), std::memory_order_relaxed);
     }
+    paused = is_paused;
+    pause_event.Set();
 }
 
 void CoreTiming::SyncPause(bool is_paused) {
@@ -174,10 +175,6 @@ void CoreTiming::SyncPause(bool is_paused) {
         Wake();
         while (paused_set != is_paused)
             ;
-    }
-
-    if (!is_paused) {
-        pause_end_time.store(GetGlobalTimeNs().count(), std::memory_order_relaxed);
     }
 }
 
