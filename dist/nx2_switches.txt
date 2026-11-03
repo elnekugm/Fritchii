@@ -1,46 +1,29 @@
-# Switch NX2 - read when the Lichii GUI starts.
+# Switch NX2 - read at every start of the Eglantine GUI. The CLI frontend does not read it.
 # One NAME=VALUE per line. Lines starting with # are ignored.
 # A variable already set in the environment wins over this file.
-# Between files, the user copy (%APPDATA%\fritchii\nx2_switches.txt, or
-# $XDG_CONFIG_HOME/fritchii/nx2_switches.txt) wins over this one, so editing this file is never
-# needed: copy the lines you want into your own and restart.
+# Between files, %APPDATA%\eden\nx2_switches.txt (yours) wins over this one, so editing
+# this file is never needed: copy the lines you want into your own and restart.
 #
 # Restart the emulator after editing.
 
-# --- Performance tuning defaults for Switch 2 ---
-# Offload GPU method/macro execution to the back thread (SPLIT=2 delivers up to +54% FPS alone).
-EDEN_NX2_SPLIT=2
-
-# Batch GPU fence syncpoints to reduce host driver overhead and smooth frametimes.
-EDEN_NX2_FENCE_BATCH=1
-
-# Leave buffer downloads disabled on Switch 2 (default): forcing downloads (=1) copies back
-# 90-220 MB/s of buffers CPU never touches, causing heavy mutex contention and dropping FPS by ~38-63%.
+# --- workarounds / behaviour ---
+# The game maps its own memory into sparse regions: with it off, Mario Kart World, Pokopia and
+# Kirby Air Riders ran the graphics pool dry and drew black scenery, sky and shadows.
+EDEN_NX2_SPARSE_REMAP=1
 #EDEN_NX2_BUFFER_DOWNLOADS=1
-
-# Paces frame submission 2 frames ahead. Reduces frametime spikes, but adds ~1-2 frames of input latency.
-# Enable only if frame pacing stability is preferred over responsive controls.
-#EDEN_NX2_FRAMES_AHEAD=2
-
-# --- Workarounds / Debug ---
-# Terrain/indirect drawing fix for Donkey Kong Bananza: enabled by default. Set to 0 only to leave to GPU.
-#EDEN_NX2_RESETFIX=0
-
-# Drop reactive-flushing read traps on Switch 2 programs (opt-in; can reduce FPS from 29 to 24 in MKW).
-#EDEN_NX2_NO_REACTIVE=1
-
+#EDEN_NX2_SPLIT=1
 #EDEN_NX2_MME_JIT=0
 #EDEN_NX2_PBFLUSH=0
+#EDEN_NX2_RESETFIX=0
+#EDEN_NX2_FENCE_BATCH=1
 #EDEN_NX2_SKIP_SAME=0
 #EDEN_NX2_INLINE_DEFER=0
 #EDEN_NX2_SPLIT_SKIP=1
 #EDEN_NX2_AUTO_STUB=1
-#EDEN_NX2_KEEP_ASTC=1
-# Threads for each shader warm-up (compute, then graphics), 1 to 32. They run at low priority.
-#EDEN_NX2_WARM_THREADS=4
-# The warm-up builds only while the game is paused or from Emulation > Prepare Shaders Now;
-# =1 lets it build while the game runs too.
-#EDEN_NX2_WARM_WHILE_PLAYING=1
-# Warm-up builds skip our vulkan_pipelines file (only the driver's cache keeps them); =1 adds
-# them to it.
-#EDEN_NX2_WARM_APP_CACHE=1
+
+# --- limits / tuning ---
+#EDEN_NX2_VRAM_LIMIT_MIB=8192
+#EDEN_NX2_GPU_PROFILE=0
+#EDEN_NX2_FRAMES_AHEAD=2
+#EDEN_NX2_TC_EXPECTED_MIB=21322
+#EDEN_NX2_TC_CRITICAL_MIB=22346

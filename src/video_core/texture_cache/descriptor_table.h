@@ -7,21 +7,19 @@
 #pragma once
 
 #include <algorithm>
-#include <cstring>
-#include <span>
+#include <cstdlib>
 #include <vector>
 
 #include "common/alignment.h"
 #include "common/common_types.h"
 #include "common/div_ceil.h"
 #include "common/assert.h"
-#include "core/memory.h"
 #include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace VideoCommon {
 
-template <typename T, typename Id = u32>
+template <typename T>
 class DescriptorTable {
 public:
     [[nodiscard]] bool Synchronize(GPUVAddr gpu_addr, u32 limit) noexcept {
@@ -35,40 +33,27 @@ public:
     void Invalidate() noexcept {
         // Cleared on the next read: the texture cache invalidates every channel's tables for
         // each image it deletes, dozens of times a frame while its collector runs.
+        // EDEN_NX2_LAZY_DESCRIPTORS=0 clears at once, as before.
+        static const bool lazy = [] {
+            const char* value = std::getenv("EDEN_NX2_LAZY_DESCRIPTORS");
+            return !value || value[0] != '0';
+        }();
+        if (!lazy) {
+            std::ranges::fill(read_descriptors, 0);
+            return;
+        }
         invalidated = true;
     }
 
-    std::span<Id> LiveBoundIds() noexcept {
-        return std::span{bound_ids}.first(
-            (std::min)(bound_ids.size(), size_t{current_limit} + 1));
-    }
-
-    template <class MemoryManager>
-    [[nodiscard]] std::pair<T, bool> Read(const MemoryManager& gpu_memory, u32 index) noexcept {
+    [[nodiscard]] std::pair<T, bool> Read(Tegra::MemoryManager const& gpu_memory, u32 index) noexcept {
         DEBUG_ASSERT(index <= current_limit);
-        if (invalidated) {
-            ClearReadDescriptors();
+        if (invalidated) [[unlikely]] {
+            std::ranges::fill(read_descriptors, 0);
             invalidated = false;
         }
         const GPUVAddr gpu_addr = current_gpu_addr + index * sizeof(T);
         std::pair<T, bool> result;
-        // This runs for every texture and sampler of every draw. An entry within one page is
-        // contiguous in host memory, so a single page lookup replaces the generic block read.
-        const bool one_page =
-            (gpu_addr & Core::Memory::YUZU_PAGEMASK) + sizeof(T) <= Core::Memory::YUZU_PAGESIZE;
-        const auto page_pointer = [&]() -> const u8* {
-            // Tegra::MemoryManager (EDEN_NX2_HANDLE_PTR_CACHE); test memories have GetPointer only.
-            if constexpr (requires { gpu_memory.GetPointerForDescriptor(gpu_addr); }) {
-                return gpu_memory.GetPointerForDescriptor(gpu_addr);
-            } else {
-                return gpu_memory.GetPointer(gpu_addr);
-            }
-        };
-        if (const u8* const host = one_page ? page_pointer() : nullptr) {
-            std::memcpy(std::addressof(result.first), host, sizeof(T));
-        } else {
-            gpu_memory.ReadBlockUnsafe(gpu_addr, std::addressof(result.first), sizeof(T));
-        }
+        gpu_memory.ReadBlockUnsafe(gpu_addr, std::addressof(result.first), sizeof(T));
         if ((read_descriptors[index / 64] & (1ULL << (index % 64))) != 0) {
             result.second = result.first != descriptors[index];
         } else {
@@ -84,35 +69,23 @@ public:
     void Refresh(GPUVAddr gpu_addr, u32 limit) noexcept {
         current_gpu_addr = gpu_addr;
         current_limit = limit;
-        // Small tables round up geometrically: the 0x80000-entry steps below allocated 16 MiB
-        // for every small 32-byte descriptor table. Large ones keep those steps (Mario
-        // Brothership reallocates a lot of times; std::vector's growth isn't enough for it).
-        const size_t num_descriptors = limit < 0x80000
-                                           ? std::bit_ceil(static_cast<size_t>(limit) + 1)
-                                           : ((limit + 0x80000) & (~0x7ffff)) + 1;
+        // Mario Brothership reallocates a lot of times, so use aggressive pre-alloc sizes
+        // std::vector<T> by default uses quadratic growth, but that isn't even enough to satisfy brothership
+        const size_t num_descriptors = ((limit + 0x80000) & (~0x7ffff)) + 1;
+        size_t old_size = read_descriptors.size();
         read_descriptors.resize(Common::DivCeil(num_descriptors, 64U));
-        ClearReadDescriptors();
+        old_size = (std::min)(old_size, read_descriptors.size());
+        std::fill(read_descriptors.begin(), read_descriptors.begin() + old_size, 0);
         invalidated = false;
         //
         descriptors.resize(num_descriptors);
-        bound_ids.resize(num_descriptors, Id{0});
     }
 
     std::vector<u64> read_descriptors;
     std::vector<T> descriptors;
-    std::vector<Id> bound_ids;
     GPUVAddr current_gpu_addr{};
     u32 current_limit{};
     bool invalidated{}; ///< read_descriptors is to be cleared before the next read
-
-private:
-    void ClearReadDescriptors() noexcept {
-        // Reserved capacity is not addressable. A later limit increase clears its new range.
-        const size_t words = (std::min)(read_descriptors.size(), size_t{current_limit} / 64 + 1);
-        std::fill_n(read_descriptors.begin(), words, u64{0});
-        const size_t ids = (std::min)(bound_ids.size(), size_t{current_limit} + 1);
-        std::fill_n(bound_ids.begin(), ids, Id{0});
-    }
 };
 
 } // namespace VideoCommon
