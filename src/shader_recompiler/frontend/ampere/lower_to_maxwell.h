@@ -2315,6 +2315,8 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
             const bool absolute = opcode != 0xd05 && !half && insn.Bits(62, 1);
             const bool negate = opcode != 0xd05 && !half && insn.Bits(63, 1);
             const bool byte = (mode & ~0x10100U) == 0x0020e000;
+            // Bits 75-76 the destination size: 0 (byte above) 8 bits, 1 16 bits, truncated.
+            const bool short_word = (mode & ~0x10100U) == 0x0020e800;
             const bool word = (mode & ~0x1c100U) == 0x00203000;
             const bool extended_word =
                 word && (insn.Bits(78, 2) == 2 || (insn.Bits(78, 2) == 3 && !insn.Bits(80, 1)));
