@@ -693,6 +693,12 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
         }
         native.push_back(instruction);
         const auto status = capture.Observe(instruction, index);
+        if (status == Shader::Ampere::ProgramCaptureState::Result::InvalidTarget &&
+            capture.FallbackEnd() != 0) {
+            // Data past the program's closing self-branch decoded as a branch.
+            native.resize(capture.FallbackEnd());
+            break;
+        }
         if (status == Shader::Ampere::ProgramCaptureState::Result::InvalidTarget) {
             if (const char* dir = std::getenv("EDEN_NX2_SHADER_DUMP")) {
                 const auto path = fmt::format("{}/rejected-{:x}.bin", dir, program_base + native_header_size);
