@@ -617,8 +617,28 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
         return true;
     }};
 
+    // EDEN_NX2_GPU_WAIT_SPIN_US (see MasterSemaphore::Wait): look for more work that long before
+    // sleeping, since waking this thread delays every submission a reader is waiting on.
+    const auto spin = std::chrono::microseconds{[] {
+        const char* value = std::getenv("EDEN_NX2_GPU_WAIT_SPIN_US");
+        return value != nullptr ? std::atoi(value) : 0;
+    }()};
+
     while (!stop_token.stop_requested()) {
         std::unique_ptr<CommandChunk> work;
+
+        if (spin.count() > 0) {
+            const auto end = std::chrono::steady_clock::now() + spin;
+            do {
+                {
+                    std::scoped_lock lk{queue_mutex};
+                    if (!work_queue.empty()) {
+                        break;
+                    }
+                }
+                std::this_thread::yield();
+            } while (std::chrono::steady_clock::now() < end);
+        }
 
         {
             std::unique_lock lk{queue_mutex};
