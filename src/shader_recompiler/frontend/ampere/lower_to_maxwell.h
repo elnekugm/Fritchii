@@ -1170,11 +1170,11 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
             const u32 alignment = width == 0 ? 1U : width == 2 ? 2U : 4U;
             const u32 target = uniform_register(uniform_dest);
             const u32 index_target = opcode == 0xabb ? uniform_register(index_reg) : 255U;
-            if (target == ~0U || target == 255 || (!subword_load && width != 4 && width != 5) ||
-                (opcode == 0xab9 && subword_load && offset >= 0x8000) ||
+            // Widths as Maxwell LDC's: U8/S8/U16/S16 (0-3, Star Fox's blit reads a U16), 32, 64.
+            const u32 align = width < 2 ? 1 : width < 4 ? 2 : 4;
+            if (target == ~0U || target == 255 || width > 5 ||
                 (width == 5 && ((uniform_dest & 1) || uniform_register(uniform_dest + 1) != target + 1)) ||
-                // An index register can align the offset; the host reads the aligned word either way.
-                bank() >= 18 || (opcode == 0xab9 && offset % alignment) || insn.Bits(62, 2) ||
+                bank() >= 18 || insn.Bits(38, 16) % align || insn.Bits(62, 2) ||
                 (insn.words[2] & ~0xe00U) != (opcode == 0xab9 ? 0U : 0x08000000U) ||
                 index_target == ~0U)
                 return fail(index, "native uniform constant load mode");
