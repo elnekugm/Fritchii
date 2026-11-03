@@ -113,6 +113,42 @@ TEST_CASE("Ampere local spills preserve vector widths and zero-register stores",
     }
 }
 
+TEST_CASE("Ampere local byte and half spills keep their type and alignment",
+          "[video_core][ampere]") {
+    for (const u32 type : {0U, 1U, 2U, 3U}) {
+        for (const u32 offset : {0x20U, 0x21U}) {
+            const std::array<Instruction, 2> code{{
+                {{0xff007387, 4U | (offset << 8), 0x00100000U | (type << 9), 0x000fe200}},
+                {{0x0000794d, 0, 0x03800000, 0}},
+            }};
+            const auto lowered = LowerToMaxwell(code);
+            if (offset == 0x21 && type >= 2) {
+                REQUIRE_FALSE(static_cast<bool>(lowered));
+                continue;
+            }
+            REQUIRE(static_cast<bool>(lowered));
+            REQUIRE(lowered.instructions.front() ==
+                    (0xef50000000070000ULL | 4ULL | (255ULL << 8) | (u64{offset} << 20) |
+                     (u64{type} << 48)));
+        }
+    }
+}
+
+TEST_CASE("Ampere local stores add a register base to the uniform one", "[video_core][ampere]") {
+    // STL [R4 + UR5 + 0x20], R6: UR5 is R221 here.
+    const std::array<Instruction, 2> code{{
+        {{0x04007987, 6U | (0x20U << 8), 0x08100000U | (4U << 9) | 5U, 0x000fe200}},
+        {{0x0000794d, 0, 0x03800000, 0}},
+    }};
+    const auto lowered = LowerToMaxwell(code);
+    REQUIRE(static_cast<bool>(lowered));
+    REQUIRE(lowered.instructions.size() >= 2);
+    REQUIRE(lowered.instructions[0] ==
+            (0x5c10000000070000ULL | 250ULL | (4ULL << 8) | (221ULL << 20)));
+    REQUIRE(lowered.instructions[1] ==
+            (0xef50000000070000ULL | 6ULL | (250ULL << 8) | (0x20ULL << 20) | (4ULL << 48)));
+}
+
 TEST_CASE("Ampere local vector spills reject misalignment and scratch aliasing",
           "[video_core][ampere]") {
     const std::array<Instruction, 2> misaligned{{
