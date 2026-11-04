@@ -1720,6 +1720,27 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
                 (u64{insn.Bits(87, 3)} << 24) | (u64{dimension} << 33) | (u64{offset} << 36) | (u64{1} << 51));
             break;
         }
+        case 0x998: case 0x99c: { // SULD.P / SUST.P .2D/2D_ARRAY/3D.IGN, handle in a register (bits 64-71).
+            const bool store = opcode == 0x99c;
+            const u32 data = insn.Bits(store ? 32 : 16, 8);
+            const u32 coordinate = insn.Bits(24, 8), handle = insn.Bits(64, 8);
+            const u32 channels = insn.Bits(72, 4), dimension = insn.Bits(61, 3);
+            const u32 count = static_cast<u32>(std::popcount(channels));
+            const u32 reserved = uses_uniform_bank ? 216U : 246U;
+            if ((insn.words[1] & ~(store ? 0xe00000ffU : 0xe0000000U)) ||
+                (insn.words[2] & ~0xfffU) != (store ? 0x00100000U : 0x001e0000U) ||
+                (insn.words[3] & 0xc00001ffU) || dimension < 3 || dimension > 5 ||
+                channels == 0 || handle >= reserved || data + count > reserved ||
+                coordinate + (dimension >= 4 ? 3U : 2U) > reserved ||
+                (store && (dest != 0 || (channels != 1 && channels != 3 && channels != 15))) ||
+                (!store && (data % (count == 3 ? 4U : count))))
+                return fail(index, "native bindless formatted surface mode");
+            // Maxwell's bindless form: is_bound (bit 51) clear, the handle register at bit 39.
+            emit((store ? 0xeb20000000000000ULL : 0xeb00000000000000ULL) | predicate |
+                data | (u64{coordinate} << 8) | (u64{channels} << 20) |
+                (u64{dimension} << 33) | (u64{handle} << 39));
+            break;
+        }
         case 0x301: // BREV register.
             if (insn.words[2] || insn.words[1] > 255) return fail(index, "native bit reverse mode");
             emit(base(0x3828000000000000ULL) | (u64{insn.words[1]} << 8) |
