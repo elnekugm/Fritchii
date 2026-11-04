@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -363,16 +364,24 @@ TEST_CASE("Ampere uniform bindless TEX admits only forward branches outside its 
     const std::array<Instruction, 5> conditional{{sample[0], sample[1], extra_condition,
                                                 {{0x00047882, 0, 0, 0}}, sample[2]}};
     REQUIRE(static_cast<bool>(LowerToMaxwell(conditional)));
+    // After a write of the handle (UMOV UR4), a branch past the shift reaches the texture with
+    // UR5 not derived from the new UR4.
     for (const s32 relative : {16, 32}) {
-        const std::array<Instruction, 5> enter_interval{{
-            Branch(relative), sample[0], {{0x09047220, 4, 0x0041c000, 0}}, sample[1], sample[2],
+        const std::array<Instruction, 6> enter_interval{{
+            {{0x00047882, 0, 0, 0}}, Branch(relative), sample[0], {{0x09047220, 4, 0x0041c000, 0}},
+            sample[1], sample[2],
         }};
         const auto rejected = LowerToMaxwell(enter_interval);
         REQUIRE_FALSE(static_cast<bool>(rejected));
-        REQUIRE(rejected.error_offset == 48);
+        REQUIRE(rejected.error_offset == 64);
     }
-    const std::array<Instruction, 5> loop_clobber{{
+    // A loop that writes the handle and reruns the shift keeps the pair; one that skips it does not.
+    const std::array<Instruction, 5> loop_rederived{{
         sample[0], sample[1], {{0x00047882, 0, 0, 0}}, Branch(-64), sample[2],
+    }};
+    REQUIRE(static_cast<bool>(LowerToMaxwell(loop_rederived)));
+    const std::array<Instruction, 5> loop_clobber{{
+        sample[0], sample[1], {{0x00047882, 0, 0, 0}}, Branch(-48), sample[2],
     }};
     REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(loop_clobber)));
     // Loops after the texture are allowed while the span they rerun keeps the pair (Yoshi needs them).
@@ -393,8 +402,14 @@ TEST_CASE("Ampere uniform bindless TEX admits only forward branches outside its 
         const std::array<Instruction, 4> invalid{{sample[0], sample[1], unknown_branch, sample[2]}};
         REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
     }
+    // A branch between the shift and the texture: fine while no write of the pair reaches the
+    // texture, refused once a later write loops back to it without the shift.
     const std::array<Instruction, 4> interrupted{{sample[0], Branch(0), sample[1], sample[2]}};
-    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(interrupted)));
+    REQUIRE(static_cast<bool>(LowerToMaxwell(interrupted)));
+    const std::array<Instruction, 6> interrupted_clobber{{sample[0], Branch(0), sample[1],
+                                                        {{0x00057882, 0, 0, 0}}, Branch(-48, 0),
+                                                        sample[2]}};
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(interrupted_clobber)));
 }
 
 TEST_CASE("Ampere uniform bindless TEX preserves predicates and accepts verified even handles",
@@ -557,7 +572,7 @@ TEST_CASE("Ampere uniform bindless TEX rejects unverified handle pairs and contr
         REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(code)));
     }
     // BSYNC, BREAK and BSSY are no-ops in the lowering and never transfer control.
-    for (const u32 opcode : {0x944U, 0x949U, 0x950U, 0x958U}) {
+    for (const u32 opcode : {0x944U, 0x950U}) {
         const std::array<Instruction, 4> code{{sample[0], sample[1],
                                              {{0x7000U | opcode, 0, 0x03800000, 0}},
                                              sample[2]}};
@@ -566,9 +581,24 @@ TEST_CASE("Ampere uniform bindless TEX rejects unverified handle pairs and contr
         REQUIRE(lowered.error_offset == 16);
         REQUIRE(lowered.instructions.empty());
     }
-    // A branch into the window skips the shift; a loop before the shift does not touch the pair.
+    // BRX / BRXU tables may land anywhere: accepted only while every uniform write of the pair is
+    // followed by the shift before any control transfer (here the BRX itself is then refused for
+    // its relative base, after the texture), refused at the texture otherwise.
+    for (const u32 opcode : {0x949U, 0x958U}) {
+        const std::array<Instruction, 4> table{{sample[0], sample[1],
+                                              {{0x7000U | opcode, 0, 0x03800000, 0}}, sample[2]}};
+        REQUIRE(LowerToMaxwell(table).error_offset == 32);
+        const std::array<Instruction, 5> clobbered{{sample[0], sample[1], {{0x00057882, 0, 0, 0}},
+                                                  {{0x7000U | opcode, 0, 0x03800000, 0}}, sample[2]}};
+        const auto lowered = LowerToMaxwell(clobbered);
+        REQUIRE_FALSE(static_cast<bool>(lowered));
+        REQUIRE(lowered.error_offset == 16);
+    }
+    // After a write of the handle, a branch into the window skips the shift; a loop before the
+    // shift does not touch the pair.
     for (const bool forward : {false, true}) {
-        const std::array<Instruction, 4> code{{
+        const std::array<Instruction, 5> code{{
+            {{0x00047882, 0, 0, 0}},
             {{0x00002947, forward ? 16U : 0xfffffff0U,
               forward ? 0x03800000U : 0x0383ffffU, 0}},
             sample[0], sample[1], sample[2],
@@ -579,7 +609,7 @@ TEST_CASE("Ampere uniform bindless TEX rejects unverified handle pairs and contr
             continue;
         }
         REQUIRE_FALSE(static_cast<bool>(lowered));
-        REQUIRE(lowered.error_offset == 32);
+        REQUIRE(lowered.error_offset == 48);
         REQUIRE(lowered.instructions.empty());
     }
 }
@@ -763,5 +793,49 @@ TEST_CASE("Ampere uniform bindless TEX treats WARPSYNC as a provenance scan boun
     REQUIRE(rejected.error == "native uniform bindless texture handle provenance");
     REQUIRE(rejected.error_offset == 32);
     REQUIRE(rejected.instructions.empty());
+}
+
+TEST_CASE("Ampere uniform bindless TEX.DC and TXD lower to Maxwell TEX.B.DC and TXD.B",
+          "[video_core][ampere][bindless_tex]") {
+    const auto find = [](const std::vector<u64>& code, u64 opcode) {
+        return std::ranges::find_if(code, [opcode](u64 i) { return (i >> 54) == (opcode >> 54); });
+    };
+    // Star Fox's shadow lookup: .DC, LZ, one channel; (x, y) in R2/R3, the reference in R3.
+    auto compare = sample;
+    compare[1].words[2] = 0x0c9e41ffU;
+    const auto dc = LowerToMaxwell(compare);
+    REQUIRE(static_cast<bool>(dc));
+    const auto tex = find(dc.instructions, 0xde80000000000000ULL);
+    REQUIRE(tex != dc.instructions.end());
+    REQUIRE(((*tex >> 50) & 1) == 1);
+    REQUIRE(((*tex >> 20) & 0xff) == 246);
+    REQUIRE(std::ranges::count(dc.instructions, Copy(247, 3)) == 1);
+    compare[1].words[2] = 0x0c9e4fffU; // .DC with four channels stays rejected
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(compare)));
+
+    // Star Fox's TXD ARRAY_2D: R4/R5 and R6/R7 out, (x, y, layer) from R2, gradients from R8.
+    auto gradient = sample;
+    gradient[1] = Instruction{{0x02047f6c, 0xa0000408, 0x081e0f06, 0x001f4200}};
+    const auto txd = LowerToMaxwell(gradient);
+    REQUIRE(static_cast<bool>(txd));
+    const auto sampled = find(txd.instructions, 0xde40000000000000ULL);
+    REQUIRE(sampled != txd.instructions.end());
+    REQUIRE((*sampled & 0xffff) == (248 | (248 << 8)));
+    REQUIRE(((*sampled >> 20) & 0xff) == 8);
+    REQUIRE(((*sampled >> 28) & 7) == 3);
+    REQUIRE(std::ranges::count(txd.instructions, Copy(7, 251)) == 1);
+    gradient[1].words[1] |= 1U << 20; // unverified bits in 46-60
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(gradient)));
+}
+TEST_CASE("Ampere uniform bindless TEX ignores a general-register LDG naming the handle number",
+          "[video_core][ampere]") {
+    // LDG.E R4, desc[UR8][R12.64] (Star Fox's compute shaders) writes R4, not the UR4 handle.
+    const std::array<Instruction, 4> code{{
+        sample[0],
+        {{0x0c047981, 0x00000008, 0x081ead00, 0x000ea200}},
+        sample[1],
+        sample[2],
+    }};
+    REQUIRE(static_cast<bool>(LowerToMaxwell(code)));
 }
 } // namespace

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <vector>
 #include <catch2/catch_test_macros.hpp>
 
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
@@ -38,5 +39,25 @@ TEST_CASE("Ampere DEPBAR.LE with a wait list is a no-op", "[video_core][ampere]"
         code[0].words[2] = 1;
         REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(code)));
     }
+}
+TEST_CASE("Ampere dual-destination PLOP3.LUT writes both predicates from the old inputs",
+          "[video_core][ampere]") {
+    // PLOP3.LUT P0, P1, P0, PT, P1, 0x80, 0xc8 (Star Fox's composite fragment shader).
+    std::array<Instruction, 2> code{{{{0x00c8781c, 0, 0x0010f010, 0x000fc400}}, Exit}};
+    const auto lowered = LowerToMaxwell(code);
+    REQUIRE(static_cast<bool>(lowered));
+    // Three input SELs, then one LOP3 per destination, both after every SEL.
+    std::vector<u64> lop3;
+    for (const u64 i : lowered.instructions)
+        if ((i >> 52) == 0x5be) lop3.push_back(i);
+    REQUIRE(lop3.size() == 2);
+    REQUIRE(((lop3[0] >> 28) & 0xff) == 0x80);
+    REQUIRE(((lop3[0] >> 48) & 7) == 0);
+    REQUIRE(((lop3[1] >> 28) & 0xff) == 0xc8);
+    REQUIRE(((lop3[1] >> 48) & 7) == 1);
+    REQUIRE((lowered.instructions[3] >> 52) == 0x5be);
+    // A second table without a second destination stays rejected.
+    code[0].words[2] |= 7U << 20;
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(code)));
 }
 } // namespace

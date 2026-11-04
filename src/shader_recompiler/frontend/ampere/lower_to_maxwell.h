@@ -1178,6 +1178,11 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
             if (target == 7 || insn.Bits(84, 3) != 7 ||
                 insn.Bits(16, 8) || insn.words[1])
                 return fail(index, "native predicate LUT mode");
+            if (target2 != 7) {
+                predicate_lut(lut, insn.Bits(87, 4), insn.Bits(77, 4), insn.Bits(68, 4), target,
+                              insn.Bits(67, 1) != 0, insn.Bits(16, 8), target2);
+                break;
+            }
             if (!insn.Bits(67, 1) && (lut == 0xfe || lut == 0xa8)) {
                 emit(0x5090000000000000ULL | predicate | (u64{target} << 3) | 7 |
                      (u64{insn.Bits(87, 4)} << 12) | (u64{1} << 24) |
@@ -2454,6 +2459,8 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
             const u32 dimension = insn.Bits(61, 3);
             const bool array = dimension == 5;
             const bool volume = dimension == 2;
+            // LOD 1 is LZ; 3 (LL) only for arrays: (layer, x | y, lod), the LOD after the handle.
+            const bool explicit_lod = array && insn.Bits(87, 3) == 3;
             u32 source_a = insn.Bits(24, 8), source_b = insn.Bits(32, 8);
             u32 second_dest = insn.Bits(64, 8);
             // TLDS has no single-register G+B or R+B swizzle (Hyrule Warriors fetches G+B): take

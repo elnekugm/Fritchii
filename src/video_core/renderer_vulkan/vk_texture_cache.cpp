@@ -1708,8 +1708,8 @@ void TextureCacheRuntime::ReinterpretImage(Image& dst, Image& src,
     const VkImageAspectFlags src_copy_aspect = copy_aspect(src_aspect_mask);
     const VkImageAspectFlags dst_copy_aspect = copy_aspect(dst_aspect_mask);
 
-    const auto bpp_in = BytesPerBlock(src.info.format) / DefaultBlockWidth(src.info.format);
-    const auto bpp_out = BytesPerBlock(dst.info.format) / DefaultBlockWidth(dst.info.format);
+    const auto bpp_in = plane_bpp(src);
+    const auto bpp_out = plane_bpp(dst);
     std::ranges::transform(copies, vk_in_copies.begin(),
                            [src_copy_aspect, bpp_in, bpp_out](const auto& copy) {
                                auto copy2 = copy;
