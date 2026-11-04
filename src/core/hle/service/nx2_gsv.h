@@ -2052,9 +2052,15 @@ private:
                 Common::Nx2Hitch::OnPresent(frame);
             }
             m_stats.last_present = entered;
-            if (++m_stats.presents == 600) {
+            // EDEN_NX2_PRESENT_STATS=<n> averages over n presents instead (shorter benchmark windows).
+            static const u32 window = [] {
+                const char* value = std::getenv("EDEN_NX2_PRESENT_STATS");
+                const unsigned long parsed = value != nullptr ? std::strtoul(value, nullptr, 10) : 0;
+                return parsed >= 2 ? static_cast<u32>(parsed) : 600u;
+            }();
+            if (++m_stats.presents == window) {
                 LOG_INFO(Service,
-                         "nx2:vi2 last 600 presents: frame {} us (max {}, {} over 100 ms), "
+                         "nx2:vi2 last {} presents: frame {} us (max {}, {} over 100 ms), "
                          "blocked on the GPU fence {} us (max {}), composite {} us, vblank "
                          "pacing {} us, {} ran a frame ahead",
                          m_stats.frame_us / 599, m_stats.max_frame_us, m_stats.hitches,
