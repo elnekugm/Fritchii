@@ -101,36 +101,60 @@ done
 # 2. GitHub forks of the first two roots, every branch pushed after the fork was made, compared
 # against the root's default branch. Forks not pushed to since the fork was made or since the
 # window starts, and branches that still point where one of the root's branches does (forks copy
-# all of them), are skipped unasked.
+# all of them), are skipped unasked. Forks run in parallel (one API call per branch), each into
+# its own file; the files are printed in fork order and a commit two forks share is kept once.
+scan_fork() { # <root> <root branch> <root heads> <fork>
+    local out
+    out=$(gh api --paginate "repos/$4/branches?per_page=100" \
+        -q '.[] | [.name, .commit.sha] | @tsv' |
+        while IFS=$'\t' read -r branch head; do
+            grep -qxF "$head" <<< "$3" && continue
+            # shortcut: compare lists at most 250 commits; a fork that far ahead of its
+            # root needs a look by hand anyway.
+            gh api "repos/$4/compare/${1%%/*}:$2...$branch" \
+                -q '.commits[] | select(.parents | length == 1) |
+                    [.sha, .commit.committer.date, .commit.author.name,
+                     (.commit.message | split("\n")[0])] | @tsv' 2> /dev/null |
+                while IFS=$'\t' read -r sha date author subject; do
+                    # An API error (rate limit) comes back as JSON, not as commits.
+                    if [[ ! $sha =~ ^[0-9a-f]{40}$ ]]; then
+                        echo "fork-scan: $4 $branch: ${sha:0:100}" >&2
+                        continue
+                    fi
+                    print_commit "$4" "$sha" "$(date -d "$date" +%s)" \
+                        "$author" "$subject" "$branch"
+                done
+        done | sort -u)
+    if [ -n "$out" ]; then
+        echo "## $4"
+        echo
+        echo "$out"
+        echo
+    fi
+}
+
+parts=$(mktemp -d)
+trap 'rm -rf "$known" "$seen" "$parts"' EXIT
+jobs_max=8
+n=0
 for entry in "${ROOTS[@]:0:2}"; do
     read -r root root_branch <<< "$entry"
     root_heads=$(gh api --paginate "repos/$root/branches?per_page=100" -q '.[].commit.sha')
-    gh api --paginate "repos/$root/forks?per_page=100" \
-        -q ".[] | select(.pushed_at > .created_at and .pushed_at >= \"$since_utc\") | .full_name" |
-        while read -r fork; do
-            [ "$fork" = "$SELF" ] && continue
-            out=$(gh api --paginate "repos/$fork/branches?per_page=100" \
-                -q '.[] | [.name, .commit.sha] | @tsv' |
-                while IFS=$'\t' read -r branch head; do
-                    grep -qxF "$head" <<< "$root_heads" && continue
-                    # shortcut: compare lists at most 250 commits; a fork that far ahead of its
-                    # root needs a look by hand anyway.
-                    gh api "repos/$fork/compare/${root%%/*}:$root_branch...$branch" \
-                        -q '.commits[] | select(.parents | length == 1) |
-                            [.sha, .commit.committer.date, .commit.author.name,
-                             (.commit.message | split("\n")[0])] | @tsv' 2> /dev/null |
-                        while IFS=$'\t' read -r sha date author subject; do
-                            print_commit "$fork" "$sha" "$(date -d "$date" +%s)" \
-                                "$author" "$subject" "$branch"
-                        done
-                done | sort -u)
-            if [ -n "$out" ]; then
-                echo "## $fork"
-                echo
-                echo "$out"
-                echo
-            fi
-        done
+    while read -r fork; do
+        [ "$fork" = "$SELF" ] && continue
+        while [ "$(jobs -rp | wc -l)" -ge "$jobs_max" ]; do wait -n || true; done
+        scan_fork "$root" "$root_branch" "$root_heads" "$fork" > "$parts/$(printf %05d "$n")" &
+        n=$((n + 1))
+    done < <(gh api --paginate "repos/$root/forks?per_page=100" \
+        -q ".[] | select(.pushed_at > .created_at and .pushed_at >= \"$since_utc\") | .full_name")
 done
+wait
+# Parallel forks race on $seen: drop repeats here, and sections that end up empty.
+cat "$parts"/* 2> /dev/null | awk '
+    /^## / { flush(); head = $0; body = ""; next }
+    /^- \[`/ { sha = $0; sub(/^[^(]*\(https:\/\/github.com\/[^\/]*\/[^\/]*\/commit\//, "", sha)
+               sub(/\).*/, "", sha); if (sha in done) next; done[sha] = 1; body = body $0 "\n"; next }
+    function flush() { if (body != "") printf "%s\n\n%s\n", head, body; body = "" }
+    END { flush() }'
 
 echo "Mark turned-down commits in \`.github/fork-scan-skip\` so the next scan leaves them out."
