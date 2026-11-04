@@ -452,8 +452,8 @@ void Nx2VideoDecoder::RenderUnguarded(const Nx2Picture& picture, Nx2PictureForma
         return;
     }
     // Software-decoded frames are planar: interleave U and V ourselves instead of using swscale.
-    if (target == AV_PIX_FMT_NV12 &&
-        (f->format == AV_PIX_FMT_YUV420P || f->format == AV_PIX_FMT_YUVJ420P) &&
+    // YUVJ420P is full range and stays on the swscale path so it is converted to limited range.
+    if (target == AV_PIX_FMT_NV12 && f->format == AV_PIX_FMT_YUV420P &&
         static_cast<u32>(f->width) == width && static_cast<u32>(f->height) == height) {
         for (u32 y = 0; y < height; ++y) {
             std::memcpy(out.data() + y * pitch, f->data[0] + y * f->linesize[0], width);
