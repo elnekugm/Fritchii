@@ -91,3 +91,15 @@ TEST_CASE("A cancel from another thread returns only after a due action ran",
     releaser.join();
     incrementer.join();
 }
+
+TEST_CASE("Cancelling an action that already ran leaves later actions registered",
+          "[video_core][syncpoint_manager]") {
+    const auto manager = std::make_unique<SyncpointManager>();
+    const auto ran = manager->RegisterGuestAction(0, 1, [] {});
+    manager->IncrementGuest(0);
+    bool later = false;
+    manager->RegisterGuestAction(0, 2, [&later] { later = true; });
+    manager->DeregisterGuestAction(0, ran); // its list node may be reused by the later action
+    manager->IncrementGuest(0);
+    REQUIRE(later);
+}
