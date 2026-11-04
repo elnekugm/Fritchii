@@ -635,6 +635,15 @@ public:
         u64 epoch{~u64{0}};
     };
     std::array<Nx2SyncedVertexBuffer, NUM_VERTEX_BUFFERS> nx2_synced_vertex_buffers{};
+    /// Ranges SynchronizeBuffer checked, by address: checked again only once a page of theirs
+    /// became CPU modified (uniform, storage and index buffers, besides the vertex buffers).
+    struct Nx2SyncedRange {
+        const void* buffer{};
+        DAddr device_addr{};
+        u32 size{};
+        u64 epoch{~u64{0}};
+    };
+    std::array<Nx2SyncedRange, 512> nx2_synced_ranges{};
     /// Ranges recently added to a range set: adding one again before the set lost any range is a
     /// no-op (Bananza's culling draws mark the same storage ranges written draw after draw).
     struct Nx2RecentRange {
@@ -803,6 +812,7 @@ private:
     void RefreshMultiRangeSegments(std::vector<MultiRangeSegment>& pool);
 
     bool SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 size);
+    bool SynchronizeBufferPages(Buffer& buffer, DAddr device_addr, u32 size);
 
     /// EDEN_NX2_EXP59 & 8: before the full walk, counts and logs what the dirty-word walk would
     /// have left out. Returns whether the dirty-word walk would have walked anything.
