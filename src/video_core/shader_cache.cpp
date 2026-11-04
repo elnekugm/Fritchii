@@ -9,7 +9,10 @@
 #include <cstdlib>
 #include <exception>
 #include <functional>
+#include <chrono>
+#include <cstdlib>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <fmt/ranges.h>
 #include <array>
@@ -190,7 +193,8 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
             return false;
         }
         const ShaderInfo* shader_info{TryGet(*cpu_shader_addr)};
-        if (!shader_info && native && IsRejected(*cpu_shader_addr)) {
+        if (!shader_info && native && IsRejected(*cpu_shader_addr) &&
+            !RecheckRejection(*cpu_shader_addr)) {
             // A rejected program fails the same way every time it is bound: skip its draws
             // without rethrowing (two C++ throws each time cost ~1-2% of the GPU thread).
             maxwell3d->GetNativeMacroEngine().native_execution_failed = true;
@@ -207,7 +211,7 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
                                        start_address, {}, support_cooperative_matrix};
                 shader_info = MakeShaderInfo(env, *cpu_shader_addr);
             } catch (const Shader::Exception&) {
-                RememberRejection(*cpu_shader_addr);
+                RememberRejection(*cpu_shader_addr, shader_addr);
                 // Once per program: which stage slot it is bound to, its header and the slot's
                 // registers (to tell how a pipeline with task/mesh programs is set up).
                 static std::unordered_set<GPUVAddr> described;
@@ -349,7 +353,7 @@ const ShaderInfo* ShaderCache::ComputeShader() {
 void ShaderCache::RethrowIfRejected(VAddr addr) {
     std::scoped_lock lock{rejected_mutex};
     if (const auto it = rejected_native.find(addr); it != rejected_native.end()) {
-        std::rethrow_exception(it->second);
+        std::rethrow_exception(it->second.error);
     }
 }
 
@@ -358,7 +362,81 @@ bool ShaderCache::IsRejected(VAddr addr) {
     return rejected_native.contains(addr);
 }
 
-void ShaderCache::RememberRejection(VAddr addr) {
+// Programs can be rejected before the guest has finished writing them (Yoshi binds programs
+// that still read as zeros), and their pages are not write tracked, so the rejection would
+// stick for the rest of the run. Keep the bytes a rejection was made from and compare them
+// again at most every 250 ms; a change drops the rejection. EDEN_NX2_REJECT_RECHECK=0 turns
+// this off. Ported from zortos293/Eglantine 46a184c4e (opt-in there).
+static bool RejectRecheckEnabled() {
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_REJECT_RECHECK");
+        return !value || std::string_view{value} != "0";
+    }();
+    return enabled;
+}
+
+static std::vector<u8> ReadRejectedWindow(Tegra::MemoryManager& gpu_memory, GPUVAddr addr) {
+    size_t length = 0x2000;
+    while (length > 0x80 && !gpu_memory.IsFullyMappedRange(addr, length)) {
+        length /= 2;
+    }
+    std::vector<u8> bytes(length);
+    gpu_memory.ReadBlockUnsafe(addr, bytes.data(), length);
+    return bytes;
+}
+
+bool ShaderCache::RecheckRejection(VAddr addr) {
+    if (!RejectRecheckEnabled()) {
+        return false;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    GPUVAddr gpu_addr;
+    std::vector<u8> before;
+    std::chrono::steady_clock::time_point made;
+    {
+        std::scoped_lock lock{rejected_mutex};
+        const auto it = rejected_native.find(addr);
+        if (it == rejected_native.end() ||
+            now - it->second.checked < std::chrono::milliseconds{250}) {
+            return false;
+        }
+        it->second.checked = now;
+        gpu_addr = it->second.gpu_addr;
+        before = it->second.bytes;
+        made = it->second.made;
+    }
+    const std::vector<u8> after = ReadRejectedWindow(*gpu_memory, gpu_addr);
+    if (before == after) {
+        return false;
+    }
+    {
+        std::scoped_lock lock{rejected_mutex};
+        rejected_native.erase(addr);
+    }
+    const size_t length = (std::min)(before.size(), after.size());
+    const size_t offset = static_cast<size_t>(
+        std::mismatch(before.begin(), before.begin() + static_cast<std::ptrdiff_t>(length),
+                      after.begin())
+            .first -
+        before.begin());
+    static std::atomic<u32> reports{};
+    if (reports.fetch_add(1, std::memory_order_relaxed) < 256) {
+        LOG_INFO(HW_GPU,
+                 "Rejected program {:#x} changed {} ms after its rejection at +{:#x}, lowering again",
+                 gpu_addr,
+                 std::chrono::duration_cast<std::chrono::milliseconds>(now - made).count(), offset);
+    }
+    return true;
+}
+
+void ShaderCache::RememberRejection(VAddr addr, GPUVAddr gpu_addr) {
+    Rejection rejection{};
+    rejection.error = std::current_exception();
+    rejection.gpu_addr = gpu_addr;
+    if (RejectRecheckEnabled()) {
+        rejection.bytes = ReadRejectedWindow(*gpu_memory, gpu_addr);
+        rejection.made = rejection.checked = std::chrono::steady_clock::now();
+    }
     std::scoped_lock lock{rejected_mutex};
     if (rejected_native.contains(addr)) {
         // Called from a catch block: keep the first exception for that address instead of
