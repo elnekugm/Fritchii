@@ -775,10 +775,26 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
 
     LOG_INFO(Loader, "Patching NSO for name={}, build_id={}", name, build_id);
 
+    auto base = nso;
+    if (const auto* patch = FindFps30Patch(build_id)) {
+        const size_t at = sizeof(Loader::NSOHeader) + patch->offset;
+        u32 word{};
+        if (at + sizeof(word) <= base.size()) {
+            std::memcpy(&word, base.data() + at, sizeof(word));
+        }
+        if (word == patch->expected) {
+            std::memcpy(base.data() + at, &patch->replacement, sizeof(word));
+            LOG_INFO(Loader, "    - Applying built-in 30 FPS patch");
+        } else {
+            LOG_WARNING(Loader, "    - Built-in 30 FPS patch skipped: {:#010x} at {:#x}, expected {:#010x}",
+                        word, patch->offset, patch->expected);
+        }
+    }
+
     const auto load_dir = GetModificationLoadRoot();
     if (load_dir == nullptr) {
         LOG_ERROR(Loader, "Cannot load mods for invalid title_id={:016X}", title_id);
-        return nso;
+        return base;
     }
 
     auto patch_dirs = load_dir->GetSubdirectories();
@@ -799,7 +815,7 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
     });
     const auto patches = CollectPatches(patch_dirs, build_id);
 
-    auto out = nso;
+    auto out = base;
     for (const auto& patch_file : patches) {
         if (patch_file->GetExtension() == "ips") {
             LOG_INFO(Loader, "    - Applying IPS patch from mod \"{}\"",
