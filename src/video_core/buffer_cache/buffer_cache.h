@@ -3826,6 +3826,9 @@ bool BufferCache<P>::JoinOverlap(BufferId new_buffer_id, BufferId overlap_id,
 template <class P>
 BufferId BufferCache<P>::CreateBuffer(DAddr device_addr, u32 wanted_size,
                                       bool sparse_compatible) {
+    // The synchronized-range tables hold Buffer pointers and ids that this may move or reuse.
+    nx2_synced_ranges.fill({});
+    nx2_synced_vertex_buffers.fill({});
     DAddr device_addr_end = Common::AlignUp(device_addr + wanted_size, CACHING_PAGESIZE);
     device_addr = Common::AlignDown(device_addr, CACHING_PAGESIZE);
     wanted_size = static_cast<u32>(device_addr_end - device_addr);
