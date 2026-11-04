@@ -256,6 +256,7 @@ void RangeSet<AddressType>::Add(AddressType base_address, size_t size) {
 
 template <typename AddressType>
 void RangeSet<AddressType>::Subtract(AddressType base_address, size_t size) {
+    ++m_removals;
     m_impl->Subtract(base_address, size);
 }
 
