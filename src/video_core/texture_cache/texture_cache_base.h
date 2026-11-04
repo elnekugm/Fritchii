@@ -799,6 +799,9 @@ private:
     void MarkModification(ImageBase& image) noexcept;
 
     /// Synchronize image aliases, copying data if needed
+    /// Tells the aliases of an image that it now holds contents up to its modification tick.
+    void NoteAliasTick(const ImageBase& image);
+
     void SynchronizeAliases(ImageId image_id);
 
     /// Prepare an image view to be used
