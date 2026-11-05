@@ -475,6 +475,12 @@ Id EmitGlobalAtomicExchange32(EmitContext& ctx, Id address, Id value) {
     return GlobalAtomicU32(ctx, 8, address, value);
 }
 
+Id EmitGlobalAtomicCompareExchange32(EmitContext& ctx, Id address, Id comparator, Id value) {
+    if (!ctx.profile.support_int64) {
+        throw NotImplementedException("Global atomic address without Int64 support");
+    }
+    return ctx.OpFunctionCall(ctx.U32[1], ctx.atomic_cas_global_func_u32, address, comparator, value);
+}
 
 Id EmitGlobalAtomicInc32(EmitContext&) {
     throw NotImplementedException("SPIR-V Instruction {}", __func__);
