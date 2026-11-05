@@ -1130,8 +1130,20 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
                 best_index = OpSelect(U32[1], better, Const(static_cast<u32>(index)), best_index);
             }
             for (size_t index = 0; index < num_buffers; ++index) {
+                // Descriptor bounds are authoritative, including physical-prefix fallbacks.
+                // Check the whole access in 64 bits before access() narrows the byte offset.
+                const Id distance{OpISub(U64, addr, bases[index])};
+                const Id elements{OpArrayLength(U32[1], ssbos[index].*ssbo_member, 0U)};
+                const Id bytes{OpShiftLeftLogical(U64, OpUConvert(U64, elements), Const(shift))};
+                const Id fits{OpLogicalAnd(
+                    U1, OpULessThanEqual(U1, distance, bytes),
+                    OpUGreaterThanEqual(U1, OpISub(U64, bytes, distance),
+                                       Constant(U64, u64{1} << shift)))};
+                const Id representable{OpULessThanEqual(
+                    U1, distance, Constant(U64, (u64{1} << 32) - (u64{1} << shift)))};
+                const Id selected{OpIEqual(U1, best_index, Const(static_cast<u32>(index)))};
                 access(index, bases[index],
-                       OpIEqual(U1, best_index, Const(static_cast<u32>(index))));
+                       OpLogicalAnd(U1, selected, OpLogicalAnd(U1, fits, representable)));
             }
             return;
         }

@@ -282,7 +282,8 @@
         "version": "v1.0.5",
         "patches": [
             "0001-cooperative-matrix.patch",
-            "0002-compile-options.patch"
+            "0002-compile-options.patch",
+            "0003-array-length.patch"
         ]
     },
     "spirv-headers": {
