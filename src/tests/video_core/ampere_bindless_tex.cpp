@@ -492,6 +492,25 @@ TEST_CASE("Ampere uniform bindless TEX stops provenance at writes to the handle 
     }
 }
 
+TEST_CASE("Ampere uniform bindless TEX counts R2UR as a single uniform write",
+          "[video_core][ampere][bindless_tex]") {
+    // Ocarina's fragment shader: R2UR UR9 between the copy into UR10 and the TEX on UR10/UR11.
+    // The lowered R2UR form writes only URd, so URd = handle - 1 keeps the pair.
+    const auto r2ur = [](u32 target, u32 mode) {
+        return Instruction{{0x020073c2U | (target << 16), 0, mode, 0}};
+    };
+    const auto lower = [&](Instruction clobber) {
+        const std::array<Instruction, 4> code{{sample[0], clobber, sample[1], sample[2]}};
+        return LowerToMaxwell(code);
+    };
+    REQUIRE(static_cast<bool>(lower(r2ur(3, 0x000e0000))));
+    for (const u32 target : {4U, 5U}) {
+        const auto lowered = lower(r2ur(target, 0x000e0000));
+        REQUIRE_FALSE(static_cast<bool>(lowered));
+        REQUIRE(lowered.error_offset == 32);
+    }
+}
+
 TEST_CASE("Ampere uniform bindless TEX preserves scalar and pair result masks",
           "[video_core][ampere][bindless_tex]") {
     for (const Instruction texture : {
