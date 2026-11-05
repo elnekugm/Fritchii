@@ -22,6 +22,7 @@
 #include <fmt/ranges.h>
 
 #include "common/range_sets.inc"
+#include "common/unmapped_read_diagnostic.h"
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/buffer_cache/multi_range_refresh.h"
 #include "video_core/buffer_cache/nx2_bytes_equal.h"

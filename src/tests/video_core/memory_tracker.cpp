@@ -1,12 +1,14 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
+#include <cstdlib>
+#include <filesystem>
 #include <memory>
+#include <optional>
 #include <stdexcept>
-#include "common/container/unordered_map.h"
 #include <tuple>
 #include <vector>
-#include <optional>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -16,8 +18,16 @@
 #include "video_core/buffer_cache/memory_tracker_base.h"
 #include "video_core/nx2.h"
 #include "core/device_memory.h"
+#include "core/hle/kernel/k_process.h"
+#include "core/hle/kernel/k_process_page_table.h"
+#include "core/hle/kernel/kernel.h"
 #include "core/memory.h"
+#include "video_core/buffer_cache/memory_tracker_base.h"
+#include "video_core/gpu.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/memory_manager.h"
+#include "video_core/nx2.h"
+#include "video_core/renderer_null/null_rasterizer.h"
 
 namespace {
 using Range = std::pair<u64, u64>;
@@ -750,4 +760,73 @@ TEST_CASE("MemoryTracker: repeated indirect rewrites keep historical command-pag
     }
     tracker->MarkRegionAsCpuModified(c, PAGE);
     REQUIRE(rasterizer.Count() == 0);
+}
+
+TEST_CASE("DeviceMemoryManager unsafe unmapped reads preserve zero fill",
+          "[video_core][unmapped_trace]") {
+    Core::DeviceMemory device_memory;
+    Tegra::MaxwellDeviceMemoryManager manager(device_memory);
+    for (const size_t size : {size_t{69632}, size_t{20480}}) {
+        std::vector<u8> data(size, 0xa5);
+        manager.ReadBlockUnsafe(0x10000, data.data(), data.size());
+        REQUIRE(std::ranges::all_of(data, [](u8 byte) { return byte == 0; }));
+    }
+}
+
+// Run in a separate process with EDEN_TEST_UNMAPPED_LOG_DIR set. The log output is
+// checked by the integration runner in both trace modes, after the old cap is exhausted.
+TEST_CASE("DeviceMemoryManager trace after warning cap", "[.][unmapped_trace_integration]") {
+    const char* log_dir = std::getenv("EDEN_TEST_UNMAPPED_LOG_DIR");
+    REQUIRE(log_dir != nullptr);
+    Common::FS::SetEdenPath(Common::FS::EdenPath::LogDir, std::filesystem::path{log_dir});
+    Common::Log::Initialize();
+    Common::Log::SetColorConsoleBackendEnabled(true);
+
+    Core::DeviceMemory device_memory;
+    Tegra::MaxwellDeviceMemoryManager manager(device_memory);
+    std::vector<u8> warmup(16 * 4096, 0xa5);
+    manager.ReadBlockUnsafe(0x10000, warmup.data(), warmup.size());
+    REQUIRE(std::ranges::all_of(warmup, [](u8 byte) { return byte == 0; }));
+    for (int i = 0; i < 2; ++i) {
+        std::vector<u8> data(69632, 0xa5);
+        manager.ReadBlockUnsafe(0x30000, data.data(), data.size());
+        REQUIRE(std::ranges::all_of(data, [](u8 byte) { return byte == 0; }));
+    }
+
+    Core::System system;
+    Tegra::GPU gpu(system, false, false);
+    Null::RasterizerNull rasterizer(gpu);
+    Tegra::MemoryManager gpu_memory(system, manager);
+    gpu_memory.BindRasterizer(&rasterizer);
+    gpu_memory.Map(0x100000, 0x40000, 2 * 65536);
+    for (int i = 0; i < 2; ++i) {
+        std::vector<u8> data(24576, 0xa5);
+        // The first big-page chunk is 20480 bytes; the outer request is 24576.
+        gpu_memory.ReadBlockUnsafe(0x10b000, data.data(), data.size());
+        REQUIRE(std::ranges::all_of(data, [](u8 byte) { return byte == 0; }));
+    }
+    // Exercise a real process page table with one mapped page followed by an unmapped page.
+    Settings::values.use_multi_core.SetValue(false);
+    system.Initialize();
+    Kernel::KProcess process(system.Kernel());
+    SCOPE_EXIT {
+        system.Kernel().UnregisterKernelObject(&process);
+    };
+    auto& cpu_memory = process.GetMemory();
+    auto& page_table = process.GetPageTable().GetImpl();
+    page_table.Resize(32, 12);
+    cpu_memory.SetCurrentPageTable(process);
+    constexpr u64 physical_offset = 0x8000;
+    cpu_memory.MapMemoryRegion(page_table, Common::ProcessAddress{0x200000}, 4096,
+                               Common::PhysicalAddress{Core::DramMemoryMap::Base + physical_offset},
+                               Common::MemoryPermission::ReadWrite, false);
+    system.DeviceMemory().buffer.ClearBackingRegion(physical_offset, 4096, 0x42);
+    Tegra::MaxwellDeviceMemoryManager mapped_manager(system.DeviceMemory());
+    const auto asid = mapped_manager.RegisterProcess(&cpu_memory);
+    mapped_manager.Map(0x70000, 0x200000, 4096, asid);
+    std::vector<u8> mixed(8192, 0xa5);
+    mapped_manager.ReadBlockUnsafe(0x70000, mixed.data(), mixed.size());
+    REQUIRE(std::all_of(mixed.begin(), mixed.begin() + 4096, [](u8 byte) { return byte == 0x42; }));
+    REQUIRE(std::all_of(mixed.begin() + 4096, mixed.end(), [](u8 byte) { return byte == 0; }));
+    Common::Log::Stop();
 }

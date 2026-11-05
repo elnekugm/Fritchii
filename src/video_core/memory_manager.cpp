@@ -16,6 +16,7 @@
 #include "common/assert.h"
 #include "common/logging.h"
 #include "common/paged_scalar.h"
+#include "common/unmapped_read_diagnostic.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_page_table.h"
 #include "core/hle/kernel/k_process.h"
@@ -642,6 +643,8 @@ void MemoryManager::ReadBlockImpl(GPUVAddr gpu_src_addr, void* dest_buffer, std:
         if (physical != nullptr) [[likely]] {
             std::memcpy(dest_buffer, physical, copy_amount);
         } else {
+            Common::UnmappedReadDiagnostic::Scope trace;
+            trace.TranslatedGpu((page_index << big_page_bits) + offset, copy_amount);
             memory.ReadBlockUnsafe(dev_addr_base, dest_buffer, copy_amount);
         }
         dest_buffer = static_cast<u8*>(dest_buffer) + copy_amount;
@@ -653,11 +656,17 @@ void MemoryManager::ReadBlockImpl(GPUVAddr gpu_src_addr, void* dest_buffer, std:
     MemoryOperation(gpu_src_addr, size, true, mapped_big, set_to_zero, read_short_pages);
 }
 
-void MemoryManager::ReadBlock(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size, VideoCommon::CacheType which) const {
+void MemoryManager::ReadBlock(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size,
+                              VideoCommon::CacheType which, std::source_location caller) const {
+    Common::UnmappedReadDiagnostic::Scope trace;
+    trace.Gpu(gpu_src_addr, size, caller);
     ReadBlockImpl(gpu_src_addr, dest_buffer, size, which, false);
 }
 
-void MemoryManager::ReadBlockUnsafe(GPUVAddr gpu_src_addr, void* dest_buffer, const std::size_t size) const {
+void MemoryManager::ReadBlockUnsafe(GPUVAddr gpu_src_addr, void* dest_buffer,
+                                    const std::size_t size, std::source_location caller) const {
+    Common::UnmappedReadDiagnostic::Scope trace;
+    trace.Gpu(gpu_src_addr, size, caller);
     // Small reads within one 4 KiB page (texture and sampler descriptors, several per draw): one
     // translation and a copy, as Read<T> does, instead of the page walk (~3% of the GPU thread
     // in title 1). Anything else, unmapped or sparse pages included, takes the full path.

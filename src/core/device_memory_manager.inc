@@ -21,6 +21,7 @@
 #include "common/paged_scalar.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
+#include "common/unmapped_read_diagnostic.h"
 #include "core/device_memory.h"
 #include "core/device_memory_manager.h"
 #include "core/memory.h"
@@ -529,7 +530,8 @@ void DeviceMemoryManager<Traits>::WriteBlock(DAddr address, const void* src_poin
 }
 
 template <typename Traits>
-void DeviceMemoryManager<Traits>::ReadBlockUnsafe(DAddr address, void* dest_pointer, size_t size) {
+void DeviceMemoryManager<Traits>::ReadBlockUnsafe(DAddr address, void* dest_pointer, size_t size,
+                                                  std::source_location caller) {
     const std::size_t page_offset = address & Memory::YUZU_PAGEMASK;
     if (size <= Memory::YUZU_PAGESIZE - page_offset) {
         const DAddr guest_page = address & ~static_cast<DAddr>(Memory::YUZU_PAGEMASK);
@@ -560,6 +562,23 @@ void DeviceMemoryManager<Traits>::ReadBlockUnsafe(DAddr address, void* dest_poin
                     HW_Memory,
                     "Unmapped Device ReadBlock @ {:#016x} (start address = {:#016x}, size = {})",
                     current_vaddr, address, size);
+            }
+            namespace diag = Common::UnmappedReadDiagnostic;
+            if (diag::Enabled() && diag::limiter.Claim(size)) {
+                const auto& context = diag::current;
+                LOG_ERROR(HW_Memory,
+                          "Unmapped read trace: device caller {}:{} {} device={:#x}+{} "
+                          "fault={:#x}+{} gpu={} {:#x}+{} gpu_caller={}:{} {} "
+                          "gpu_translated={} gpu_chunk={:#x}+{} sync={} {:#x}+{} "
+                          "sync_caller={}:{} {}",
+                          caller.file_name(), caller.line(), caller.function_name(), address, size,
+                          current_vaddr, copy_amount, context.has_gpu, context.gpu_address,
+                          context.gpu_size, context.gpu_caller.file_name(),
+                          context.gpu_caller.line(), context.gpu_caller.function_name(),
+                          context.gpu_translated, context.gpu_chunk_address, context.gpu_chunk_size,
+                          context.has_sync, context.sync_address, context.sync_size,
+                          context.sync_caller.file_name(), context.sync_caller.line(),
+                          context.sync_caller.function_name());
             }
             std::memset(dest_pointer, 0, copy_amount);
         },

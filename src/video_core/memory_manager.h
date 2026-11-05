@@ -20,9 +20,9 @@
 #include "common/range_map.h"
 #include "common/scratch_buffer.h"
 #include "common/sparse_large_vector.h"
-#include "video_core/invalidation_accumulator.h"
 #include "video_core/cache_types.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/invalidation_accumulator.h"
 #include "video_core/pte_kind.h"
 
 namespace VideoCore {
@@ -118,7 +118,9 @@ public:
      * in the Host Memory counterpart. Note: This functions cause Host GPU Memory
      * Flushes and Invalidations, respectively to each operation.
      */
-    void ReadBlock(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size, VideoCommon::CacheType which = VideoCommon::CacheType::All) const;
+    void ReadBlock(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size,
+                   VideoCommon::CacheType which = VideoCommon::CacheType::All,
+                   std::source_location caller = std::source_location::current()) const;
     void WriteBlock(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size, VideoCommon::CacheType which = VideoCommon::CacheType::All);
     void CopyBlock(GPUVAddr gpu_dest_addr, GPUVAddr gpu_src_addr, std::size_t size, VideoCommon::CacheType which = VideoCommon::CacheType::All);
 
@@ -132,7 +134,8 @@ public:
      * WriteBlockUnsafe instead of WriteBlock since it shouldn't invalidate the texture
      * being flushed.
      */
-    void ReadBlockUnsafe(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size) const;
+    void ReadBlockUnsafe(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size,
+                         std::source_location caller = std::source_location::current()) const;
     void ReadWordsUnsafe(GPUVAddr gpu_src_addr, u32* dest, u32 count) const;
     void WriteBlockUnsafe(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size);
 

@@ -7,7 +7,6 @@
 #pragma once
 
 #include <algorithm>
-#include <cstdlib>
 #include <array>
 #include <bit>
 #include <bitset>
@@ -17,6 +16,7 @@
 #include <mutex>
 #include <numeric>
 #include <optional>
+#include <source_location>
 #include <span>
 #include <unordered_map>
 #include <unordered_set>
@@ -817,7 +817,8 @@ private:
 
     void RefreshMultiRangeSegments(std::vector<MultiRangeSegment>& pool);
 
-    bool SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 size);
+    bool SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 size,
+                           std::source_location caller = std::source_location::current());
     bool SynchronizeBufferPages(Buffer& buffer, DAddr device_addr, u32 size);
 
     /// EDEN_NX2_EXP59 & 8: before the full walk, counts and logs what the dirty-word walk would
