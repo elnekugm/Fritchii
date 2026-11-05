@@ -589,7 +589,8 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
         }
     }
     if (unbacked) {
-        if (vk::Image image = allocator.CreateUnbackedImage(image_ci, aliased)) {
+        if (vk::Image image = allocator.CreateUnbackedImage(
+                image_ci, aliased, context ? &context->initial_sparse : nullptr)) {
             return image;
         }
     }
