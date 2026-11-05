@@ -5,14 +5,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
-#include <span>
 #include <array>
-#include <chrono>
 #include <cstddef>
-#include <cstdlib>
 #include <cstring>
-#include <mutex>
-#include <thread>
 
 #include "common/assert.h"
 #include "common/hex_util.h"
@@ -54,15 +49,8 @@ constexpr std::array<const char*, 14> EXEFS_FILE_NAMES{
     "subsdk3", "subsdk4",   "subsdk5", "subsdk6", "subsdk7", "subsdk8", "subsdk9",
 };
 
-/// Bytes a built-in patch writes at an offset into the module's code (after the NSO header; an
-/// exefs IPS patch's offset is 0x100 more). With `checked`, the module must hold `original` there.
-struct BuiltinPatchRecord {
-    size_t module_offset;
-    std::span<const u8> bytes;
-    bool checked;
-    u32 original;
-};
-
+// Built-in patches behind Settings::fps30_patch, matched by NSO build ID (trailing zeros trimmed).
+// Offsets are module offsets of a 4-byte instruction, checked against `expected` before patching.
 struct BuiltinPatch {
     std::string_view name;
     u64 title_id;
@@ -84,265 +72,19 @@ struct BuiltinPatch {
     size_t state_size = 0;
 };
 
-// Ocarina of Time takes its "dynamic resolution disabled" path, so the 3D renders at full scale
-// instead of following the GPU-time controller down to its 480p floor.
-constexpr std::array<u8, 4> MAX_RESOLUTION_BRANCH{0x0F, 0x02, 0x00, 0x14}; // b 0x80640c
-constexpr std::array MAX_RESOLUTION_RECORDS{
-    BuiltinPatchRecord{.module_offset = 0x805BD0,
-                       .bytes = MAX_RESOLUTION_BRANCH,
-                       .checked = true,
-                       .original = 0x360041E8}, // tbz w8, #0, 0x80640c
+constexpr std::array FPS30_PATCHES{
+    // Donkey Kong Bananza 1.1.0 main: its frame-rate controller picks the swap interval as
+    // clamp(measured vblanks + 1, min, max) and steps the game by 60 / interval; picking 2
+    // (`csel w10, w8, w9, lt` -> `mov w10, #2`) holds it at 30 fps at full speed.
+    BuiltinPatch{"E25C90C1C136638885659FD55BF8A03B3403489D", 0x204ac4, 0x1a89b10a, 0x5280004a},
 };
 
-// Dynamic FPS by Dark (Eglantine Dev), bundled with his permission: the game's frame step follows
-// the time measured with the system counter instead of assuming 30 fps, so it runs at full speed
-// at any frame rate. A call (bl 0x3c46200) to a routine in unused space after the code.
-constexpr std::array<u8, 4> DYNAMIC_FPS_CALL{0x4F, 0x7D, 0xD5, 0x94};
-constexpr std::array<u8, 120> DYNAMIC_FPS_ROUTINE{
-    0x28, 0x18, 0x20, 0x1E, 0xCA, 0x92, 0x00, 0xB0, 0x4A, 0x01, 0x38, 0x91,
-    0x2B, 0xE0, 0x3B, 0xD5, 0x4C, 0x01, 0x40, 0xF9, 0x4B, 0x01, 0x00, 0xF9,
-    0xCC, 0x02, 0x00, 0xB4, 0x6B, 0x01, 0x0C, 0xCB, 0x0D, 0xE0, 0x3B, 0xD5,
-    0x8E, 0x02, 0x80, 0xD2, 0xAE, 0x09, 0xCE, 0x9A, 0x7F, 0x01, 0x0E, 0xEB,
-    0xCB, 0x81, 0x8B, 0x9A, 0x4C, 0x05, 0x40, 0xF9, 0x4C, 0x00, 0x00, 0xB5,
-    0xEC, 0x03, 0x0B, 0xAA, 0x6E, 0x01, 0x0C, 0xCB, 0x8C, 0x0D, 0x8E, 0x8B,
-    0x4C, 0x05, 0x00, 0xF9, 0x82, 0x01, 0x23, 0x9E, 0xA3, 0x01, 0x23, 0x9E,
-    0x42, 0x18, 0x23, 0x1E, 0x42, 0x08, 0x21, 0x1E, 0xC3, 0x00, 0x00, 0x1C,
-    0x03, 0x09, 0x23, 0x1E, 0x40, 0x20, 0x23, 0x1E, 0x4D, 0x00, 0x00, 0x54,
-    0x48, 0x40, 0x20, 0x1E, 0xC0, 0x03, 0x5F, 0xD6, 0x0A, 0xD7, 0x83, 0x3F,
-};
-
-// High refresh rate (experimental, Settings oot_high_refresh): Dark's routine with the tail of
-// zortos293/Lichii#655 ("FPS Unlock", by atk3001): the smoothed real-time step is always
-// returned, also below 1.0, so the game keeps real speed above 60 fps (0.5 a frame at 120).
-// Through the fmul at +0x58 it is Dark's routine byte for byte (the 50 ms delta cap included;
-// #655 raised it to 100 ms). The tail clamps the step to [0.02, 3.0] (3.0 = that cap; #655: 6.0) and multiplies it
-// by a speed scale word that the present pacing sets from the speed limit (Turbo, Slow; 1.0 at
-// 100%), since pacing alone no longer changes the game's speed. The first call (no earlier
-// tick) still returns the game's own step from +0x70 (the head's cbz target).
-//   +0x5C ldr s3, +0x80 ; fmaxnm s2, s2, s3 ; ldr s3, +0x84 ; fminnm s2, s2, s3 ; b +0x74
-//   +0x70 ret
-//   +0x74 ldr s3, +0x88 ; fmul s8, s2, s3 ; ret
-//   +0x80 0.02f ; 3.0f ; speed scale (1.0f)
-constexpr std::array<u8, 140> HIGH_REFRESH_ROUTINE{
-    0x28, 0x18, 0x20, 0x1E, 0xCA, 0x92, 0x00, 0xB0, 0x4A, 0x01, 0x38, 0x91,
-    0x2B, 0xE0, 0x3B, 0xD5, 0x4C, 0x01, 0x40, 0xF9, 0x4B, 0x01, 0x00, 0xF9,
-    0xCC, 0x02, 0x00, 0xB4, 0x6B, 0x01, 0x0C, 0xCB, 0x0D, 0xE0, 0x3B, 0xD5,
-    0x8E, 0x02, 0x80, 0xD2, 0xAE, 0x09, 0xCE, 0x9A, 0x7F, 0x01, 0x0E, 0xEB,
-    0xCB, 0x81, 0x8B, 0x9A, 0x4C, 0x05, 0x40, 0xF9, 0x4C, 0x00, 0x00, 0xB5,
-    0xEC, 0x03, 0x0B, 0xAA, 0x6E, 0x01, 0x0C, 0xCB, 0x8C, 0x0D, 0x8E, 0x8B,
-    0x4C, 0x05, 0x00, 0xF9, 0x82, 0x01, 0x23, 0x9E, 0xA3, 0x01, 0x23, 0x9E,
-    0x42, 0x18, 0x23, 0x1E, 0x42, 0x08, 0x21, 0x1E, 0x23, 0x01, 0x00, 0x1C,
-    0x42, 0x68, 0x23, 0x1E, 0x03, 0x01, 0x00, 0x1C, 0x42, 0x78, 0x23, 0x1E,
-    0x02, 0x00, 0x00, 0x14, 0xC0, 0x03, 0x5F, 0xD6, 0xA3, 0x00, 0x00, 0x1C,
-    0x48, 0x08, 0x23, 0x1E, 0xC0, 0x03, 0x5F, 0xD6, 0x0A, 0xD7, 0xA3, 0x3C,
-    0x00, 0x00, 0x40, 0x40, 0x00, 0x00, 0x80, 0x3F,
-};
-// Its own cave at the free end of the page Dark's routine is on (the page runs to main+0x3C47000),
-// since other mods sit right after Dark's 120 bytes (the Hyrule Cheat Menu at main+0x3C46280..
-// 0x3C46398, 2026-11-10: it shared our old spot after Dark's, so Ctrl+U refused with it on). The
-// same page: its adrp to Dark's timer state is the same word; only the call to it is re-encoded.
-constexpr size_t HIGH_REFRESH_ROUTINE_OFFSET = 0x3C46E00;
-constexpr std::array<u8, 4> HIGH_REFRESH_CALL{0x4F, 0x80, 0xD5, 0x94}; // bl 0x3c46e00
-constexpr size_t HIGH_REFRESH_SCALE = 0x88; // the speed scale word, in the routine
-
-// Water ripples above 60 fps (Port of zortos293/Lichii#1152, by atk3001): the water renderer
-// (main+0x472E0) runs its ripple simulation trunc(step) * substeps times a frame (fcvtzs w9, s0 at
-// main+0x475F8), so below a step of 1 the rings Link makes in water freeze. That fcvtzs branches
-// to an accumulator that keeps the fractional step per water object (x21) in 8 slots in BSS
-// after Dark's timer state (main+0x4E9FE00, 16 bytes): a u32 round-robin index at +0x10, then
-// (u64 owner, f32 rest) slots with a 16-byte stride at +0x20, replaced round-robin when full.
-// It returns w9 = trunc(step + rest) and keeps the rest. Upstream puts it at main+0x3C46280; it
-// sits at +0x90 of our routine here (main+0x3C46E90): the same page, so its adrp is upstream's
-// word; only the two branches between the hook and it are re-encoded.
-constexpr size_t WATER_HOOK_OFFSET = 0x475F8;
-constexpr u32 WATER_FCVTZS = 0x1E380009;                        // fcvtzs w9, s0
-constexpr std::array<u8, 4> WATER_HOOK{0x26, 0xFE, 0xEF, 0x14}; // b 0x3c46e90
-constexpr size_t WATER_ACCUMULATOR_OFFSET = HIGH_REFRESH_ROUTINE_OFFSET + 0x90;
-constexpr std::array<u8, 128> WATER_ACCUMULATOR{
-    0xC9, 0x92, 0x00, 0xB0, 0x29, 0x81, 0x38, 0x91, 0x0B, 0x01, 0x80, 0x52, 0x2A, 0x01,
-    0x40, 0xF9, 0x5F, 0x01, 0x15, 0xEB, 0x80, 0x02, 0x00, 0x54, 0x29, 0x41, 0x00, 0x91,
-    0x6B, 0x05, 0x00, 0x71, 0x61, 0xFF, 0xFF, 0x54, 0x29, 0x01, 0x02, 0xD1, 0x0B, 0x01,
-    0x80, 0x52, 0x2A, 0x01, 0x40, 0xF9, 0x6A, 0x01, 0x00, 0xB4, 0x29, 0x41, 0x00, 0x91,
-    0x6B, 0x05, 0x00, 0x71, 0x81, 0xFF, 0xFF, 0x54, 0x29, 0x41, 0x02, 0xD1, 0x2A, 0x01,
-    0x40, 0xB9, 0x4B, 0x05, 0x00, 0x11, 0x6B, 0x09, 0x00, 0x12, 0x2B, 0x01, 0x00, 0xB9,
-    0x29, 0x41, 0x00, 0x91, 0x29, 0x11, 0x0A, 0x8B, 0x35, 0x01, 0x00, 0xF9, 0x3F, 0x09,
-    0x00, 0xB9, 0x21, 0x09, 0x40, 0xBD, 0x00, 0x28, 0x21, 0x1E, 0x01, 0xC0, 0x25, 0x1E,
-    0x00, 0x38, 0x21, 0x1E, 0x20, 0x09, 0x00, 0xBD, 0x29, 0x00, 0x38, 0x1E, 0xBC, 0x01,
-    0x10, 0x17, // +0x7C b 0x475fc (from 0x3c46f0c; upstream, from 0x3c46280: 0x171004c0)
-};
-// Dark's timer state and the ripple slots (ldr/str through adrp 0x4e9f000 + 0xe00 / + 0xe20).
-constexpr size_t HIGH_REFRESH_STATE_OFFSET = 0x4E9FE00;
-constexpr size_t HIGH_REFRESH_STATE_SIZE = 0xA0;
-
-// Our cave (main+0x3C46E00, executable padding after the end of the code: the text page runs on to
-// main+0x3C47000) as the high refresh rate mode leaves it: its routine, a zero word, the water
-// ripple accumulator. Every word must be free (zero) in the module.
-constexpr size_t OOT_CAVE_SIZE = 0x110;
-static_assert(HIGH_REFRESH_ROUTINE_OFFSET + OOT_CAVE_SIZE <= 0x3C47000);
-constexpr std::array<u8, OOT_CAVE_SIZE> HIGH_REFRESH_CAVE = [] {
-    std::array<u8, OOT_CAVE_SIZE> cave{};
-    std::ranges::copy(HIGH_REFRESH_ROUTINE, cave.begin());
-    std::ranges::copy(WATER_ACCUMULATOR,
-                      cave.begin() + (WATER_ACCUMULATOR_OFFSET - HIGH_REFRESH_ROUTINE_OFFSET));
-    return cave;
-}();
-static_assert(WATER_ACCUMULATOR_OFFSET - HIGH_REFRESH_ROUTINE_OFFSET + WATER_ACCUMULATOR.size() ==
-              OOT_CAVE_SIZE);
-// Our cave with the high refresh mode off: free.
-constexpr std::array<u8, OOT_CAVE_SIZE> FREE_CAVE{};
-constexpr std::array<u8, 4> WATER_ORIGINAL{0x09, 0x00, 0x38, 0x1E}; // fcvtzs w9, s0
-static_assert(OotHighRefreshCode::CallOffset == 0x6E6CC4 &&
-              OotHighRefreshCode::WaterOffset == WATER_HOOK_OFFSET &&
-              OotHighRefreshCode::DarkOffset == 0x3C46200 &&
-              OotHighRefreshCode::DarkSize == DYNAMIC_FPS_ROUTINE.size() &&
-              OotHighRefreshCode::CaveOffset == HIGH_REFRESH_ROUTINE_OFFSET &&
-              OotHighRefreshCode::CaveSize == OOT_CAVE_SIZE &&
-              OotHighRefreshCode::ScaleOffset == HIGH_REFRESH_ROUTINE_OFFSET + HIGH_REFRESH_SCALE);
-
-// The call (to our routine or to Dark's), Dark's routine (so the mode can switch live), the water
-// hook (over its fcvtzs), then our cave one word at a time, each checked to be zero in the module.
-// Since v5.8 (zortos293/Lichii#1180's finding, 2026-11-10) Dark's mode gets the same hook and
-// cave too, through the separate ripple built-in: with his Dynamic FPS alone the ripples ran
-// trunc(step) passes, so at a 60 fps cap (step 0.998-1.003) some frames ran none and below 60
-// they ran slow (1.33 -> 1). With both, the call word is the only difference between the modes.
-constexpr auto MakeOotRecords(std::span<const u8> call) {
-    std::array<BuiltinPatchRecord, 3 + OOT_CAVE_SIZE / 4> records{};
-    records[0] = BuiltinPatchRecord{.module_offset = 0x6E6CC4, .bytes = call};
-    records[1] = BuiltinPatchRecord{.module_offset = 0x3C46200, .bytes = DYNAMIC_FPS_ROUTINE};
-    records[2] = BuiltinPatchRecord{.module_offset = WATER_HOOK_OFFSET,
-                                    .bytes = WATER_HOOK,
-                                    .checked = true,
-                                    .original = WATER_FCVTZS};
-    for (size_t i = 3, offset = 0; offset < OOT_CAVE_SIZE; ++i, offset += 4) {
-        records[i] = BuiltinPatchRecord{.module_offset = HIGH_REFRESH_ROUTINE_OFFSET + offset,
-                                        .bytes = std::span<const u8>{HIGH_REFRESH_CAVE}.subspan(offset, 4),
-                                        .checked = true,
-                                        .original = 0};
+const BuiltinPatch* FindFps30Patch(std::string_view build_id) {
+    if (!Settings::values.fps30_patch.GetValue()) {
+        return nullptr;
     }
-    return records;
-}
-constexpr auto HIGH_REFRESH_RECORDS = MakeOotRecords(HIGH_REFRESH_CALL);
-// Dark's Dynamic FPS: his call and routine only, as always (IsBuiltinDynamicFpsMod tells his
-// standalone mod by these two records).
-constexpr std::array DYNAMIC_FPS_RECORDS{
-    BuiltinPatchRecord{.module_offset = 0x6E6CC4, .bytes = DYNAMIC_FPS_CALL},
-    BuiltinPatchRecord{.module_offset = 0x3C46200, .bytes = DYNAMIC_FPS_ROUTINE},
-};
-// The water ripples with Dark's Dynamic FPS (its own built-in, applied after his): the water hook
-// and our cave, the same words the high refresh mode has, without its call. Skipped when the
-// high refresh mode already wrote them, or when another mod holds any of those spots.
-constexpr auto WATER_RIPPLE_RECORDS = [] {
-    std::array<BuiltinPatchRecord, 1 + OOT_CAVE_SIZE / 4> records{};
-    const auto all = MakeOotRecords(DYNAMIC_FPS_CALL);
-    std::ranges::copy(std::span{all}.subspan(2), records.begin());
-    return records;
-}();
-constexpr std::string_view WATER_RIPPLE_NAME = "Water ripples at any frame rate (built-in)";
-constexpr std::string_view DYNAMIC_FPS_NAME = "Dynamic FPS by Dark (built-in)";
-constexpr std::string_view HIGH_REFRESH_NAME = "High refresh rate (built-in, experimental)";
-
-bool HighRefreshSettingOn() {
-    // Tests boot either way without touching the player's config: EDEN_NX2_OOT_HIGH_REFRESH=0/1.
-    if (const char* const value = std::getenv("EDEN_NX2_OOT_HIGH_REFRESH"); value && *value) {
-        return *value != '0';
-    }
-    return Settings::values.oot_high_refresh.GetValue();
-}
-
-// Occlusion Off (cLohan's community patch, from zortos293/Lichii#641): the game creates no
-// z-prepass occlusion queries and no samples-passed queries (ldrb w8, [x0] -> mov w8, wzr), so it
-// issues no occlusion reports and no conditional renders; every candidate object is drawn.
-constexpr std::array<u8, 4> MOV_W8_WZR{0xE8, 0x03, 0x1F, 0x2A};
-constexpr u32 LDRB_W8_X0 = 0x39400008;
-constexpr std::array OCCLUSION_OFF_RECORDS{
-    BuiltinPatchRecord{.module_offset = 0x11ACE68, .bytes = MOV_W8_WZR, .checked = true, .original = LDRB_W8_X0},
-    BuiltinPatchRecord{.module_offset = 0x11B828C, .bytes = MOV_W8_WZR, .checked = true, .original = LDRB_W8_X0},
-    BuiltinPatchRecord{.module_offset = 0x11B82A4, .bytes = MOV_W8_WZR, .checked = true, .original = LDRB_W8_X0},
-    BuiltinPatchRecord{.module_offset = 0x11ACEC8, .bytes = MOV_W8_WZR, .checked = true, .original = LDRB_W8_X0},
-    BuiltinPatchRecord{.module_offset = 0x11B82DC, .bytes = MOV_W8_WZR, .checked = true, .original = LDRB_W8_X0},
-    BuiltinPatchRecord{.module_offset = 0x11B82F4, .bytes = MOV_W8_WZR, .checked = true, .original = LDRB_W8_X0},
-};
-
-// Resource poll backoff (zortos293/Lichii#641): the resource request thread (main+0xF7A0)
-// rescans its pending requests at once when one is not ready (`tbz w8, #0, loop` at main+0x14ABC,
-// w8 = "all done"). That branch now goes through the zero padding at main+0x17088: `svc #0xf3`
-// (a short sleep while EXP25 is on, core/hle/kernel/svc/svc_nx2_oot_poll.cpp) and `b loop`.
-constexpr std::array<u8, 4> POLL_RESCAN_BRANCH{0x68, 0x2E, 0x01, 0x36};  // tbz w8, #0, 0x17088
-constexpr std::array<u8, 4> POLL_BACKOFF_SVC{0x61, 0x1E, 0x00, 0xD4};    // svc #0xf3
-constexpr std::array<u8, 4> POLL_BACKOFF_RETURN{0x0D, 0xE2, 0xFF, 0x17}; // b 0xf8c0
-constexpr std::array POLL_BACKOFF_RECORDS{
-    BuiltinPatchRecord{.module_offset = 0x14ABC,
-                       .bytes = POLL_RESCAN_BRANCH,
-                       .checked = true,
-                       .original = 0x36057028}, // tbz w8, #0, 0xf8c0
-    BuiltinPatchRecord{.module_offset = 0x17088, .bytes = POLL_BACKOFF_SVC, .checked = true, .original = 0},
-    BuiltinPatchRecord{.module_offset = 0x1708C, .bytes = POLL_BACKOFF_RETURN, .checked = true, .original = 0},
-};
-
-constexpr std::array BUILTIN_PATCHES{
-    BuiltinPatch{
-        .name = "Max Resolution (built-in)",
-        .title_id = 0x0400486024DEC000,
-        .module = "main",
-        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
-        .records = MAX_RESOLUTION_RECORDS,
-        .disable_env = "EDEN_NX2_NO_MAX_RES",
-    },
-    // Before Dark's: it contains his routine and replaces it while applied. Off by default; only
-    // listed in Add-Ons while the setting is on.
-    BuiltinPatch{
-        .name = HIGH_REFRESH_NAME,
-        .title_id = 0x0400486024DEC000,
-        .module = "main",
-        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
-        .records = HIGH_REFRESH_RECORDS,
-        .setting_enabled = &HighRefreshSettingOn,
-        .replaces = DYNAMIC_FPS_NAME,
-        .state_offset = HIGH_REFRESH_STATE_OFFSET,
-        .state_size = HIGH_REFRESH_STATE_SIZE,
-    },
-    BuiltinPatch{
-        .name = DYNAMIC_FPS_NAME,
-        .title_id = 0x0400486024DEC000,
-        .module = "main",
-        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
-        .records = DYNAMIC_FPS_RECORDS,
-    },
-    // After Dark's (v5.8, zortos293/Lichii#1180's finding): his mode ran trunc(step) ripple
-    // passes, so at a 60 fps cap some frames ran none and below 60 the ripples ran slow.
-    BuiltinPatch{
-        .name = WATER_RIPPLE_NAME,
-        .title_id = 0x0400486024DEC000,
-        .module = "main",
-        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
-        .records = WATER_RIPPLE_RECORDS,
-        .state_offset = HIGH_REFRESH_STATE_OFFSET,
-        .state_size = HIGH_REFRESH_STATE_SIZE,
-    },
-    BuiltinPatch{
-        .name = "Occlusion Off (built-in, EDEN_NX2_OCCLUSION_OFF=1)",
-        .title_id = 0x0400486024DEC000,
-        .module = "main",
-        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
-        .records = OCCLUSION_OFF_RECORDS,
-        .enable_env = "EDEN_NX2_OCCLUSION_OFF",
-    },
-    BuiltinPatch{
-        .name = "Resource poll backoff (built-in, EDEN_NX2_OOT_POLL_BACKOFF=1)",
-        .title_id = 0x0400486024DEC000,
-        .module = "main",
-        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
-        .records = POLL_BACKOFF_RECORDS,
-        .enable_env = "EDEN_NX2_OOT_POLL_BACKOFF",
-    },
-};
-
-// Whether [offset, offset + size) of a module (offsets after its NSO header) lies in its BSS.
-bool InModuleBss(const Loader::NSOHeader& header, u64 offset, u64 size) {
-    const auto& data = header.segments[2];
-    const u64 bss_start = u64{data.location} + data.size;
-    const u64 bss_end = bss_start + data.bss_size;
-    return offset >= bss_start && offset <= bss_end && size <= bss_end - offset;
+    const auto it = std::ranges::find(FPS30_PATCHES, build_id, &BuiltinPatch::build_id);
+    return it != FPS30_PATCHES.end() ? &*it : nullptr;
 }
 
 enum class TitleVersionFormat : u8 {
@@ -781,26 +523,19 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
     LOG_INFO(Loader, "Patching NSO for name={}, build_id={}", name, build_id);
 
     auto base = nso;
-    const auto fps30_patch = FindFps30Patch(build_id);
-    const auto word_at = [&base](const BuiltinPatch& patch) {
-        const size_t at = sizeof(Loader::NSOHeader) + patch.offset;
+    if (const auto* patch = FindFps30Patch(build_id)) {
+        const size_t at = sizeof(Loader::NSOHeader) + patch->offset;
         u32 word{};
         if (at + sizeof(word) <= base.size()) {
             std::memcpy(&word, base.data() + at, sizeof(word));
         }
-        return word;
-    };
-    const auto mismatch = std::ranges::find_if(
-        fps30_patch, [&](const BuiltinPatch& patch) { return word_at(patch) != patch.expected; });
-    if (mismatch != fps30_patch.end()) {
-        LOG_WARNING(Loader, "    - Built-in 30 FPS patch skipped: {:#010x} at {:#x}, expected {:#010x}",
-                    word_at(*mismatch), mismatch->offset, mismatch->expected);
-    } else if (!fps30_patch.empty()) {
-        for (const BuiltinPatch& patch : fps30_patch) {
-            std::memcpy(base.data() + sizeof(Loader::NSOHeader) + patch.offset, &patch.replacement,
-                        sizeof(patch.replacement));
+        if (word == patch->expected) {
+            std::memcpy(base.data() + at, &patch->replacement, sizeof(word));
+            LOG_INFO(Loader, "    - Applying built-in 30 FPS patch");
+        } else {
+            LOG_WARNING(Loader, "    - Built-in 30 FPS patch skipped: {:#010x} at {:#x}, expected {:#010x}",
+                        word, patch->offset, patch->expected);
         }
-        LOG_INFO(Loader, "    - Applying built-in 30 FPS patch");
     }
 
     const auto patch_wonder = [&](std::vector<u8>& out) {
@@ -970,9 +705,7 @@ bool PatchManager::HasNSOPatch(const BuildID& build_id_, std::string_view name) 
 
     LOG_INFO(Loader, "Querying NSO patch existence for build_id={}, name={}", build_id, name);
 
-    if (FindFps30Patch(build_id) != nullptr ||
-        (title_id == Settings::WonderSwitch2ProgramId && name == "main" &&
-         build_id == WonderFpsBuildId)) {
+    if (FindFps30Patch(build_id) != nullptr) {
         return true;
     }
 

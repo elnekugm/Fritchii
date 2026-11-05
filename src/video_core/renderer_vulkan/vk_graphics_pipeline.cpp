@@ -983,18 +983,14 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     const bool via_header_index{regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding};
     const auto config_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
         const Shader::Info& info{stage_infos[stage]};
-        {
-            const Profile::FineScope storage_scope{Profile::Zone::StorageBindings};
-            buffer_cache.UnbindGraphicsStorageBuffers(stage);
-            if constexpr (Spec::has_storage_buffers) {
-                size_t ssbo_index{};
-                for (const auto& desc : info.storage_buffers_descriptors) {
-                    ASSERT(desc.count == 1);
-                    buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
-                                                           desc.cbuf_offset, desc.is_written,
-                                                           desc.indirect_offset);
-                    ++ssbo_index;
-                }
+        buffer_cache.UnbindGraphicsStorageBuffers(stage);
+        if constexpr (Spec::has_storage_buffers) {
+            size_t ssbo_index{};
+            for (const auto& desc : info.storage_buffers_descriptors) {
+                ASSERT(desc.count == 1);
+                buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
+                                                       desc.cbuf_offset, desc.is_written);
+                ++ssbo_index;
             }
         }
         const auto& cbufs{maxwell3d->state.shader_stages[stage].const_buffers};

@@ -606,13 +606,9 @@ private:
     VideoCore::ShaderNotify& shader_notify;
     bool use_asynchronous_shaders{};
     bool use_vulkan_pipeline_cache{};
-    bool oot_visual_workaround{};
-    u64 visual_workaround_title{};
-    const size_t num_pipeline_workers;
-    EmissionBudget emission_budget;
-
-    /// EDEN_NX2_CANONICAL_KEYS=1, read by LoadDiskResources (draws look up canonical keys).
-    bool canonical_keys{};
+    bool use_async_translation{};
+    bool use_shader_reuse{};
+    size_t num_translation_threads{};
 
     GraphicsPipelineCacheKey graphics_key{};
     u64 vertex_attribute_types{}; ///< graphics_key's attribute types before the programs' mask

@@ -354,7 +354,7 @@ public:
     void UnbindGraphicsStorageBuffers(size_t stage);
 
     bool BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, u32 cbuf_index, u32 cbuf_offset,
-                                   bool is_written, u32 indirect_offset = ~0U);
+                                   bool is_written);
 
     void UnbindGraphicsTextureBuffers(size_t stage);
 
@@ -374,8 +374,7 @@ public:
 
     /// write_extent: how far the program's stores reach past the pointer (native programs).
     void BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index, u32 cbuf_offset,
-                                  bool is_written, u32 indirect_offset = ~0U,
-                                  const Shader::StorageWriteExtent& write_extent = {});
+                                  bool is_written);
 
     void UnbindComputeTextureBuffers();
 
@@ -881,14 +880,8 @@ private:
 
     void DeleteBuffer(BufferId buffer_id, bool do_not_mark = false);
 
-    [[nodiscard]] Binding StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index, bool is_written,
-                                               bool native_pointer = false,
-                                               bool table_pointer = false,
-                                               bool compute = false) const;
-
-    void TraceTablePointer(bool compute, size_t stage, size_t ssbo_index, u32 cbuf_index,
-                           u32 cbuf_offset, u32 indirect_offset, GPUVAddr holder,
-                           const Binding& binding);
+    [[nodiscard]] Binding StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
+                                               bool is_written, bool native_compute = false) const;
 
     [[nodiscard]] TextureBufferBinding GetTextureBufferBinding(GPUVAddr gpu_addr, u32 size,
                                                                PixelFormat format);

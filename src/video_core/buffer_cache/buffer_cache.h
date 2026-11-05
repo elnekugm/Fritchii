@@ -1238,13 +1238,7 @@ void BufferCache<P>::UnbindGraphicsStorageBuffers(size_t stage) {
 
 template <class P>
 bool BufferCache<P>::BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, u32 cbuf_index,
-                                               u32 cbuf_offset, bool is_written,
-                                               u32 indirect_offset) {
-    if (stage >= NUM_STAGES || ssbo_index >= NUM_STORAGE_BUFFERS) {
-        LOG_ERROR(HW_GPU, "Invalid graphics storage buffer binding: stage {}, index {}",
-                  stage, ssbo_index);
-        return false;
-    }
+                                               u32 cbuf_offset, bool is_written) {
     const bool already_enabled =
         ((channel_state->enabled_storage_buffers[stage] >> ssbo_index) & 1U) != 0;
     if constexpr (requires { runtime.ShouldLimitDynamicStorageBuffers(); }) {
@@ -1267,32 +1261,9 @@ bool BufferCache<P>::BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, 
     }
 
     const auto& cbufs = maxwell3d->state.shader_stages[stage];
-    GPUVAddr ssbo_addr = cbufs.const_buffers[cbuf_index].address + cbuf_offset;
-    GPUVAddr holder{};
-    if (indirect_offset != ~0U) {
-        // The pointer is an entry of a table the constant buffer points to.
-        holder = gpu_memory->Read<u64>(ssbo_addr);
-        if (holder == 0) {
-            channel_state->storage_buffers[stage][ssbo_index] = NULL_BINDING;
-            return false;
-        }
-        ssbo_addr = holder + indirect_offset;
-    }
-    // EDEN_NX2_GRAPHICS_SSBO_BARE=0 takes the word after a native graphics pointer as its size
-    // again: much smaller bindings to synchronize per draw, for A/B runs.
-    static const bool bare_pointers = [] {
-        const char* const value = std::getenv("EDEN_NX2_GRAPHICS_SSBO_BARE");
-        return value == nullptr || value[0] != '0';
-    }();
+    const GPUVAddr ssbo_addr = cbufs.const_buffers[cbuf_index].address + cbuf_offset;
     channel_state->storage_buffers[stage][ssbo_index] =
-        StorageBufferBinding(ssbo_addr, cbuf_index, is_written,
-                             (bare_pointers && maxwell3d->GetNativeMacroEngine().native_turing) ||
-                                 indirect_offset != ~0U,
-                             indirect_offset != ~0U);
-    if (indirect_offset != ~0U) {
-        TraceTablePointer(false, stage, ssbo_index, cbuf_index, cbuf_offset, indirect_offset, holder,
-                          channel_state->storage_buffers[stage][ssbo_index]);
-    }
+        StorageBufferBinding(ssbo_addr, cbuf_index, is_written);
     return (channel_state->storage_buffers[stage][ssbo_index].buffer_id != NULL_BUFFER_ID);
 }
 
@@ -1338,8 +1309,7 @@ void BufferCache<P>::UnbindComputeStorageBuffers() {
 
 template <class P>
 void BufferCache<P>::BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index, u32 cbuf_offset,
-                                              bool is_written, u32 indirect_offset,
-                                              const Shader::StorageWriteExtent& write_extent) {
+                                              bool is_written) {
     if (ssbo_index >= channel_state->compute_storage_buffers.size()) [[unlikely]] {
         LOG_ERROR(HW_GPU, "Storage buffer index {} exceeds maximum storage buffer count",
                   ssbo_index);
@@ -1380,88 +1350,10 @@ void BufferCache<P>::BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index,
     ASSERT(((launch_desc.const_buffer_enable_mask >> cbuf_index) & 1) != 0);
 
     const auto& cbufs = launch_desc.const_buffer_config;
-    GPUVAddr ssbo_addr = cbufs[cbuf_index].Address() + cbuf_offset;
-    GPUVAddr holder{};
-    const bool table_pointer = indirect_offset != ~0U;
-    if (table_pointer) {
-        holder = gpu_memory->Read<u64>(ssbo_addr);
-        ssbo_addr = holder + indirect_offset;
-    }
-    const bool native_pointer = kepler_compute->IsNativeMode();
-    channel_state->native_compute_storage_buffers =
-        (channel_state->native_compute_storage_buffers & ~(u64{1} << ssbo_index)) |
-        (u64{native_pointer ? 1U : 0U} << ssbo_index);
-    const Binding binding =
-        table_pointer && holder == 0
-            ? NULL_BINDING
-            : StorageBufferBinding(ssbo_addr, cbuf_index, is_written, native_pointer,
-                                   table_pointer, true);
-    channel_state->compute_storage_buffers[ssbo_index] = binding;
-    if (table_pointer && holder != 0) {
-        TraceTablePointer(true, 0, ssbo_index, cbuf_index, cbuf_offset, indirect_offset, holder,
-                          binding);
-    }
-
-    // How much of the binding the dispatch marks GPU-written. A native pointer has no size, so the
-    // binding is up to 8 MiB past it, and marking all of it defers the CPU's later writes to those
-    // pages until the next fence and has fences copy the over-marked range back.
-    u64 mark = binding.size;
-    // EDEN_NX2_EXP1=1: mark the whole binding as before (#415's A/B).
-    if (native_pointer && is_written && binding.size != 0 &&
-        VideoCore::Nx2Debug::Experiment(1) == 0) {
-        switch (Settings::values.native_compute_write_mark.GetValue()) {
-        case Settings::NativeComputeWriteMark::Auto: {
-            const auto& qmd = launch_desc;
-            const std::array<u32, 3> block{qmd.block_dim_x.Value(), qmd.block_dim_y.Value(),
-                                           qmd.block_dim_z.Value()};
-            std::optional<std::array<u32, 3>> grid;
-            if (!kepler_compute->GetIndirectComputeAddress()) {
-                grid = std::array<u32, 3>{qmd.grid_dim_x.Value(), qmd.grid_dim_y.Value(),
-                                          qmd.grid_dim_z.Value()};
-            }
-            if (const auto extent = Shader::ResolveStorageWriteExtent(write_extent, block, grid)) {
-                // The extent counts from the pointer, the binding from the pointer aligned down.
-                const GPUVAddr pointer = gpu_memory->Read<u64>(ssbo_addr);
-                const u64 pad = pointer >= binding.gpu_addr ? pointer - binding.gpu_addr : 0;
-                const u64 proven = std::min<u64>(binding.size, pad + *extent);
-                mark = proven;
-                // Not yet checked at these dims, or caught writing past it: mark in full (see
-                // ExtentTrust), and check this dispatch.
-                if (!IS_OPENGL && proven < binding.size &&
-                    VideoCore::Nx2Debug::Experiment(45) == 0) {
-                    const std::array<u32, 3> dims_grid =
-                        grid.value_or(std::array<u32, 3>{~0U, ~0U, ~0U});
-                    const ExtentTrust& trust = extent_trust[compute_shader_hash];
-                    bool bigger = false;
-                    for (size_t i = 0; i < 3; ++i) {
-                        bigger |= block[i] > trust.block[i] || dims_grid[i] > trust.grid[i];
-                    }
-                    if (trust.distrusted || bigger) {
-                        mark = binding.size;
-                        ++extent_full_marks;
-                        if (!trust.distrusted && !trust.probe_pending) {
-                            extent_probe_requests[ssbo_index] = ExtentProbeRequest{
-                                .active = true,
-                                .proven = proven,
-                                .pointer = pointer,
-                                .pad = pad,
-                                .block = block,
-                                .grid = dims_grid,
-                            };
-                        }
-                    }
-                }
-            }
-            break;
-        }
-        case Settings::NativeComputeWriteMark::Full:
-            break;
-        case Settings::NativeComputeWriteMark::Cap64K:
-            mark = std::min<u64>(binding.size, 64_KiB);
-            break;
-        }
-    }
-    channel_state->compute_storage_write_marks[ssbo_index] = static_cast<u32>(mark);
+    const GPUVAddr ssbo_addr = cbufs[cbuf_index].Address() + cbuf_offset;
+    channel_state->compute_storage_buffers[ssbo_index] =
+        StorageBufferBinding(ssbo_addr, cbuf_index, is_written,
+                             kepler_compute->IsNativeMode());
 }
 
 template <class P>
@@ -4592,52 +4484,8 @@ void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
 }
 
 template <class P>
-void BufferCache<P>::TraceTablePointer(bool compute, size_t stage, size_t ssbo_index,
-                                       u32 cbuf_index, u32 cbuf_offset, u32 indirect_offset,
-                                       GPUVAddr holder, const Binding& binding) {
-    // A table entry is read here from guest memory, and again by the shader from the holder's
-    // host buffer. Logs each change of a slot's entry or size, and whether the two copies of the
-    // entry can differ: GPU-written (host newer) or CPU-written and not yet uploaded (guest newer).
-    static const bool enabled = std::getenv("EDEN_NX2_TABLE_POINTER_TRACE") != nullptr;
-    if (!enabled) {
-        return;
-    }
-    const GPUVAddr entry_addr = holder + indirect_offset;
-    const GPUVAddr entry = gpu_memory->Read<u64>(entry_addr);
-    const u64 key = (u64{compute} << 63) | (u64{stage & 7} << 60) | (u64{ssbo_index & 63} << 54) |
-                    (u64{cbuf_index & 31} << 49) | (u64{cbuf_offset & 0x7ffff} << 30) |
-                    (indirect_offset & 0x3fffffff);
-    const std::pair<GPUVAddr, u32> state{entry, binding.size};
-    const auto [it, inserted] = traced_table_pointers.try_emplace(key, state);
-    if (!inserted && it->second == state) {
-        return;
-    }
-    it->second = state;
-    static constexpr u64 max_lines = 100000;
-    static u64 lines{};
-    if (++lines > max_lines) {
-        if (lines == max_lines + 1) {
-            LOG_INFO(HW_GPU, "Table pointer trace stopped after {} lines", max_lines);
-        }
-        return;
-    }
-    const std::optional<DAddr> entry_device = gpu_memory->GpuToCpuAddress(entry_addr);
-    const bool gpu_modified =
-        entry_device && memory_tracker.IsRegionGpuModified(*entry_device, sizeof(u64));
-    const bool cpu_modified =
-        entry_device && memory_tracker.IsRegionCpuModified(*entry_device, sizeof(u64));
-    LOG_INFO(HW_GPU,
-             "Table pointer frame={} {} stage={} ssbo={} c{}[{:#x}]+{:#x}: holder={:#x} "
-             "entry={:#x} bound={:#x} size={:#x} entry_gpu_modified={} entry_cpu_modified={}",
-             frame_tick, compute ? "compute" : "graphics", stage, ssbo_index, cbuf_index,
-             cbuf_offset, indirect_offset, holder, entry, binding.device_addr, binding.size,
-             gpu_modified, cpu_modified);
-}
-
-template <class P>
-Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index, bool is_written,
-                                             bool native_pointer, bool table_pointer,
-                                             bool compute) const {
+Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
+                                             bool is_written, bool native_compute) const {
     const GPUVAddr gpu_addr = gpu_memory->Read<u64>(ssbo_addr);
     if (trace)
         trace->pointer = gpu_addr;
@@ -4648,19 +4496,58 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
         return NULL_BINDING;
     }
 
-    // The size word after a plain pointer is part of the answer; pool and native pointers ignore
-    // it.
-    const bool reads_size_word = !(table_pointer && !is_written) && !native_pointer;
-    const u64 next_qword = reads_size_word ? gpu_memory->Read<u64>(ssbo_addr + 8) : 0;
-    // Every draw rebinds each storage buffer: the layout lookup (a mutex), the range walk and
-    // two page walks cost Ocarina's GPU thread ~6%. Answers hold until the page table changes.
-    struct CachedBinding {
-        size_t owner; ///< MemoryManager id + 1, 0 when empty
-        GPUVAddr gpu_addr;
-        u64 next_qword;
-        u64 serial;
-        u32 flags;
-        Binding binding;
+    const auto size = [&]() -> u32 {
+        const u64 layout_size = gpu_memory->GetMemoryLayoutSize(gpu_addr);
+        // Keep the existing NVN/graphics behaviour; bare pointers must be capped before
+        // conversion, since a kind range can be 4 GiB or larger.
+        const u64 memory_layout_size =
+            native_compute ? layout_size : static_cast<u32>(layout_size);
+        // Native compute pointers are bare; the next word is another shader parameter.
+        const u64 next_qword = native_compute ? 0 : gpu_memory->Read<u64>(ssbo_addr + 8);
+        const u32 limit = StorageBufferSizeLimit(memory_layout_size, next_qword, native_compute);
+        if (native_compute && limit != 0) {
+            const auto ranges = gpu_memory->GetSubmappedRange(gpu_addr, limit);
+            return StorageBufferMappedPrefix(gpu_addr, limit, ranges);
+        }
+        return limit;
+    }();
+
+    // Alignment only applies to the offset of the buffer
+    const u32 alignment = runtime.GetStorageBufferAlignment();
+    const GPUVAddr aligned_gpu_addr = Common::AlignDown(gpu_addr, alignment);
+    const u32 aligned_size = static_cast<u32>(gpu_addr - aligned_gpu_addr) + size;
+
+    const std::optional<DAddr> aligned_device_addr = gpu_memory->GpuToCpuAddress(aligned_gpu_addr);
+    if (!aligned_device_addr || size == 0) {
+        LOG_DEBUG(HW_GPU, "Failed to find storage buffer for cbuf index {}", cbuf_index);
+        return NULL_BINDING;
+    }
+    const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
+    if (!device_addr) {
+        LOG_DEBUG(HW_GPU, "Unmapped storage buffer address for cbuf index {}", cbuf_index);
+        return NULL_BINDING;
+    }
+    // The end address used for size calculation does not need to be aligned
+    const DAddr cpu_end = Common::AlignUp(*device_addr + size, Core::DEVICE_PAGESIZE);
+
+    u32 binding_size = static_cast<u32>(cpu_end - *aligned_device_addr);
+    if (is_written || native_compute) {
+        binding_size = aligned_size;
+    }
+    // Keep a safe fallback if multi-range storage cannot be used (including non-sparse writes).
+    // Starting from the aligned address also checks that the alignment prefix is contiguous.
+    const u32 physical_size = native_compute
+        ? static_cast<u32>(gpu_memory->MaxContinuousRange(aligned_gpu_addr, binding_size))
+        : 0;
+    if (native_compute && physical_size <= gpu_addr - aligned_gpu_addr) {
+        return NULL_BINDING;
+    }
+    const Binding binding{
+        .device_addr = *aligned_device_addr,
+        .gpu_addr = aligned_gpu_addr,
+        .size = binding_size,
+        .buffer_id = BufferId{},
+        .physical_size = physical_size,
     };
     constexpr size_t Ways = 4;
     thread_local std::array<std::array<CachedBinding, Ways>, 512> binding_cache{};

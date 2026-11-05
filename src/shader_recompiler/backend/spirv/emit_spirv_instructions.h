@@ -22,7 +22,6 @@ enum class Attribute : u64;
 enum class Patch : u64;
 class Inst;
 class Value;
-struct Program;
 } // namespace Shader::IR
 
 namespace Shader::Backend::SPIRV {
@@ -650,11 +649,8 @@ Id EmitDPdyFine(EmitContext& ctx, Id op_a);
 Id EmitDPdxCoarse(EmitContext& ctx, Id op_a);
 Id EmitDPdyCoarse(EmitContext& ctx, Id op_a);
 
-Id EmitTensorMulAdd(EmitContext& ctx, IR::Inst* inst, Id a, Id b, Id c);
-void DefineSoftwareMatrixFunctions(EmitContext& ctx, const IR::Program& program);
-void PatchCooperativeHmma(std::vector<u32>& code, const CooperativeHmmaTypes& types);
-/// Appends the shared memory of the 16x16x16 HMMA path to a program that runs it, and returns the
-/// word where it starts.
-std::optional<u32> ReserveCooperativeHmmaScratch(const Profile& profile, IR::Program& program);
+// Cooperative matrix (tensor core) operations
+Id EmitTensorMulAdd(EmitContext& ctx, IR::Inst* inst, Id a0, Id a1, Id a2, Id a3, Id b0, Id b1,
+                    Id c0, Id c1);
 
 } // namespace Shader::Backend::SPIRV
