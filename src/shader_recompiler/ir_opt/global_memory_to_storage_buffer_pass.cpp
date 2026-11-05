@@ -2184,6 +2184,33 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
                                        read_extents[storage_inst.storage_buffer]);
         }
     }
+    TrackingConditions conditions{program};
+    StorageInfo info;
+    info.iterator_words = CollectIteratorWords(program);
+    info.atomic_pointers = CollectAtomicPointers(program);
+    const auto collect = [&] {
+        for (IR::Block* const block : program.post_order_blocks) {
+            for (IR::Inst& inst : block->Instructions()) {
+                if (!IsGlobalMemory(inst)) {
+                    continue;
+                }
+                conditions.current = block;
+                CollectStorageBuffers(*block, inst, info, env, conditions);
+            }
+        }
+    };
+    collect();
+    if (info.tables_seen && info.set.size() < Info::MAX_SSBOS) {
+        // Again with pointer table entries, in the bindings the first pass left free.
+        StorageInfo with_tables;
+        with_tables.iterator_words = std::move(info.iterator_words);
+        with_tables.atomic_pointers = std::move(info.atomic_pointers);
+        with_tables.tables_enabled = true;
+        with_tables.table_budget = Info::MAX_SSBOS - info.set.size();
+        info = std::move(with_tables);
+        collect();
+    }
+    program.info.native_global_bounds |= info.native_runtime_bounds;
     for (const StorageBufferAddr& storage_buffer : info.set) {
         const auto read_extent{read_extents.find(storage_buffer)};
         program.info.storage_read_extents.push_back(
