@@ -800,3 +800,21 @@ TEST_CASE("Compact software HMMA translates to a TensorMulAdd carrying its depth
         CHECK(found == 1);
     }
 }
+
+TEST_CASE("Ocarina mesh attribute stores read shadowed high registers", "[video_core][ampere]") {
+    using Shader::Ampere::NativeRegisterCopy;
+    // ISBEWR.32.ATTR.SKEW.O [R197 + 0x780], R240 (Ocarina mesh 8159e91e0097876a at 0x83c0, from
+    // Lichii 3c8dc569f). R240 is UR22's mirror once the uniform bank is in use, so the stored data
+    // must come from the shadow bank; reading the mirror stored NaN and bloom made doors white.
+    const Instruction load{{0xffe47981, 0x00002004, 0x0c1e8b00, 0x000f6800}};
+    const Instruction store{{0xc5007927, 0x000780f0, 0x0000f800, 0x000fe200}};
+    const auto lowered = LowerToMaxwell(std::array{load, store, EXIT});
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    const auto& words = lowered.instructions;
+    const auto pseudo = std::find_if(words.begin(), words.end(), [](u64 w) { return (w >> 52) == 0xefc; });
+    REQUIRE(pseudo != words.end());
+    const u32 data = static_cast<u32>(*pseudo & 0xff);
+    CHECK(data < 216);
+    CHECK(std::find(words.begin(), pseudo, NativeRegisterCopy(0, data, 1, 240)) != pseudo);
+}
