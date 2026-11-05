@@ -581,9 +581,8 @@ TEST_CASE("Ampere uniform bindless TEX rejects unverified handle pairs and contr
         REQUIRE(lowered.error_offset == 16);
         REQUIRE(lowered.instructions.empty());
     }
-    // BRX / BRXU tables may land anywhere: accepted only while every uniform write of the pair is
-    // followed by the shift before any control transfer (here the BRX itself is then refused for
-    // its relative base, after the texture), refused at the texture otherwise.
+    // BRX / BRXU tables are taken as forward only: a write of the pair after the texture cannot
+    // reach it again, so the texture passes and the BRX itself is refused for its relative base.
     for (const u32 opcode : {0x949U, 0x958U}) {
         const std::array<Instruction, 4> table{{sample[0], sample[1],
                                               {{0x7000U | opcode, 0, 0x03800000, 0}}, sample[2]}};
@@ -592,7 +591,7 @@ TEST_CASE("Ampere uniform bindless TEX rejects unverified handle pairs and contr
                                                   {{0x7000U | opcode, 0, 0x03800000, 0}}, sample[2]}};
         const auto lowered = LowerToMaxwell(clobbered);
         REQUIRE_FALSE(static_cast<bool>(lowered));
-        REQUIRE(lowered.error_offset == 16);
+        REQUIRE(lowered.error_offset == 48);
     }
     // After a write of the handle, a branch into the window skips the shift; a loop before the
     // shift does not touch the pair.

@@ -449,11 +449,12 @@ TEST_CASE("Ocarina bindless handles copied into the pair keep their sampler half
     auto guarded = copy;
     guarded.words[0] = 0x00080c82;
     REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(std::array{load, shift, guarded, texture, EXIT})));
-    // Ocarina's jump tables (BRX) may land anywhere: a UR4 reload before one breaks the proof.
+    // Ocarina's jump tables (BRX) are taken as forward only: a UR4 reload after the texture
+    // cannot reach it, so only the BRX's relative base is refused.
     const Instruction jump{{0x20007949, 0xffffbaa0, 0x0383ffff, 0x000fea00}};
     const auto table = LowerToMaxwell(std::array{load, shift, copy, texture, load, jump, EXIT});
     REQUIRE_FALSE(static_cast<bool>(table));
-    REQUIRE(table.error == "native uniform bindless texture handle provenance");
+    REQUIRE(table.error == "native computed branch relative base");
 }
 
 TEST_CASE("Ocarina task and mesh stage buffer accesses become the nx2 pseudo instruction",
@@ -521,4 +522,34 @@ TEST_CASE("Ocarina SHF.R.U64 low word with an immediate shift", "[video_core][am
         invalid.words[2] = mode;
         REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(std::array{invalid, EXIT})));
     }
+}
+
+TEST_CASE("Ocarina 64-bit right shifts keep the low word as Maxwell SHF.R", "[video_core][ampere]") {
+    // SHF.R.U64 R20, R20, R43, R24 (register count): SHF.R with the U64 clamp.
+    const std::array<Instruction, 2> reg{{
+        {{0x09147219, 0x0000002b, 0x00001218, 0x004fc400}},
+        {{0x0000794d, 0, 0x03800000, 0}},
+    }};
+    const auto lowered = LowerToMaxwell(reg);
+    REQUIRE(static_cast<bool>(lowered));
+    REQUIRE(std::find(lowered.instructions.begin(), lowered.instructions.end(),
+                      0x5cf8000000070000ULL | 20 | (u64{9} << 8) | (u64{43} << 20) | (u64{2} << 37) |
+                          (u64{24} << 39)) != lowered.instructions.end());
+    auto invalid = reg;
+    invalid[0].words[2] = 0x00001a18; // .W wraps the count: not this form
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
+    // USHF.R.U64 UR10, UR6, 0x18, UR7: the uniform pair by an immediate up to 32.
+    const std::array<Instruction, 2> uniform{{
+        {{0x060a7899, 0x00000018, 0x08001207, 0x002fe400}},
+        {{0x0000794d, 0, 0x03800000, 0}},
+    }};
+    const auto lowered_uniform = LowerToMaxwell(uniform);
+    REQUIRE(static_cast<bool>(lowered_uniform));
+    REQUIRE(std::any_of(lowered_uniform.instructions.begin(), lowered_uniform.instructions.end(),
+                        [](u64 insn) {
+        return (insn >> 51) == (0x38f8000000000000ULL >> 51) && ((insn >> 20) & 0x3f) == 0x18;
+    }));
+    auto too_far = uniform;
+    too_far[0].words[1] = 33;
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(too_far)));
 }
