@@ -2,6 +2,9 @@
 #pragma once
 
 #include <algorithm>
+#include <cstddef>
+#include <span>
+#include <utility>
 #include "common/common_types.h"
 
 namespace VideoCommon {
@@ -23,6 +26,20 @@ namespace VideoCommon {
         return packed_size;
     }
     return static_cast<u32>((std::min)(kind_extent, u64{8U * mib}));
+}
+
+// The mapping API splits on both physical discontinuities and unmapped holes. Adjacent
+// virtual ranges still form one usable prefix for the multi-range storage path.
+[[nodiscard]] inline u32 StorageBufferMappedPrefix(
+    u64 start, u32 limit, std::span<const std::pair<u64, std::size_t>> ranges) {
+    u32 mapped = 0;
+    for (const auto& [address, length] : ranges) {
+        if (address != start + mapped || length > limit - mapped) {
+            break;
+        }
+        mapped += static_cast<u32>(length);
+    }
+    return mapped;
 }
 
 } // namespace VideoCommon

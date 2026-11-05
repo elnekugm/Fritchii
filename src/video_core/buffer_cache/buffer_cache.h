@@ -2754,9 +2754,12 @@ void BufferCache<P>::BindHostComputeStorageBuffers() {
             }
             return;
         }
+        const u32 size = binding.physical_size ? binding.physical_size : binding.size;
+        if (!binding.buffer_id && size != 0) {
+            binding.buffer_id = FindBuffer(binding.device_addr, size, false);
+        }
         Buffer& buffer = slot_buffers[binding.buffer_id];
         TouchBuffer(buffer, binding.buffer_id);
-        const u32 size = binding.size;
         SynchronizeBuffer(buffer, binding.device_addr, size);
 
         const u32 offset = buffer.Offset(binding.device_addr);

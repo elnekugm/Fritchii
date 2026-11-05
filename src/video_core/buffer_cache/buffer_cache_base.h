@@ -105,6 +105,8 @@ struct Binding {
     GPUVAddr gpu_addr{};
     u32 size{};
     BufferId buffer_id;
+    // Nonzero when a virtual storage range needs a shorter physical fallback.
+    u32 physical_size{};
     u32 segment_first{};
     u32 segment_count{};
 };
