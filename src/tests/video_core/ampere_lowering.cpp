@@ -573,3 +573,29 @@ TEST_CASE("Ocarina guarded uniform selects run under their UPn guard", "[video_c
     REQUIRE(std::none_of(in_place.instructions.begin(), in_place.instructions.end(),
                          [](u64 w) { return (w >> 52) == 0x38e && (w & 0xff) == 254; }));
 }
+
+TEST_CASE("Ocarina guarded uniform comparisons keep UPn when the guard is false",
+          "[video_core][ampere]") {
+    // @UP4 UISETP.GT.U32.AND UP0, PT, UR21, 0x1f, UPT: R253 keeps the guest P2 (the guard), the
+    // output slot P6 saves into R254 and starts as the old UP0, and the ISETP runs under P2.
+    const Instruction compare{{0x1500488c, 0x0000001f, 0x0bf04070, 0x000fe200}};
+    const auto lowered = LowerToMaxwell(std::array{compare, EXIT});
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    const auto& words = lowered.instructions;
+    const auto has = [&](auto match) { return std::any_of(words.begin(), words.end(), match); };
+    REQUIRE(has([](u64 w) { return (w >> 52) == 0x5b6 && ((w >> 16) & 0xf) == 2; }));
+    REQUIRE(has([](u64 w) { return (w >> 52) == 0x38e && (w & 0xff) == 254 && ((w >> 20) & 0x7f) == 0x40; }));
+    REQUIRE(has([](u64 w) { return (w >> 52) == 0x38f && ((w >> 8) & 0xff) == 239 && ((w >> 20) & 0x7f) == 0x40; }));
+}
+
+TEST_CASE("Ocarina SEL with a uniform source", "[video_core][ampere]") {
+    // SEL R23, R4, UR4, P0 -> Maxwell SEL R23, R4, R220, P0.
+    const Instruction select{{0x04177c07, 0x00000004, 0x08000000, 0x000fe400}};
+    const auto lowered = LowerToMaxwell(std::array{select, EXIT});
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    REQUIRE(std::any_of(lowered.instructions.begin(), lowered.instructions.end(), [](u64 w) {
+        return w == (0x5ca0000000070000ULL | 23 | (u64{4} << 8) | (u64{220} << 20));
+    }));
+}
