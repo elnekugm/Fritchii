@@ -13,6 +13,7 @@
 
 #include "core/arm/exclusive_monitor.h"
 #include "core/core.h"
+#include "core/hle/kernel/address_arbiter_read.h"
 #include "core/hle/kernel/k_address_arbiter.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_scheduler.h"
@@ -415,11 +416,8 @@ Result KAddressArbiter::WaitIfEqual(uint64_t addr, s64 value, s64 timeout, bool 
         s64 user_value{};
         bool succeeded{};
         if (is_64_bit) {
-            auto& memory = GetCurrentMemory(system.Kernel());
-            succeeded = memory.IsValidVirtualAddressRange(addr, sizeof(s64));
-            if (succeeded) {
-                user_value = static_cast<s64>(memory.Read64(addr));
-            }
+            succeeded = Detail::ReadArbiterValue64(GetCurrentMemory(system.Kernel()), addr,
+                                                    user_value);
         } else {
             s32 user_value32{};
             succeeded = ReadFromUser(system.Kernel(), std::addressof(user_value32), addr);
