@@ -104,7 +104,8 @@ inline constexpr GamePreset GamePresets[] = {
      SetMarioTennisFeverRecommendedSettings},
     {OcarinaOfTimeProgramId, "The Legend of Zelda: Ocarina of Time",
      "Vulkan, 1x resolution, GPU Fast, asynchronous shaders, BC3, conservative VRAM, reactive "
-     "flushing on, FIFO Relaxed VSync, ScaleForce, FXAA and the 30 FPS lock.",
+     "flushing on, FIFO Relaxed VSync, ScaleForce, FXAA and the built-in 30 FPS game patch "
+     "(supported game builds only).",
      SetOcarinaOfTimeRecommendedSettings},
 };
 
