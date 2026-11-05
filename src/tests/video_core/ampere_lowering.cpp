@@ -553,3 +553,23 @@ TEST_CASE("Ocarina 64-bit right shifts keep the low word as Maxwell SHF.R", "[vi
     too_far[0].words[1] = 33;
     REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(too_far)));
 }
+
+TEST_CASE("Ocarina guarded uniform selects run under their UPn guard", "[video_core][ampere]") {
+    // @UP4 USEL UR21, UR21, 0x20, UP0: the guard is swapped into P2, the condition through R254
+    // (R253 holds the guest P2), and the SEL itself is guarded by P2.
+    const Instruction select{{0x15154887, 0x00000020, 0x08000000, 0x000fc800}};
+    const auto lowered = LowerToMaxwell(std::array{select, EXIT});
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    const auto& words = lowered.instructions;
+    const auto has = [&](auto match) { return std::any_of(words.begin(), words.end(), match); };
+    REQUIRE(has([](u64 w) { return (w >> 52) == 0x5ca && ((w >> 16) & 0xf) == 2; }));
+    REQUIRE(has([](u64 w) { return (w >> 52) == 0x38e && (w & 0xff) == 254; }));
+    // Guard and condition both UP0: already in place, no second swap.
+    auto same = select;
+    same.words[0] = 0x15150887;
+    const auto in_place = LowerToMaxwell(std::array{same, EXIT});
+    REQUIRE(static_cast<bool>(in_place));
+    REQUIRE(std::none_of(in_place.instructions.begin(), in_place.instructions.end(),
+                         [](u64 w) { return (w >> 52) == 0x38e && (w & 0xff) == 254; }));
+}

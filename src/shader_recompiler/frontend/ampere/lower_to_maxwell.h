@@ -2096,6 +2096,7 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
             const u32 condition = insn.Bits(87, 3);
             const u32 target = uniform_register(static_cast<u32>(dest));
             const u32 a = uniform_register(insn.Bits(24, 8)), b = opcode == 0x887 ? 252U : uniform_register(insn.Bits(32, 8));
+            // A UPn guard (Ocarina's @UP4 USEL) is swapped in by the common code.
             if (condition > 6 || target == ~0U || a == ~0U || b == ~0U ||
                 (insn.words[2] & ~0x07800000U) != 0x08000000U)
                 return fail(index, "native uniform select mode");
@@ -2135,7 +2136,7 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
             emit(0x5ca0000000000000ULL | (u64{(native_predicate & 8) | (native_predicate != 7 ? guard_slot : 7U)} << 16) |
                 target | (u64{a} << 8) | (u64{b} << 20) |
                 (u64{temporary} << 39) | (u64{insn.Bits(90, 1)} << 42));
-            emit(0x38f0000000070000ULL | (u64{253} << 8) | (u64{mask} << 20));
+            if (swap) emit(0x38f0000000070000ULL | (u64{saved} << 8) | (u64{mask} << 20));
             break;
         }
         case 0x381: case 0x981: { // LDG.E of 8 to 128 bits, register or uniform 64-bit address.
