@@ -135,6 +135,101 @@ void CheckUnchanged(const IntegerMachine& before, const IntegerMachine& after, u
 }
 } // namespace
 
+TEST_CASE("Ampere OoT compute instructions add both carry predicates",
+          "[video_core][ampere][integer_carry]") {
+    struct Observed {
+        Instruction instruction;
+        u32 destination;
+        u32 source;
+        u32 first_carry;
+        u32 second_carry;
+    };
+    // Exact words from #28's Windows log and the independent Linux 0.7.4 run.
+    // The 0xc10 forms read UR7/UR5, represented by R223/R221 after lowering.
+    const std::array<Observed, 7> observed{{
+        {{{0xff077210, 1, 0x00fe44ff, 0x000fca00}}, 7, 1, 1, 2},
+        {{{0xff017210, 1, 0x007e24ff, 0x000fca00}}, 1, 1, 0, 1},
+        {{{0xff057c10, 7, 0x087e24ff, 0x000fca00}}, 5, 223, 0, 1},
+        {{{0xff037c10, 5, 0x087e24ff, 0x000fca00}}, 3, 221, 0, 1},
+        {{{0xff037210, 3, 0x00fe44ff, 0x000fca00}}, 3, 3, 1, 2},
+        {{{0xff137210, 3, 0x007e24ff, 0x000fca00}}, 19, 3, 0, 1},
+        {{{0xff077210, 3, 0x00fe44ff, 0x000fca00}}, 7, 3, 1, 2},
+    }};
+    for (const auto& fixture : observed) {
+        const auto lowered = LowerToMaxwell(std::array{fixture.instruction, Exit});
+        REQUIRE(static_cast<bool>(lowered));
+        for (u32 predicates = 0; predicates < 8; ++predicates) {
+            for (const u32 value : {0U, 1U, 0xfffffffeU, 0xffffffffU}) {
+                auto machine = SeedMachine();
+                for (u32 p = 0; p < 3; ++p)
+                    machine.predicates[p] = (predicates & (1U << p)) != 0;
+                machine.registers[fixture.source] = value;
+                const auto before = machine;
+                machine.Run(lowered.instructions);
+                const u32 expected = value + u32{before.predicates[fixture.first_carry]} +
+                                     u32{before.predicates[fixture.second_carry]};
+                REQUIRE(machine.Read(fixture.destination) == expected);
+                CheckUnchanged(before, machine, fixture.destination, 1);
+            }
+        }
+    }
+}
+
+TEST_CASE("Ampere dual carry additions preserve predicates aliases and wraparound",
+          "[video_core][ampere][integer_carry]") {
+    for (const u32 destination : {4U, 5U, 6U, 9U}) {
+        for (u32 first = 0; first < 16; ++first) {
+            for (u32 second = 0; second < 16; ++second) {
+                const Instruction instruction{{
+                    0x04007210U | (destination << 16), 5,
+                    0x007e0406U | (first << 23) | (second << 13), 0x000fca00,
+                }};
+                const auto lowered = LowerToMaxwell(std::array{instruction, Exit});
+                REQUIRE(static_cast<bool>(lowered));
+                for (const u32 value : {0U, 0xfffffffeU, 0xffffffffU}) {
+                    auto machine = SeedMachine();
+                    machine.registers[4] = value;
+                    machine.registers[5] = 0xffffffffU;
+                    machine.registers[6] = 1;
+                    const auto before = machine;
+                    const auto predicate = [&](u32 encoded) {
+                        return ((encoded & 7) == 7 || before.predicates[encoded & 7]) !=
+                               bool(encoded & 8);
+                    };
+                    const u32 expected = value + u32{predicate(first)} + u32{predicate(second)};
+                    machine.Run(lowered.instructions);
+                    REQUIRE(machine.Read(destination) == expected);
+                    CheckUnchanged(before, machine, destination, 1);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("Ampere dual carry additions honor the instruction predicate",
+          "[video_core][ampere][integer_carry]") {
+    for (const u32 guard : {0U, 1U, 2U, 7U, 8U, 9U, 10U, 15U}) {
+        const Instruction instruction{{0xff010210U | (guard << 12), 1,
+                                       0x007e24ff, 0x000fca00}};
+        const auto lowered = LowerToMaxwell(std::array{instruction, Exit});
+        REQUIRE(static_cast<bool>(lowered));
+        for (u32 predicates = 0; predicates < 8; ++predicates) {
+            auto machine = SeedMachine();
+            for (u32 p = 0; p < 3; ++p)
+                machine.predicates[p] = (predicates & (1U << p)) != 0;
+            machine.registers[1] = 0xffffffff;
+            const auto before = machine;
+            const bool execute = ((guard & 7) == 7 || before.predicates[guard & 7]) !=
+                                 bool(guard & 8);
+            const u32 expected = before.Read(1) +
+                (execute ? u32{before.predicates[0]} + u32{before.predicates[1]} : 0U);
+            machine.Run(lowered.instructions);
+            REQUIRE(machine.Read(1) == expected);
+            CheckUnchanged(before, machine, 1, 1);
+        }
+    }
+}
+
 TEST_CASE("Ampere high multiply respects operand forms signs aliases and predicates",
           "[video_core][ampere][integer_multiply]") {
     std::mt19937 random{0x949a921};
