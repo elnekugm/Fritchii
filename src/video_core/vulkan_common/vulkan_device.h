@@ -565,7 +565,10 @@ FN_MAX_LIMIT_LIST
         const bool affected_driver = driver_id == VK_DRIVER_ID_AMD_PROPRIETARY ||
                                      driver_id == VK_DRIVER_ID_AMD_OPEN_SOURCE ||
                                      driver_id == VK_DRIVER_ID_SAMSUNG_PROPRIETARY;
+        // VUID-VkPipelineShaderStageCreateInfo-pNext-02756 limits task/mesh local sizes to
+        // requiredSubgroupSize * maxComputeWorkgroupSubgroups; allowed sizes can exceed this at 32.
         return affected_driver && stage != VK_SHADER_STAGE_COMPUTE_BIT &&
+               stage != VK_SHADER_STAGE_TASK_BIT_EXT && stage != VK_SHADER_STAGE_MESH_BIT_EXT &&
                IsExtSubgroupSizeControlSupported() && IsGuestWarpSizeSupported(stage);
     }
 
