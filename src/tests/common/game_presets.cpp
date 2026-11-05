@@ -120,7 +120,10 @@ TEST_CASE("Every Switch 2 preset applies to its own title only", "[game_presets]
         CHECK(settings->renderer_backend.GetValue() == Settings::RendererBackend::Vulkan);
         CHECK(settings->resolution_setup.GetValue() == Settings::ResolutionSetup::Res1X);
         CHECK(settings->gpu_accuracy.GetValue() == Settings::GpuAccuracy::Low);
-        CHECK_FALSE(settings->use_reactive_flushing.GetValue());
+        // Ocarina of Time keeps reactive flushing on (checked below).
+        if (preset.program_id != Settings::OcarinaOfTimeProgramId) {
+            CHECK_FALSE(settings->use_reactive_flushing.GetValue());
+        }
         CheckPreferences(*settings, true);
         CHECK(Settings::FindGamePreset(preset.program_id) == &preset);
     }
@@ -141,4 +144,8 @@ TEST_CASE("Title presets set what the titles need", "[game_presets]") {
     REQUIRE(Settings::ApplyGamePreset(*settings, Settings::MarioTennisFeverProgramId, true));
     CHECK(settings->gpu_fence_behavior.GetValue() == Settings::GpuFenceBehavior::Balanced);
     CHECK(settings->async_presentation.GetValue());
+    settings = std::make_unique<Settings::Values>();
+    REQUIRE(Settings::ApplyGamePreset(*settings, Settings::OcarinaOfTimeProgramId, true));
+    CHECK(settings->use_reactive_flushing.GetValue());
+    CHECK(settings->fps30_patch.GetValue());
 }

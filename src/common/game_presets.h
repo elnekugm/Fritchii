@@ -10,6 +10,7 @@ inline constexpr u64 MarioKartWorldProgramId = 0x0400C3F00006E000ULL;
 inline constexpr u64 DonkeyKongBananzaProgramId = 0x040074A01BF12000ULL;
 inline constexpr u64 HyruleWarriorsAgeOfImprisonmentProgramId = 0x04003F40232DE000ULL;
 inline constexpr u64 MarioTennisFeverProgramId = 0x0400D4201C6EA000ULL;
+inline constexpr u64 OcarinaOfTimeProgramId = 0x0400486024DEC000ULL;
 
 namespace Detail {
 inline auto SessionSetter(bool global) {
@@ -65,6 +66,14 @@ inline void SetMarioTennisFeverRecommendedSettings(Values& settings, bool global
     session(settings.async_presentation, true);
 }
 
+inline void SetOcarinaOfTimeRecommendedSettings(Values& settings, bool global) {
+    Detail::SetSwitch2BaseSettings(settings, global);
+    const auto session = Detail::SessionSetter(global);
+    // Leon's playtest: 24-25 ms median frame time with reactive flushing, 36 ms without.
+    session(settings.use_reactive_flushing, true);
+    session(settings.fps30_patch, true);
+}
+
 struct GamePreset {
     u64 program_id;
     const char* name;
@@ -93,6 +102,10 @@ inline constexpr GamePreset GamePresets[] = {
      "flushing off, FIFO Relaxed VSync, ScaleForce, FXAA, Balanced GPU fences and asynchronous "
      "presentation.",
      SetMarioTennisFeverRecommendedSettings},
+    {OcarinaOfTimeProgramId, "The Legend of Zelda: Ocarina of Time",
+     "Vulkan, 1x resolution, GPU Fast, asynchronous shaders, BC3, conservative VRAM, reactive "
+     "flushing on, FIFO Relaxed VSync, ScaleForce, FXAA and the 30 FPS lock.",
+     SetOcarinaOfTimeRecommendedSettings},
 };
 
 /// The title's preset, or nullptr when it has none.

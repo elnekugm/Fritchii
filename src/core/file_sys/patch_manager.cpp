@@ -776,19 +776,26 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
     LOG_INFO(Loader, "Patching NSO for name={}, build_id={}", name, build_id);
 
     auto base = nso;
-    if (const auto* patch = FindFps30Patch(build_id)) {
-        const size_t at = sizeof(Loader::NSOHeader) + patch->offset;
+    const auto fps30_patch = FindFps30Patch(build_id);
+    const auto word_at = [&base](const BuiltinPatch& patch) {
+        const size_t at = sizeof(Loader::NSOHeader) + patch.offset;
         u32 word{};
         if (at + sizeof(word) <= base.size()) {
             std::memcpy(&word, base.data() + at, sizeof(word));
         }
-        if (word == patch->expected) {
-            std::memcpy(base.data() + at, &patch->replacement, sizeof(word));
-            LOG_INFO(Loader, "    - Applying built-in 30 FPS patch");
-        } else {
-            LOG_WARNING(Loader, "    - Built-in 30 FPS patch skipped: {:#010x} at {:#x}, expected {:#010x}",
-                        word, patch->offset, patch->expected);
+        return word;
+    };
+    const auto mismatch = std::ranges::find_if(
+        fps30_patch, [&](const BuiltinPatch& patch) { return word_at(patch) != patch.expected; });
+    if (mismatch != fps30_patch.end()) {
+        LOG_WARNING(Loader, "    - Built-in 30 FPS patch skipped: {:#010x} at {:#x}, expected {:#010x}",
+                    word_at(*mismatch), mismatch->offset, mismatch->expected);
+    } else if (!fps30_patch.empty()) {
+        for (const BuiltinPatch& patch : fps30_patch) {
+            std::memcpy(base.data() + sizeof(Loader::NSOHeader) + patch.offset, &patch.replacement,
+                        sizeof(patch.replacement));
         }
+        LOG_INFO(Loader, "    - Applying built-in 30 FPS patch");
     }
 
     const auto load_dir = GetModificationLoadRoot();
