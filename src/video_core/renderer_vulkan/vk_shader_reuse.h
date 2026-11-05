@@ -167,6 +167,7 @@ public:
     bool IsTexturePixelFormatInteger(u32 raw_handle) override;
     u32 ReadViewportTransformState() override;
     u32 TextureBoundBuffer() const override;
+    u32 SurfaceBoundBuffer() const override;
     u32 LocalMemorySize() const override;
     u32 SharedMemorySize() const override;
     std::array<u32, 3> WorkgroupSize() const override;
