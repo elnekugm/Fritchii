@@ -2327,6 +2327,13 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
                 .pName = "main",
                 .pSpecializationInfo = nullptr,
             });
+        const Shader::Info& info{stage_infos[stage]};
+        const bool uses_warp_ops = info.uses_subgroup_vote || info.uses_subgroup_invocation_id ||
+                                   info.uses_subgroup_shuffles || info.uses_subgroup_mask ||
+                                   info.uses_quad_shuffles || info.uses_fswzadd;
+        if (uses_warp_ops && device.NeedsGraphicsSubgroupShuffleWorkaround(stage_ci.stage)) {
+            stage_ci.pNext = &subgroup_size_ci;
+        }
     }
     // Mesh emulation draws a plain triangle list without vertex attributes.
     const VkPipelineVertexInputStateCreateInfo emulation_vertex_input{

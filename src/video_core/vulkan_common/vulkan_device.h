@@ -559,6 +559,16 @@ FN_MAX_LIMIT_LIST
         return properties.subgroup_size_control.requiredSubgroupSizeStages & stage;
     }
 
+    /// AMDVLK's dynamic Shuffle workaround is safe only with a forced 32-lane graphics subgroup.
+    bool NeedsGraphicsSubgroupShuffleWorkaround(VkShaderStageFlagBits stage) const {
+        const auto driver_id = GetDriverID();
+        const bool affected_driver = driver_id == VK_DRIVER_ID_AMD_PROPRIETARY ||
+                                     driver_id == VK_DRIVER_ID_AMD_OPEN_SOURCE ||
+                                     driver_id == VK_DRIVER_ID_SAMSUNG_PROPRIETARY;
+        return affected_driver && stage != VK_SHADER_STAGE_COMPUTE_BIT &&
+               IsExtSubgroupSizeControlSupported() && IsGuestWarpSizeSupported(stage);
+    }
+
     /// Returns true if the device supports the provided subgroup feature.
     bool IsSubgroupFeatureSupported(VkSubgroupFeatureFlagBits feature) const {
         return properties.subgroup_properties.supportedOperations & feature;
