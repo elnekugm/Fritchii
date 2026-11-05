@@ -2482,6 +2482,9 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
             const bool volume = dimension == 2;
             // LOD 1 is LZ; 3 (LL) only for arrays: (layer, x | y, lod), the LOD after the handle.
             const bool explicit_lod = array && insn.Bits(87, 3) == 3;
+            // Bit 76: a texel offset after the coordinates. 2D.LZ only, as Maxwell TLDS
+            // 2D.LZ.AOFFI (x, y in Ra, Ra+1, offsets in Rb).
+            const bool offsets = insn.Bits(76, 1) != 0;
             u32 source_a = insn.Bits(24, 8), source_b = insn.Bits(32, 8);
             u32 second_dest = insn.Bits(64, 8);
             // TLDS has no single-register G+B or R+B swizzle (Hyrule Warriors fetches G+B): take
@@ -2795,7 +2798,6 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
                                 (high != 255 && reg >= high && reg < high + second_count))
                                 return fail(index, "native per-tap gather offset clobber");
                         }
-                        continue;
                     }
                     auto count = write_count(definition);
                     switch (op) {
@@ -2824,6 +2826,35 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
                         imad_offsets |= imad;
                         packed_offsets[i] = definition.words[1];
                     }
+                    for (u32 branch = 0; branch < code.size(); ++branch) {
+                        const Instruction& instruction = code[branch];
+                        const u32 op = instruction.Bits(0, 12);
+                        if (!control(op) || op == 0x94d || op == 0x950 || op == 0x95b) continue;
+                        if ((op != 0x947 && op != 0x944) || (instruction.words[2] & ~0x0783ffffU) ||
+                            instruction.Bits(96, 9))
+                            return false;
+                        const u64 raw = instruction.words[1] | (u64{instruction.words[2] & 0x3ffff} << 32);
+                        const s64 target = s64{branch} * 16 + 16 + (static_cast<s64>(raw << 14) >> 14);
+                        if (target > s64{first} * 16 && target <= s64{index} * 16)
+                            return false;
+                    }
+                    for (const auto& packed : offsets) {
+                        if (!packed) return false;
+                        for (u32 shift = 0; shift < 32; shift += 8) {
+                            const u32 value = (*packed >> shift) & 255;
+                            if (value > 31 && value < 224)
+                                return false;
+                        }
+                    }
+                    return true;
+                }();
+                if (proven) {
+                    for (u32 i = 0; i < offsets.size(); ++i)
+                        emit(0x010000000007f000ULL | (248 + i) | (u64{*offsets[i]} << 20));
+                } else {
+                    for (u32 i = 0; i < 2; ++i)
+                        emit(0x5c98000000000000ULL | predicate | (248 + i) | (u64{15} << 39) |
+                             (u64{source_b + i} << 20));
                 }
                 if (!half && !imad_offsets) {
                     bool terminal = false;

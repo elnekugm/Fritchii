@@ -216,7 +216,7 @@ TEST_CASE("Ampere warp reductions retain their operation and active-lane mask",
 
 TEST_CASE("Ampere warp reductions reject unsupported modes and uniform destinations",
           "[video_core][ampere]") {
-    for (const u32 mode : {0U, 0x8000U, 0x14200U}) {
+    for (const u32 mode : {0U, 0x8000U, 0x4200U}) {
         const std::array<Instruction, 2> code{{
             {{0x030673c4, 0, mode, 0x000ea200}},
             {{0x0000794d, 0, 0x03800000, 0}},

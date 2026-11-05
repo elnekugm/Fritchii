@@ -298,3 +298,125 @@ TEST_CASE("Ampere guarded uniform comparisons keep the output when the guard is 
     CHECK(selected.instructions.front() == 0x5ca000000df70403ULL);
 }
 } // namespace
+
+TEST_CASE("Ocarina TLD.LZ.AOFFI lowers to TLDS 2D.LZ.AOFFI", "[video_core][ampere]") {
+    // @!P0 TLD.LZ.AOFFI R14, R10 (x, y in R10, R11), R19 (offsets), 2D, red only.
+    const std::array<Instruction, 2> code{{
+        {{0x0a0e8b66, 0x30007c13, 0x009e11ff, 0x00014200}},
+        {{0x0000794d, 0, 0x03800000, 0}},
+    }};
+    const auto lowered = LowerToMaxwell(code);
+    REQUIRE(static_cast<bool>(lowered));
+    const auto tlds = std::find_if(lowered.instructions.begin(), lowered.instructions.end(),
+                                   [](u64 insn) { return (insn >> 58) == 0xda >> 2; });
+    REQUIRE(tlds != lowered.instructions.end());
+    REQUIRE(((*tlds >> 53) & 0xf) == 4);
+    REQUIRE((*tlds & 0xff) == 14);
+    REQUIRE(((*tlds >> 8) & 0xff) == 10);
+    REQUIRE(((*tlds >> 20) & 0xff) == 19);
+    auto invalid = code;
+    invalid[0].words[1] &= ~(7U << 29); // 1D: TLDS has no AOFFI form for it here
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
+    invalid = code;
+    invalid[0].words[0] = 0x0b0e8b66; // x, y not an even pair
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
+    invalid = code;
+    invalid[0].words[2] |= 1U << 13; // bit 77 next to the offset bit
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
+}
+
+TEST_CASE("Ocarina LEA.HI with a negated Rb adds the shifted high word to -Rb",
+          "[video_core][ampere]") {
+    // LEA.HI R1, R1, -R0, RZ, 0x1e: -R0 + (R1 >> 2).
+    const std::array<Instruction, 2> code{{
+        {{0x01017211, 0x80000000, 0x078ff0ff, 0x000fca00}},
+        {{0x0000794d, 0, 0x03800000, 0}},
+    }};
+    const auto lowered = LowerToMaxwell(code);
+    REQUIRE(static_cast<bool>(lowered));
+    REQUIRE(std::any_of(lowered.instructions.begin(), lowered.instructions.end(), [](u64 insn) {
+        return (insn >> 52) == 0x5c1 && (insn & 0xff) == 1 && ((insn >> 8) & 0xff) == 250 &&
+               ((insn >> 20) & 0xff) == 0 && ((insn >> 48) & 1) == 1;
+    }));
+    auto invalid = code;
+    invalid[0].words[1] = 0x40000000; // bit 62: not a known Rb modifier here
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
+    invalid = code;
+    invalid[0].words[2] = 0x078ff000; // a register high word (Rc = R0) with the negation
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
+}
+
+TEST_CASE("Ocarina RED.E on a uniform address keeps its S32 and F32 types for Maxwell",
+          "[video_core][ampere]") {
+    // RED.E.ADD.F32.FTZ.RN.STRONG.GPU [UR4.64], R1.
+    const std::array<Instruction, 2> code{{
+        {{0xff00798e, 0x00000001, 0x0c10e704, 0x000fe800}},
+        {{0x0000794d, 0, 0x03800000, 0}},
+    }};
+    const auto lowered = LowerToMaxwell(code);
+    REQUIRE(static_cast<bool>(lowered));
+    REQUIRE(std::any_of(lowered.instructions.begin(), lowered.instructions.end(), [](u64 insn) {
+        return (insn >> 51) == (0xebf8000000000000ULL >> 51) && (insn & 0xff) == 1 &&
+               ((insn >> 20) & 7) == 3 && ((insn >> 23) & 7) == 0 && ((insn >> 48) & 1) == 1;
+    }));
+    auto invalid = code;
+    invalid[0].words[2] = 0x0c90e704; // F32 with op 1 (MIN): Maxwell RED F32 only adds
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
+    invalid = code;
+    invalid[0].words[2] = 0x0c10e504; // type 2 (U64) on this path is not proven
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
+    auto signed_minimum = code;
+    signed_minimum[0].words[2] = 0x0c90e304; // RED.E.MIN.S32, as Ocarina's REDUX.MIN.S32 follow-up
+    const auto lowered_minimum = LowerToMaxwell(signed_minimum);
+    REQUIRE(static_cast<bool>(lowered_minimum));
+    REQUIRE(std::any_of(lowered_minimum.instructions.begin(), lowered_minimum.instructions.end(),
+                        [](u64 insn) {
+        return (insn >> 51) == (0xebf8000000000000ULL >> 51) && ((insn >> 20) & 7) == 1 &&
+               ((insn >> 23) & 7) == 1;
+    }));
+}
+
+TEST_CASE("Ocarina REDUX.MIN.S32 biases lanes into an unsigned minimum", "[video_core][ampere]") {
+    // REDUX.MIN.S32 UR5, R0.
+    const std::array<Instruction, 2> code{{
+        {{0x000573c4, 0, 0x00010200, 0x001e2400}},
+        {{0x0000794d, 0, 0x03800000, 0}},
+    }};
+    const auto lowered = LowerToMaxwell(code);
+    REQUIRE(static_cast<bool>(lowered));
+    // LOP32I.XOR R251, R251, 0x80000000 once per lane (32 of them), plus one on the result.
+    const auto biased = std::count_if(lowered.instructions.begin(), lowered.instructions.end(),
+                                      [](u64 insn) {
+        return (insn >> 58) == 1 && ((insn >> 53) & 3) == 2 &&
+               ((insn >> 20) & 0xffffffffULL) == 0x80000000ULL;
+    });
+    REQUIRE(biased == 33);
+    auto invalid = code;
+    invalid[0].words[2] = 0x00004200; // .S32 on OR means nothing: not a known form
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
+}
+
+TEST_CASE("Ocarina TLD4.DC gathers compare against the reference in Rb", "[video_core][ampere]") {
+    // TLD4.DC R12|R14, R24, R28 (x, y in R24, R25; reference in R28), shadow PCF.
+    const std::array<Instruction, 2> code{{
+        {{0x180c7b63, 0x30800e1c, 0x001e4f0e, 0x000f4200}},
+        {{0x0000794d, 0, 0x03800000, 0}},
+    }};
+    const auto lowered = LowerToMaxwell(code);
+    REQUIRE(static_cast<bool>(lowered));
+    const auto& out = lowered.instructions;
+    const auto has = [&](u64 value) { return std::find(out.begin(), out.end(), value) != out.end(); };
+    // MOV R251, R25 and MOV R252, R28 feed the coordinate pair and the meta register.
+    REQUIRE(has(0x5c98000000070000ULL | 251 | (u64{15} << 39) | (u64{25} << 20)));
+    REQUIRE(has(0x5c98000000070000ULL | 252 | (u64{15} << 39) | (u64{28} << 20)));
+    REQUIRE(std::any_of(out.begin(), out.end(), [](u64 insn) {
+        return (insn >> 59) == (0xc800000000000000ULL >> 59) && ((insn >> 50) & 1) == 1 &&
+               ((insn >> 20) & 0xff) == 252 && ((insn >> 8) & 0xff) == 250 && ((insn >> 28) & 7) == 2;
+    }));
+    auto invalid = code;
+    invalid[0].words[2] = 0x001e5f0e; // with AOFFI the meta register would start with offsets
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
+    invalid = code;
+    invalid[0].words[2] = 0x001ecf0e; // .F16 packing with a compare is not proven
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
+}
