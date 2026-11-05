@@ -19,6 +19,7 @@
 #include <fmt/format.h>
 
 #include "video_core/renderer_vulkan/vk_query_cache.h"
+#include "video_core/stall_diagnostics.h"
 
 #include "common/logging.h"
 #include "common/settings.h"
@@ -330,11 +331,16 @@ void Scheduler::WaitWorker() {
     Common::Nx2Timeline::Span timeline_span{"wait for Vulkan worker"};
     // Ensure the queue is drained.
     {
+        VideoCommon::StallDiagnostics::Scope diagnostic{
+            {VideoCommon::StallDiagnostics::Phase::SchedulerQueueDrain, "scheduler-drain-caller"}};
         std::unique_lock ql{queue_mutex};
         event_cv.wait(ql, [this] { return work_queue.empty(); });
     }
 
     // Now wait for execution to finish.
+    VideoCommon::StallDiagnostics::Scope diagnostic{
+        {VideoCommon::StallDiagnostics::Phase::SchedulerExecutionAcquire,
+         "scheduler-drain-caller"}};
     std::scoped_lock el{execution_mutex};
 }
 

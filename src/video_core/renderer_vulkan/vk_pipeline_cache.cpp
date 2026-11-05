@@ -51,10 +51,12 @@
 #include "shader_recompiler/translate_profile.h"
 #include "shader_recompiler/ir_opt/passes.h"
 #include "shader_recompiler/ir_opt/oot_visual_workaround.h"
+#include "shader_recompiler/ir_opt/passes.h"
 #include "shader_recompiler/program_header.h"
 #include "video_core/async_translate.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_debug_control.h"
 #include "video_core/nx2_perf.h"
@@ -791,6 +793,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
                            Common::ThreadPlacement::Background),
     translation_workers(num_translation_threads, "VkPipelineTranslator", {},
                         Common::ThreadPlacement::Background) {
+    VideoCommon::StallDiagnostics::Start();
     const char* tensor_mode = std::getenv("EDEN_NX2_TENSOR");
     const bool tensor_enabled = tensor_mode && std::string_view{tensor_mode} == "fast" &&
                                 device.IsExtCooperativeMatrixSupported();
@@ -6346,6 +6349,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     std::unique_ptr<EmissionBudget::Reservation> reservation, bool libraries_only,
     TranslationRecord* record) try {
     auto hash = key.Hash();
+    VideoCommon::StallDiagnostics::Scope diagnostic{
+        {VideoCommon::StallDiagnostics::Phase::PipelinePrepare, "graphics-prepare", hash}};
     LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);
     const ShaderTranslationKey translation_key{MakeShaderTranslationKey(key, device)};
     std::shared_ptr<const ReusableShaders> shaders{FindReusableShaders(translation_key, envs, hash)};
@@ -7611,6 +7616,9 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
     ShaderPools& pools, const ComputePipelineCacheKey& key, Shader::Environment& env,
     PipelineStatistics* statistics, bool build_in_parallel, bool warm, ComputeKeep* keep) try {
     auto hash = key.Hash();
+    VideoCommon::StallDiagnostics::Scope diagnostic{
+        {VideoCommon::StallDiagnostics::Phase::PipelinePrepare, "compute-prepare",
+         key.unique_hash}};
     if (device.HasBrokenCompute()) {
         if (!warm) {
             LOG_ERROR(Render_Vulkan, "Skipping {:#016x}", hash);

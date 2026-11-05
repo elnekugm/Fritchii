@@ -11,6 +11,7 @@
 #include <ranges>
 #include "common/settings.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
+#include "video_core/stall_diagnostics.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
@@ -86,6 +87,9 @@ void MasterSemaphore::Wait(u64 tick) {
             return;
         }
 
+        VideoCommon::StallDiagnostics::Scope diagnostic{
+            {VideoCommon::StallDiagnostics::Phase::CachedTickWait, "gpu-wait-caller", 0, 0, -1,
+             tick, diagnostic_submitted_tick.load(std::memory_order_relaxed), KnownGpuTick()}};
         u64 last_tick = gpu_tick.load(std::memory_order_relaxed);
         while (gpu_tick.load(std::memory_order_acquire) < tick) {
             gpu_tick.wait(last_tick, std::memory_order_acquire);
@@ -126,6 +130,9 @@ void MasterSemaphore::Wait(u64 tick) {
 
     // If none of the above is hit, fallback to a regular wait
     try {
+        VideoCommon::StallDiagnostics::Scope diagnostic{
+            {VideoCommon::StallDiagnostics::Phase::SemaphoreWait, "gpu-wait-caller", 0, 0, -1, tick,
+             diagnostic_submitted_tick.load(std::memory_order_relaxed), KnownGpuTick()}};
         while (!semaphore.Wait(tick)) {
         }
     } catch (const vk::Exception& exception) {
@@ -144,12 +151,14 @@ void MasterSemaphore::Wait(u64 tick) {
 VkResult MasterSemaphore::SubmitQueue(vk::CommandBuffer& cmdbuf, vk::CommandBuffer& upload_cmdbuf,
                                       VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
                                       u64 host_tick) {
-    if (semaphore) {
-        return SubmitQueueTimeline(cmdbuf, upload_cmdbuf, signal_semaphore, wait_semaphore,
-                                   host_tick);
-    } else {
-        return SubmitQueueFence(cmdbuf, upload_cmdbuf, signal_semaphore, wait_semaphore, host_tick);
+    const VkResult result = semaphore ? SubmitQueueTimeline(cmdbuf, upload_cmdbuf, signal_semaphore,
+                                                            wait_semaphore, host_tick)
+                                      : SubmitQueueFence(cmdbuf, upload_cmdbuf, signal_semaphore,
+                                                         wait_semaphore, host_tick);
+    if (result == VK_SUCCESS && VideoCommon::StallDiagnostics::IsActive()) {
+        diagnostic_submitted_tick.store(host_tick, std::memory_order_relaxed);
     }
+    return result;
 }
 
 static constexpr VkPipelineStageFlags wait_stage_mask = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
@@ -222,6 +231,9 @@ VkResult MasterSemaphore::SubmitQueueTimeline(vk::CommandBuffer& cmdbuf,
             .signalSemaphoreInfoCount = num_signal_semaphores,
             .pSignalSemaphoreInfos = signal_infos.data(),
         };
+        VideoCommon::StallDiagnostics::Scope diagnostic{
+            {VideoCommon::StallDiagnostics::Phase::QueueSubmit, "vulkan-submit-caller", 0, 0, -1,
+             host_tick}};
         return device.GetGraphicsQueue().Submit2(submit_info2);
     }
 
@@ -260,6 +272,9 @@ VkResult MasterSemaphore::SubmitQueueTimeline(vk::CommandBuffer& cmdbuf,
         .pSignalSemaphores = p_signal_sems,
     };
 
+    VideoCommon::StallDiagnostics::Scope diagnostic{
+        {VideoCommon::StallDiagnostics::Phase::QueueSubmit, "vulkan-submit-caller", 0, 0, -1,
+         host_tick}};
     return device.GetGraphicsQueue().Submit(submit_info);
 }
 
@@ -316,7 +331,12 @@ VkResult MasterSemaphore::SubmitQueueFence(vk::CommandBuffer& cmdbuf,
         };
 
         auto fence = GetFreeFence();
-        auto result = device.GetGraphicsQueue().Submit2(submit_info2, *fence);
+        auto result = [&] {
+            VideoCommon::StallDiagnostics::Scope diagnostic{
+                {VideoCommon::StallDiagnostics::Phase::QueueSubmit, "vulkan-submit-caller", 0, 0,
+                 -1, host_tick}};
+            return device.GetGraphicsQueue().Submit2(submit_info2, *fence);
+        }();
 
         if (result == VK_SUCCESS) {
             std::scoped_lock lock{wait_mutex};
@@ -351,7 +371,12 @@ VkResult MasterSemaphore::SubmitQueueFence(vk::CommandBuffer& cmdbuf,
     };
 
     auto fence = GetFreeFence();
-    auto result = device.GetGraphicsQueue().Submit(submit_info, *fence);
+    auto result = [&] {
+        VideoCommon::StallDiagnostics::Scope diagnostic{
+            {VideoCommon::StallDiagnostics::Phase::QueueSubmit, "vulkan-submit-caller", 0, 0, -1,
+             host_tick}};
+        return device.GetGraphicsQueue().Submit(submit_info, *fence);
+    }();
 
     if (result == VK_SUCCESS) {
         std::scoped_lock lock{wait_mutex};
@@ -376,7 +401,13 @@ void MasterSemaphore::WaitThread(std::stop_token token) {
             wait_queue.pop();
         }
 
-        fence.Wait();
+        {
+            VideoCommon::StallDiagnostics::Scope diagnostic{
+                {VideoCommon::StallDiagnostics::Phase::FenceWait, "fence-wait-worker", 0, 0, -1,
+                 host_tick, diagnostic_submitted_tick.load(std::memory_order_relaxed),
+                 KnownGpuTick()}};
+            fence.Wait();
+        }
         fence.Reset();
 
         {

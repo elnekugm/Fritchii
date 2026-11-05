@@ -19,6 +19,7 @@
 #include <optional>
 #include <utility>
 
+#include <ranges>
 #include "common/assert.h"
 #include "common/cityhash.h"
 #include "common/common_types.h"
@@ -27,7 +28,6 @@
 #include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/settings.h"
-#include <ranges>
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/exception.h"
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
@@ -35,10 +35,13 @@
 #include "shader_recompiler/frontend/ampere/program_override.h"
 #include "shader_recompiler/frontend/ampere/program_capture.h"
 #include "shader_recompiler/frontend/ampere/program_address_map.h"
+#include "shader_recompiler/frontend/ampere/program_capture.h"
+#include "shader_recompiler/frontend/ampere/program_override.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_debug_control.h"
 #include "video_core/shader_environment.h"
+#include "video_core/stall_diagnostics.h"
 #include "video_core/texture_cache/format_lookup_table.h"
 #include "video_core/textures/texture.h"
 #include "shader_recompiler/byte_addressed_image.h"
@@ -713,42 +716,54 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
     std::vector<Instruction> native;
     Shader::Ampere::ProgramCaptureState capture;
     NativeInstructionReader reader{*gpu_memory};
-    for (u32 index = 0; index < maximum_instructions; ++index) {
-        const GPUVAddr address = program_base + native_header_size + index * sizeof(Instruction);
-        Instruction instruction;
-        if (!reader.TryRead(address, instruction)) {
-            // Not inside a fully mapped page: check and read this one instruction on its own.
-            if (!gpu_memory->IsFullyMappedRange(address, sizeof(Instruction))) {
-                // The program may end before a branch target past its last EXIT (the capture
-                // can't tell); stop at the mapping's end and let the lowering judge what was
-                // captured.
-                if (!native.empty()) break;
-                throw Shader::RuntimeError("Unmapped native shader instruction at {:#x}", address);
-            }
-            gpu_memory->ReadBlock(address, &instruction, sizeof(instruction));
-        }
-        native.push_back(instruction);
-        const auto status = capture.Observe(instruction, index);
-        if (status == Shader::Ampere::ProgramCaptureState::Result::InvalidTarget &&
-            capture.FallbackEnd() != 0) {
-            // Data past the program's closing self-branch decoded as a branch.
-            native.resize(capture.FallbackEnd());
-            break;
-        }
-        if (status == Shader::Ampere::ProgramCaptureState::Result::InvalidTarget) {
-            if (const char* dir = std::getenv("EDEN_NX2_SHADER_DUMP")) {
-                const auto path = fmt::format("{}/rejected-{:x}.bin", dir, program_base + native_header_size);
-                if (std::FILE* file = std::fopen(path.c_str(), "wb")) {
-                    std::fwrite(native.data(), sizeof(Instruction), std::min<size_t>(native.size(), 4096), file);
-                    std::fclose(file);
+    {
+        StallDiagnostics::Scope diagnostic{{StallDiagnostics::Phase::NativeCapture,
+                                            "native-shader-caller", 0, program_base,
+                                            static_cast<s32>(stage)}};
+        for (u32 index = 0; index < maximum_instructions; ++index) {
+            const GPUVAddr address =
+                program_base + native_header_size + index * sizeof(Instruction);
+            Instruction instruction;
+            if (!reader.TryRead(address, instruction)) {
+                // Not inside a fully mapped page: check and read this one instruction on its own.
+                if (!gpu_memory->IsFullyMappedRange(address, sizeof(Instruction))) {
+                    // The program may end before a branch target past its last EXIT (the capture
+                    // can't tell); stop at the mapping's end and let the lowering judge what was
+                    // captured.
+                    if (!native.empty())
+                        break;
+                    throw Shader::RuntimeError("Unmapped native shader instruction at {:#x}",
+                                               address);
                 }
+                gpu_memory->ReadBlock(address, &instruction, sizeof(instruction));
             }
-            throw Shader::RuntimeError("Native shader branch outside capture bounds at {:#x} +{:#x} [{:08x} {:08x} {:08x} {:08x}]",
-                                       program_base + native_header_size, index * 16,
-                                       instruction.words[0], instruction.words[1],
-                                       instruction.words[2], instruction.words[3]);
+            native.push_back(instruction);
+            const auto status = capture.Observe(instruction, index);
+            if (status == Shader::Ampere::ProgramCaptureState::Result::InvalidTarget &&
+                capture.FallbackEnd() != 0) {
+                // Data past the program's closing self-branch decoded as a branch.
+                native.resize(capture.FallbackEnd());
+                break;
+            }
+            if (status == Shader::Ampere::ProgramCaptureState::Result::InvalidTarget) {
+                if (const char* dir = std::getenv("EDEN_NX2_SHADER_DUMP")) {
+                    const auto path =
+                        fmt::format("{}/rejected-{:x}.bin", dir, program_base + native_header_size);
+                    if (std::FILE* file = std::fopen(path.c_str(), "wb")) {
+                        std::fwrite(native.data(), sizeof(Instruction),
+                                    std::min<size_t>(native.size(), 4096), file);
+                        std::fclose(file);
+                    }
+                }
+                throw Shader::RuntimeError("Native shader branch outside capture bounds at {:#x} "
+                                           "+{:#x} [{:08x} {:08x} {:08x} {:08x}]",
+                                           program_base + native_header_size, index * 16,
+                                           instruction.words[0], instruction.words[1],
+                                           instruction.words[2], instruction.words[3]);
+            }
+            if (status == Shader::Ampere::ProgramCaptureState::Result::Complete)
+                break;
         }
-        if (status == Shader::Ampere::ProgramCaptureState::Result::Complete) break;
     }
     std::vector<u32> verified_traps;
     for (u32 i = 0; i < native.size(); ++i)

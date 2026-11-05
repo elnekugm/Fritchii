@@ -23,6 +23,7 @@
 #include <fmt/format.h>
 
 #include "video_core/renderer_vulkan/pipeline_helper.h"
+#include "video_core/stall_diagnostics.h"
 
 #include "common/bit_field.h"
 #include "common/scope_exit.h"
