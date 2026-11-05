@@ -420,3 +420,105 @@ TEST_CASE("Ocarina TLD4.DC gathers compare against the reference in Rb", "[video
     invalid[0].words[2] = 0x001ecf0e; // .F16 packing with a compare is not proven
     REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
 }
+
+TEST_CASE("Ocarina bindless handles copied into the pair keep their sampler half",
+          "[video_core][ampere]") {
+    // ULDC.64 UR4; USHF.R UR9, UR4, 20; UMOV UR8, UR4; @P2 TEX.ARRAY_2D R43, R20, R39 with the
+    // handle in UR8 (UR9 = UR8 >> 20 on every path).
+    const Instruction load{{0x00047ab9, 0x00004800, 0x00000a00, 0x000fe200}};
+    const Instruction shift{{0x3f097899, 0x00000014, 0x08011604, 0x000fc800}};
+    const Instruction copy{{0x00087c82, 0x00000004, 0x08000000, 0x000fc400}};
+    const Instruction texture{{0x142b2f60, 0xb0000827, 0x089e01ff, 0x000f4200}};
+    const auto handle_moved = [](const auto& lowered) {
+        // MOV R246, R224 (UR8): Maxwell TEX.B reads the handle as its first meta register.
+        return std::any_of(lowered.instructions.begin(), lowered.instructions.end(), [](u64 insn) {
+            return (insn & ~(u64{15} << 16)) == (0x5c98000000000000ULL | 246 | (u64{15} << 39) | (u64{224} << 20));
+        });
+    };
+    const auto lowered = LowerToMaxwell(std::array{load, shift, copy, texture, EXIT});
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    REQUIRE(handle_moved(lowered));
+    // The copy must come from the register the shift read.
+    auto other_source = copy;
+    other_source.words[1] = 6;
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(std::array{load, shift, other_source, texture, EXIT})));
+    // UR4 reloaded between the shift and the copy: UR9 no longer matches it.
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(std::array{load, shift, load, copy, texture, EXIT})));
+    // A predicated copy may not run.
+    auto guarded = copy;
+    guarded.words[0] = 0x00080c82;
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(std::array{load, shift, guarded, texture, EXIT})));
+    // Ocarina's jump tables (BRX) may land anywhere: a UR4 reload before one breaks the proof.
+    const Instruction jump{{0x20007949, 0xffffbaa0, 0x0383ffff, 0x000fea00}};
+    const auto table = LowerToMaxwell(std::array{load, shift, copy, texture, load, jump, EXIT});
+    REQUIRE_FALSE(static_cast<bool>(table));
+    REQUIRE(table.error == "native uniform bindless texture handle provenance");
+}
+
+TEST_CASE("Ocarina task and mesh stage buffer accesses become the nx2 pseudo instruction",
+          "[video_core][ampere]") {
+    // ISBERD.32.ATTR R0, [RZ]; ISBEWR.32.ATTR.SKEW.O [R13 + 0x80], R20; ISBEWR.32.O [RZ + 3], RZ.
+    const std::array<Instruction, 4> code{{
+        {{0xff007923, 0x00000000, 0x00003800, 0x000e2200}},
+        {{0x0d007927, 0x00008014, 0x0000f800, 0x0003e200}},
+        {{0xff007927, 0x000003ff, 0x00008800, 0x000fe600}},
+        EXIT,
+    }};
+    const auto lowered = LowerToMaxwell(code);
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    constexpr u64 pseudo = 0xefc0000000070000ULL;
+    REQUIRE(lowered.instructions[0] == (pseudo | (u64{255} << 8) | (u64{1} << 44) | (u64{1} << 45)));
+    REQUIRE(lowered.instructions[1] == (pseudo | 20 | (u64{13} << 8) | (u64{0x80} << 20) | (u64{1} << 44) |
+                                        (u64{1} << 45) | (u64{1} << 46) | (u64{1} << 47) | (u64{1} << 48)));
+    REQUIRE(lowered.instructions[2] == (pseudo | 255 | (u64{255} << 8) | (u64{3} << 20) | (u64{1} << 44) |
+                                        (u64{1} << 47) | (u64{1} << 48)));
+    // Reads of the output buffer or the map region, region 1 and unknown bits stay rejected.
+    for (const u32 mode : {0x0000b800U, 0x00000800U, 0x00001800U, 0x00013800U}) {
+        auto invalid = code;
+        invalid[0].words[2] = mode;
+        REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
+    }
+    auto unread = code; // a write without .O
+    unread[1].words[2] = 0x00007800;
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(unread)));
+}
+
+TEST_CASE("Ocarina SR_VARIABLE_RATE reads as 1x1 shading", "[video_core][ampere]") {
+    // S2R R6, SR_VARIABLE_RATE (132): MOV32I R6, 0x00010100.
+    const auto lowered = LowerToMaxwell(std::array{Instruction{{0x00067919, 0, 0x00008400, 0x000e2200}}, EXIT});
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    REQUIRE(lowered.instructions[0] == (0x010000000007f006ULL | (u64{0x00010100} << 20)));
+    REQUIRE_FALSE(static_cast<bool>(
+        LowerToMaxwell(std::array{Instruction{{0x00067919, 1, 0x00008400, 0x000e2200}}, EXIT})));
+}
+
+TEST_CASE("Ocarina reciprocal of a negated uniform register", "[video_core][ampere]") {
+    // MUFU.RCP R30, -UR8: MOV R251, R224; LOP32I.XOR R251, R251, 0x80000000; MUFU.RCP R30, R251.
+    const auto lowered = LowerToMaxwell(std::array{Instruction{{0x001e7d08, 0x80000008, 0x08001000, 0x002e2600}}, EXIT});
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    REQUIRE(lowered.instructions[0] == (0x5c98000000070000ULL | 251 | (u64{15} << 39) | (u64{224} << 20)));
+    REQUIRE(lowered.instructions[1] ==
+            (0x0400000000070000ULL | 251 | (u64{251} << 8) | (u64{0x80000000} << 20) | (u64{2} << 53)));
+    REQUIRE(lowered.instructions[2] == (0x5080000000070000ULL | 30 | (u64{251} << 8) | (u64{4} << 20)));
+}
+
+TEST_CASE("Ocarina SHF.R.U64 low word with an immediate shift", "[video_core][ampere]") {
+    // SHF.R.U64 R14, R14, 21, R17: Maxwell SHF.R R14, R14, 21, R17 (U32 clamp, shifts up to 32).
+    const Instruction shift{{0x0e0e7819, 0x00000015, 0x00001211, 0x020fe200}};
+    const auto lowered = LowerToMaxwell(std::array{shift, EXIT});
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    REQUIRE(lowered.instructions[0] ==
+            (0x38f8000000070000ULL | 14 | (u64{14} << 8) | (u64{21} << 20) | (u64{17} << 39)));
+    for (const auto& [amount, mode] : std::array{std::pair{33U, 0x1211U}, std::pair{21U, 0x1a11U},
+                                                 std::pair{21U, 0x11211U}, std::pair{21U, 0x1311U}}) {
+        auto invalid = shift; // a shift past 32, .W, .HI, an unknown bit 72
+        invalid.words[1] = amount;
+        invalid.words[2] = mode;
+        REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(std::array{invalid, EXIT})));
+    }
+}
