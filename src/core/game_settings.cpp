@@ -220,6 +220,13 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
             // while it asked for 1 it ran at half speed), so the clock only changes which it picks.
             OverrideIfGlobal(Settings::values.gpu_clock, Settings::GpuClock::Boost);
             break;
+        case TitleID::OcarinaOfTime:
+            // With reactive flushing every GPU-cached page faults on each guest read and the read
+            // goes through the GPU thread, behind all queued work: the game's CPU frame waited for
+            // the GPU threads (42 fps, neither GPU nor any thread busy). Read traps (reactive
+            // flushing off, as every Switch 2 preset sets) protect only pages the GPU wrote.
+            OverrideIfGlobal(Settings::values.use_reactive_flushing, false);
+            break;
         default:
             break;
     }
