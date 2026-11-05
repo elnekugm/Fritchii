@@ -706,3 +706,30 @@ TEST_CASE("Shadowed registers keep their values across instructions that borrow 
     }
     CHECK(stored == std::vector<u32>{0x1234, 0x5678});
 }
+
+TEST_CASE("Compact software HMMA translates to a TensorMulAdd carrying its depth",
+          "[video_core][ampere][matrix]") {
+    for (const u32 depth : {8U, 16U}) {
+        // HMMA R16, R8, R16, R24, lowered for the SPIR-V helper (compact_matrix).
+        const Instruction hmma{{0x0810723cU, 16, (depth == 16 ? 0x800U : 0U) | 24U, 0}};
+        const auto lowered = LowerToMaxwell(std::array{hmma, EXIT}, false, false,
+                                            Shader::Ampere::TessellationStage::None, true);
+        INFO(lowered.error);
+        REQUIRE(static_cast<bool>(lowered));
+        LoweredEnvironment env{lowered.instructions};
+        Shader::ObjectPool<Shader::IR::Inst> pool;
+        Shader::IR::Block block{pool};
+        const u32 last = static_cast<u32>(lowered.instructions.size() - 1);
+        Shader::Maxwell::Translate(env, &block, 0x50, 0x50 + last * 8 + ((last + 1) / 3) * 8);
+        u32 found = 0;
+        for (const Shader::IR::Inst& inst : block) {
+            if (inst.GetOpcode() != Shader::IR::Opcode::TensorMulAdd) continue;
+            ++found;
+            CHECK(inst.Flags<u32>() == depth);
+            // K=8 reads only A0-A1 and B0: the upper fragments are zero immediates.
+            CHECK(inst.Arg(2).IsImmediate() == (depth == 8));
+            CHECK(inst.Arg(5).IsImmediate() == (depth == 8));
+        }
+        CHECK(found == 1);
+    }
+}
