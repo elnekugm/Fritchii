@@ -631,10 +631,33 @@ TEST_CASE("Ocarina LDG into a uniform mirror register lowers through a shadow ba
     REQUIRE_FALSE(static_cast<bool>(scratch));
     CHECK(scratch.error == "native program uses lowering scratch registers");
     // An instruction whose register operands are not known to the shadowing stays rejected.
-    const Instruction texture{{0xe8e87b66, 0x10000cff, 0x009e01ff, 0x000f4200}};
+    const Instruction texture{{0x01e87b60, 0x30800a04, 0x001e03ff, 0x100f4200}};
     const auto unknown = LowerToMaxwell(std::array{load, texture, EXIT});
     REQUIRE_FALSE(static_cast<bool>(unknown));
     CHECK(unknown.error == "native register shadowing mode");
+}
+
+TEST_CASE("Hyrule Warriors TLD.LZ on a uniform mirror register lowers through a shadow bank",
+          "[video_core][ampere]") {
+    using Shader::Ampere::NativeRegisterCopy;
+    // TLD.LZ R232, R232, 1D (Hyrule Warriors compute): R232 is UR16's mirror; the fetch reads and
+    // writes a borrowed quartet below R180 (R176).
+    const Instruction load{{0xffe47981, 0x00002004, 0x0c1e8b00, 0x000f6800}};
+    const Instruction texture{{0xe8e87b66, 0x10000cff, 0x009e01ff, 0x000f4200}};
+    const auto lowered = LowerToMaxwell(std::array{load, texture, EXIT});
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    const auto& words = lowered.instructions;
+    const auto count = [&](u64 word) { return std::count(words.begin(), words.end(), word); };
+    for (u32 i = 0; i < 4; ++i) {
+        CHECK(count(NativeRegisterCopy(0, 176 + i, 1, 232 + i)) == 1);
+        CHECK(count(NativeRegisterCopy(1, 232 + i, 0, 176 + i)) == 1);
+    }
+    // The texel fetch (Maxwell TLDS) writes and reads the borrowed register.
+    const u64 fetch = FindMaxwell(lowered, 0xda, 56);
+    REQUIRE(fetch != 0);
+    CHECK((fetch & 0xff) == 176);
+    CHECK(((fetch >> 8) & 0xff) == 176);
 }
 
 TEST_CASE("Ocarina UIMAD with an immediate addend multiplies two uniform registers",
