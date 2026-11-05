@@ -39,9 +39,21 @@ TEST_CASE("Ampere reciprocal accepts the captured uniform source form", "[video_
         invalid[0].words[2] = mode;
         REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
     }
+    // A guest R220 (UR4's mirror) destination is shadowed: written to a borrowed register and
+    // copied to IR bank 1, never to the mirror.
     auto alias = code;
     alias[0].words[0] = 0x00dc1d08;
-    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(alias)));
+    const auto shadowed = LowerToMaxwell(alias);
+    REQUIRE(static_cast<bool>(shadowed));
+    REQUIRE(std::find(shadowed.instructions.begin(), shadowed.instructions.end(),
+                      Shader::Ampere::NativeRegisterCopy(1, 220, 0, 176)) !=
+            shadowed.instructions.end());
+    REQUIRE(std::none_of(shadowed.instructions.begin(), shadowed.instructions.end(),
+                         [](u64 word) {
+                             const bool copy = (word >> 48) == 0x5c98 && ((word >> 39) & 15) == 0 &&
+                                               ((word >> 44) & 15) == 10;
+                             return !copy && (word & 0xff) == 220;
+                         }));
 }
 
 TEST_CASE("Ampere clip-state operations remain explicitly unsupported", "[video_core][ampere]") {

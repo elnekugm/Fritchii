@@ -161,6 +161,7 @@ public:
 
     u64 ReadInstruction(u32 address) override;
     u32 TranslateProgramAddress(u32 address) const override;
+    bool HasNativeInstructions() const override;
     u32 ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) override;
     Shader::TextureType ReadTextureType(u32 raw_handle) override;
     Shader::TexturePixelFormat ReadTexturePixelFormat(u32 raw_handle) override;

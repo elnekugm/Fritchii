@@ -662,9 +662,12 @@ TEST_CASE("Ampere uniform bindless TEX protects uniform state and output pairs",
     REQUIRE(lowered.instructions.size() == 5);
     const std::array<Instruction, 4> alias{{{{0x00dc7802, 0, 0xf00, 0}}, sample[0],
                                           sample[1], sample[2]}};
+    // MOV R220 (UR4's mirror) is shadowed into IR bank 1 instead of overwriting the mirror.
     const auto aliased = LowerToMaxwell(alias);
-    REQUIRE_FALSE(static_cast<bool>(aliased));
-    REQUIRE(aliased.error_offset == 0);
+    REQUIRE(static_cast<bool>(aliased));
+    REQUIRE(std::find(aliased.instructions.begin(), aliased.instructions.end(),
+                      Shader::Ampere::NativeRegisterCopy(1, 220, 0, 176)) !=
+            aliased.instructions.end());
 }
 TEST_CASE("Ampere uniform bindless TEX compacts noncontiguous masks and discards unused outputs",
           "[video_core][ampere][bindless_tex]") {

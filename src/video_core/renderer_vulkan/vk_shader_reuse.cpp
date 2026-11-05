@@ -111,6 +111,10 @@ u32 RecordingEnvironment::TranslateProgramAddress(u32 address) const {
     return inner->TranslateProgramAddress(address);
 }
 
+bool RecordingEnvironment::HasNativeInstructions() const {
+    return inner->HasNativeInstructions();
+}
+
 u32 RecordingEnvironment::ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) {
     return AskAndRecord(TranslationReads::Query::CbufValue, cbuf_index, cbuf_offset);
 }

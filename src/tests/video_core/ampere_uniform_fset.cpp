@@ -87,7 +87,8 @@ TEST_CASE("Ampere uniform FSET rejects unknown modes and register aliases",
         REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
     }
     // Detect uniform use before lowering earlier instructions, so they cannot
-    // overwrite the emulated uniform bank through ordinary high GPR accesses.
+    // overwrite the emulated uniform bank through ordinary high GPR accesses
+    // (this one cannot be shadowed either).
     const std::array<Instruction, 3> aliases{{
         {{0x00047312, 216, 0x00301000, 0x000e3000}},
         UniformComparison[0], UniformComparison[1],
@@ -95,6 +96,6 @@ TEST_CASE("Ampere uniform FSET rejects unknown modes and register aliases",
     const auto lowered = LowerToMaxwell(aliases);
     REQUIRE_FALSE(static_cast<bool>(lowered));
     REQUIRE(lowered.error_offset == 0);
-    REQUIRE(lowered.error == "native program uses lowering scratch registers");
+    REQUIRE(lowered.error == "native register shadowing mode");
 }
 } // namespace
