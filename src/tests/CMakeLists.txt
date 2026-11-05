@@ -153,6 +153,7 @@ add_executable(tests
     core/priority_queue.cpp
     core/internal_network/network.cpp
     video_core/aftermath_dump.cpp
+    video_core/oot_visual_workaround.cpp
     video_core/memory_tracker.cpp
     video_core/memory_manager_runs.cpp
     video_core/nx2_perf_draw_binds.cpp
