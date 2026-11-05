@@ -637,6 +637,50 @@ TEST_CASE("Ocarina LDG into a uniform mirror register lowers through a shadow ba
     CHECK(unknown.error == "native register shadowing mode");
 }
 
+TEST_CASE("Ocarina UIMAD with an immediate addend multiplies two uniform registers",
+          "[video_core][ampere]") {
+    // UIMAD UR14, UR14, UR14, 0x3c00 (2f5791cea2a85397 compute): form 2, Rb in bits 64-71.
+    const auto lowered = LowerToMaxwell(
+        std::array{Instruction{{0x0e0e74a4, 0x00003c00, 0x0f8e020e, 0x000fc400}}, EXIT});
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    // The immediate is materialized, the product built with XMAD and written to UR14 (R230).
+    CHECK(std::any_of(lowered.instructions.begin(), lowered.instructions.end(), [](u64 word) {
+        return (word >> 56) == 0x01 && ((word >> 20) & 0xffffffffU) == 0x3c00;
+    }));
+    CHECK(CountMaxwell(lowered, 0x5b, 56) == 3);
+    const u64 merge = FindMaxwell(lowered, 0x5c18, 48);
+    REQUIRE(merge != 0);
+    CHECK((merge & 0xff) == 230);
+    // .X (bit 74) and a negated addend (bit 75) are not lowered.
+    for (const u32 bit : {0x400U, 0x800U}) {
+        CHECK_FALSE(static_cast<bool>(LowerToMaxwell(
+            std::array{Instruction{{0x0e0e74a4, 0x00003c00, 0x0f8e020e | bit, 0x000fc400}}, EXIT})));
+    }
+}
+
+TEST_CASE("Ocarina UIADD3 carries through any uniform predicate", "[video_core][ampere]") {
+    // UIADD3 UR6, UP2, UR15, UR6, URZ then UIADD3.X UR7, URZ, UR7, URZ, UP2 (2f5791cea2a85397).
+    const std::array code{
+        Instruction{{0x0f067290, 0x00000006, 0x0ff5e03f, 0x000fe200}},
+        Instruction{{0x3f077290, 0x00000007, 0x097fe43f, 0x000fe400}},
+        EXIT,
+    };
+    const auto lowered = LowerToMaxwell(code);
+    INFO(lowered.error);
+    REQUIRE(static_cast<bool>(lowered));
+    // UP2 is R239 bit 4: the carry is computed in P4 (ISETP) and merged with P2R, then read back
+    // into P4 (R2P) for the SEL of the .X half.
+    const u64 compare = FindMaxwell(lowered, 0x5b6, 52);
+    REQUIRE(compare != 0);
+    CHECK(((compare >> 3) & 7) == 4);
+    const u64 merge = 0x38e8000000070000ULL | 239 | (u64{239} << 8) | (u64{1U << 4} << 20);
+    CHECK(std::count(lowered.instructions.begin(), lowered.instructions.end(), merge) == 1);
+    const u64 select = FindMaxwell(lowered, 0x5ca0, 48);
+    REQUIRE(select != 0);
+    CHECK(((select >> 39) & 7) == 4);
+}
+
 namespace {
 class LoweredEnvironment final : public Shader::Environment {
 public:
