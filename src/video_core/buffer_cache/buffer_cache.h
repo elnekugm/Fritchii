@@ -1322,6 +1322,8 @@ void BufferCache<P>::BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index,
     if (ssbo_index >= channel_state->compute_storage_buffers.size()) [[unlikely]] {
         LOG_ERROR(HW_GPU, "Storage buffer index {} exceeds maximum storage buffer count",
                   ssbo_index);
+        if (matching && !trace->duplicate_descriptor)
+            trace->binding_state = diag::BindingState::IndexOutOfRange;
         return;
     }
     const bool already_enabled =
@@ -1333,6 +1335,8 @@ void BufferCache<P>::BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index,
                 LOG_WARNING(HW_GPU,
                             "Skipping compute storage buffer {} due to driver limit {}",
                             ssbo_index, max_bindings);
+                if (matching && !trace->duplicate_descriptor)
+                    trace->binding_state = diag::BindingState::LimitSkipped;
                 return;
             }
         }
@@ -1348,6 +1352,8 @@ void BufferCache<P>::BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index,
     const auto& launch_desc = kepler_compute->launch_description;
     if (((launch_desc.const_buffer_enable_mask >> cbuf_index) & 1) == 0) {
         LOG_WARNING(HW_GPU, "Skipped binding SSBO: cbuf index {} is not enabled", cbuf_index);
+        if (matching && !trace->duplicate_descriptor)
+            trace->binding_state = diag::BindingState::Disabled;
         return;
     }
     ASSERT(((launch_desc.const_buffer_enable_mask >> cbuf_index) & 1) != 0);
@@ -2778,6 +2784,15 @@ void BufferCache<P>::BindHostComputeStorageBuffers() {
             // Only the cap leaves writes past the mark; the native mark bounds them.
             MarkWrittenBuffer(binding.buffer_id, binding.device_addr, mark, true,
                               capped_size < size && capped_size <= write_mark_limit);
+        }
+        if (matching && trace->binding_state == diag::BindingState::Descriptor) {
+            trace->binding_state = diag::BindingState::Normal;
+            if (binding.buffer_id)
+                trace->cache_buffer_id = binding.buffer_id.Value();
+            trace->descriptor_offset = offset;
+            trace->descriptor_range = size;
+            if constexpr (NEEDS_BIND_STORAGE_INDEX)
+                trace->descriptor_binding = binding_index;
         }
 
         if constexpr (NEEDS_BIND_STORAGE_INDEX) {
@@ -4508,8 +4523,12 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
                                              bool native_pointer, bool table_pointer,
                                              bool compute) const {
     const GPUVAddr gpu_addr = gpu_memory->Read<u64>(ssbo_addr);
+    if (trace)
+        trace->pointer = gpu_addr;
 
     if (gpu_addr == 0) {
+        if (trace)
+            trace->binding_state = diag::BindingState::NullPointer;
         return NULL_BINDING;
     }
 
