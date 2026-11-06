@@ -36,5 +36,45 @@
   ever larger reallocations on the GPU thread).
 - Page kinds of small GPU pages were changed without the memory manager's lock.
 
-Details, and the switch for each change: `NX2_NOTES.md`, section "Mario Tennis Fever performance
-pass".
+- Add-on RomFS packages embedded in a NUP are now registered with the DLC service and
+  can be opened by the game. Previously the loader recognized these packages but warned
+  that mounting was unsupported.
+- Only DLC belonging to the running application is exposed. When a container carries
+  several versions of a DLC, the newest usable RomFS is selected.
+- Newly packed NUP files preserve the DLC version from the dump directory instead of
+  writing every version as zero. Existing archives are left unchanged.
+- Authentic NACP control metadata is preserved, including edition launch settings and legacy
+  DLC/save ownership. Native edition programs can use their original application's DLC IDs.
+  NUP title and version overrides remain separate from those control bytes.
+- The Switch 2 font-set request returns bounded descriptors into the built-in font memory.
+- Native presentation honors the vertical inversion flag used by Kirby's edition program.
+- LayeredFS mods also apply to NUP and other non-updatable RomFS sources.
+
+### Graphics, shaders and settings
+
+- The graphics quality picker remembers settings per game and includes verified profiles
+  for additional supported games, including the original Kirby and the Forgotten Land.
+- Native uniform shifts, carry/LEA sequences, packed conversions and local-memory
+  addressing handle additional captured instruction patterns.
+- Vulkan uniform reads follow the actual mapped segments of split buffers and preserve
+  holes in sparse backing. Buffer readback can span separate cached buffers.
+- Texture upload and vertex setup paths reduce redundant work. Custom graphics settings
+  survive global settings reloads.
+- Optional bounded diagnostics help attribute host stalls, frame hitches and unmapped
+  GPU reads without enabling those traces for normal play.
+
+### Known limitations
+
+- Native editions need their native executable as well as the DLC assets. A NUP containing
+  only the legacy executable cannot be turned into the native edition by mounting its DLC.
+- Kirby's native edition title screen and DLC delivery were verified with a complete local
+  program/data set. Star-Crossed World unlocks after clearing Natural Plains. Native gameplay
+  still has texture/sampler rendering errors and unsupported cooperative-matrix shaders;
+  the complete expansion has not been validated.
+- Older NUPs whose packer wrote every DLC version as zero cannot recover their original
+  version ordering automatically; repack from the original dump when needed.
+- Kirby Air Riders still has rendering and unsupported compute-shader issues.
+- Yoshi shader corrections do not establish full game compatibility.
+- See the performance and compatibility table in the README for game-specific status.
+
+The PGO profile is unchanged from 0.7.5. Ported fixes retain their source credits in the commits.
