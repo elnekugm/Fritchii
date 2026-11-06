@@ -38,7 +38,7 @@ namespace Tegra {
 namespace {
 // Called only for an already-reported scalar fault with the explicit trace opt-in.
 // Capture host callers here; source_location inside Read's lambda names the lambda itself.
-void LogScalarReadFaultStack() {
+void LogScalarReadFaultStack(u64 address, size_t bits, u32 record) {
 #if (defined(__linux__) || defined(__APPLE__)) && __has_include(<execinfo.h>)
     void* frames[24]{};
     const int count = backtrace(frames, static_cast<int>(std::size(frames)));
@@ -47,14 +47,15 @@ void LogScalarReadFaultStack() {
         const bool resolved = dladdr(frames[index], &info) != 0;
         const auto pc = reinterpret_cast<std::uintptr_t>(frames[index]);
         const auto base = reinterpret_cast<std::uintptr_t>(info.dli_fbase);
-        LOG_ERROR(HW_GPU, "Scalar read fault stack frame={} pc={:#x} module={} offset={:#x} "
-                          "symbol={}",
-                  index, pc, resolved && info.dli_fname ? info.dli_fname : "unknown",
+        LOG_ERROR(HW_GPU, "Scalar read fault stack bits={} fault={:#x} record={} frame={} "
+                          "pc={:#x} module={} offset={:#x} symbol={}",
+                  bits, address, record, index, pc, resolved && info.dli_fname ? info.dli_fname : "unknown",
                   resolved ? pc - base : pc,
                   resolved && info.dli_sname ? info.dli_sname : "unknown");
     }
 #else
-    LOG_ERROR(HW_GPU, "Scalar read fault stack unavailable on this platform");
+    LOG_ERROR(HW_GPU, "Scalar read fault stack unavailable on this platform: bits={} "
+                      "fault={:#x} record={}", bits, address, record);
 #endif
 }
 } // namespace
@@ -442,7 +443,7 @@ T MemoryManager::Read(GPUVAddr addr) const {
                                       "backed_now={} record={}/16",
                               GetID(), addr, sizeof(T), address, classification,
                               translated.has_value(), translated.value_or(0), backed_now, report + 1);
-                    LogScalarReadFaultStack();
+                    LogScalarReadFaultStack(address, sizeof(T) * 8, report + 1);
                     if (report == 15) {
                         LOG_ERROR(HW_GPU, "Scalar read fault trace cap reached for Read{}: "
                                           "additional_faults_not_traced=true", sizeof(T) * 8);
