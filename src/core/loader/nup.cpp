@@ -10,6 +10,7 @@
 #include "common/string_util.h"
 #include "core/core.h"
 #include "core/file_sys/nup_container.h"
+#include "core/file_sys/common_funcs.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/patch_manager.h"
 #include "core/file_sys/romfs.h"
@@ -229,7 +230,11 @@ AppLoader::LoadResult AppLoader_NUP::Load(Kernel::KProcess& process, Core::Syste
 
     // The secondary ExeFS loader resets loose content. Publish the NUP entries only
     // after it succeeds, before the guest can enumerate or open add-on content.
-    FileSys::SetLooseAOC(nup->GetAddonRomFS(base_title_id));
+    // Switch 2 edition programs can retain their Switch 1 application's DLC IDs.
+    const u64 addon_application_id = nacp_file && nacp_file->GetDLCBaseTitleId() != 0
+                                         ? FileSys::GetBaseTitleID(nacp_file->GetDLCBaseTitleId())
+                                         : base_title_id;
+    FileSys::SetLooseAOC(nup->GetAddonRomFS(addon_application_id));
 
     system.GetFileSystemController().RegisterProcess(
         process.GetProcessId(), base_title_id,
@@ -304,10 +309,19 @@ ResultStatus AppLoader_NUP::ReadTitle(std::string& title) {
     if (nacp_file == nullptr) {
         return ResultStatus::ErrorNoControl;
     }
-    title = nacp_file->GetApplicationName();
+    title = title_override.empty() ? nacp_file->GetApplicationName() : title_override;
     if (title.empty()) {
         return ResultStatus::ErrorNoControl;
     }
+    return ResultStatus::Success;
+}
+
+ResultStatus AppLoader_NUP::ReadDisplayVersion(std::string& version) {
+    if (nacp_file == nullptr) {
+        return ResultStatus::ErrorNoControl;
+    }
+    // Keep authentic control bytes intact while honoring the selected update and UI overrides.
+    version = display_version.empty() ? nacp_file->GetVersionString() : display_version;
     return ResultStatus::Success;
 }
 

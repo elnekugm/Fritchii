@@ -165,6 +165,7 @@ static_assert(sizeof(TlvHeader) == TlvHeaderSize);
 
 enum MetaType : u16 {
     MetaNpdm = 0x0001,
+    MetaNacp = 0x0002,
     MetaIcon = 0x0003,
     MetaDisplayVersion = 0x0004,
     MetaTitleName = 0x0005,
@@ -688,6 +689,13 @@ bool NupContainer::ParseMeta(PackageInfo& package) {
         switch (header.type) {
         case MetaNpdm:
             package.npdm.assign(payload, payload + header.size);
+            break;
+        case MetaNacp:
+            // Raw NACP carries edition launch metadata and legacy save/DLC ownership.
+            if (header.size != 0x4000) {
+                return false;
+            }
+            package.nacp.assign(payload, payload + header.size);
             break;
         case MetaIcon:
             package.icon.assign(payload, payload + header.size);

@@ -116,6 +116,7 @@ public:
         u32 meta_size{};
 
         std::vector<u8> npdm;
+        std::vector<u8> nacp;
         std::string title_name;
         std::string publisher;
         std::string source_dump;

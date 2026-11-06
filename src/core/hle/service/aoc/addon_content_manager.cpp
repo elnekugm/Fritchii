@@ -33,8 +33,26 @@ static bool CheckAOCTitleIDMatchesBase(u64 title_id, u64 base) {
     return FileSys::GetBaseTitleID(title_id) == base;
 }
 
+static u64 GetCallerAOCBaseTitleID(Core::System& system, const ClientProcessId& process_id) {
+    const u64 program_id = system.ResolveCallerProgramId(*process_id);
+    if (FileSys::GetBaseTitleID(program_id) ==
+        FileSys::GetBaseTitleID(system.GetApplicationProcessProgramID())) {
+        FileSys::NACP control;
+        if (system.GetAppLoader().ReadControlData(control) == Loader::ResultStatus::Success &&
+            control.GetDLCBaseTitleId() != 0) {
+            return control.GetDLCBaseTitleId();
+        }
+    }
+    const FileSys::PatchManager pm{program_id, system.GetFileSystemController(),
+                                   system.GetContentProvider()};
+    const auto metadata = pm.GetControlMetadata();
+    return metadata.first && metadata.first->GetDLCBaseTitleId() != 0
+               ? metadata.first->GetDLCBaseTitleId()
+               : FileSys::GetAOCBaseTitleID(program_id);
+}
+
 static u64 GetCallerBaseTitleID(Core::System& system, const ClientProcessId& process_id) {
-    return FileSys::GetBaseTitleID(system.ResolveCallerProgramId(*process_id));
+    return FileSys::GetBaseTitleID(GetCallerAOCBaseTitleID(system, process_id));
 }
 
 static std::vector<u64> AccumulateAOCTitleIDs(Core::System& system) {
@@ -104,7 +122,8 @@ Result IAddOnContentManager::CountAddOnContent(Out<u32> out_count, ClientProcess
 
     const auto current = GetCallerBaseTitleID(system, process_id);
 
-    const auto& disabled = Settings::values.disabled_addons[current];
+    const auto& disabled = Settings::values.disabled_addons[
+        FileSys::GetBaseTitleID(system.ResolveCallerProgramId(*process_id))];
     if (std::find(disabled.begin(), disabled.end(), "DLC") != disabled.end()) {
         *out_count = 0;
         R_SUCCEED();
@@ -128,7 +147,8 @@ Result IAddOnContentManager::ListAddOnContent(Out<u32> out_count,
     const auto current = GetCallerBaseTitleID(system, process_id);
 
     std::vector<u32> out;
-    const auto& disabled = Settings::values.disabled_addons[current];
+    const auto& disabled = Settings::values.disabled_addons[
+        FileSys::GetBaseTitleID(system.ResolveCallerProgramId(*process_id))];
     if (std::find(disabled.begin(), disabled.end(), "DLC") == disabled.end()) {
         add_on_content = AccumulateAOCTitleIDs(system);
         for (u64 content_id : add_on_content) {
@@ -155,17 +175,7 @@ Result IAddOnContentManager::GetAddOnContentBaseId(Out<u64> out_title_id,
                                                    ClientProcessId process_id) {
     LOG_DEBUG(Service_AOC, "called. process_id={}", process_id.pid);
 
-    const auto title_id = system.ResolveCallerProgramId(*process_id);
-    const FileSys::PatchManager pm{title_id, system.GetFileSystemController(),
-                                   system.GetContentProvider()};
-
-    const auto res = pm.GetControlMetadata();
-    if (res.first == nullptr) {
-        *out_title_id = FileSys::GetAOCBaseTitleID(title_id);
-        R_SUCCEED();
-    }
-
-    *out_title_id = res.first->GetDLCBaseTitleId();
+    *out_title_id = GetCallerAOCBaseTitleID(system, process_id);
 
     R_SUCCEED();
 }
