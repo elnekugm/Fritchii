@@ -162,14 +162,16 @@ TEST_CASE("Yoshi LEA low-add carry reaches Maxwell IR", "[video_core][yoshi_lea]
 }
 TEST_CASE("Yoshi LEA retains unverified-form guards", "[video_core][yoshi_lea]") {
     for (const auto original : Cases) {
-        for (const auto [word, bit] :
-             std::array{std::pair{0U, 12U}, std::pair{1U, 0U}, std::pair{2U, 0U}, std::pair{2U, 8U},
-                        std::pair{2U, 10U}, std::pair{2U, 11U}, std::pair{2U, 12U},
-                        std::pair{2U, 16U}, std::pair{3U, 0U}}) {
+        for (const auto [word, bit] : std::array{
+                 std::pair{0U, 12U}, std::pair{1U, 0U}, std::pair{2U, 0U}, std::pair{2U, 8U},
+                 std::pair{2U, 10U}, std::pair{2U, 11U}, std::pair{2U, 12U}, std::pair{3U, 0U}}) {
             auto x = original;
             x.words[word] ^= 1U << bit;
             CHECK_FALSE(Ampere::LowerToMaxwell(std::array{x, Exit}));
         }
+        auto hi = original;
+        hi.words[2] ^= 1U << 16;
+        CHECK(Ampere::LowerToMaxwell(std::array{hi, Exit}));
         auto x = original;
         x.words[2] = (x.words[2] & ~(7U << 17)) | (2U << 17);
         CHECK_FALSE(Ampere::LowerToMaxwell(std::array{x, Exit}));
