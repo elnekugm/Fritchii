@@ -39,3 +39,11 @@ TEST_CASE("Nx2 presentation ignores empty or reversed crop metadata", "[nx2_vide
         CHECK(crop.bottom == 2160);
     }
 }
+
+TEST_CASE("Nx2 presentation honors vertical inversion independently of crop flags", "[nx2_video]") {
+    using Service::android::BufferTransformFlags;
+    CHECK(Service::Nx2PresentTransform(0x00040003) == BufferTransformFlags::FlipV);
+    CHECK(Service::Nx2PresentTransform(0x00040000) == BufferTransformFlags::FlipV);
+    CHECK(Service::Nx2PresentTransform(0x00000003) == BufferTransformFlags::Unset);
+    CHECK(Service::Nx2PresentTransform(0) == BufferTransformFlags::Unset);
+}

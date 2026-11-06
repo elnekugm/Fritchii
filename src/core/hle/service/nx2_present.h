@@ -7,8 +7,15 @@
 
 #include "common/common_types.h"
 #include "common/math_util.h"
+#include "core/hle/service/nvnflinger/buffer_transform_flags.h"
 
 namespace Service {
+
+// Native present bit 18 requests vertical inversion (observed in Kirby's edition program).
+inline android::BufferTransformFlags Nx2PresentTransform(u32 flags) {
+    return (flags & (1U << 18)) != 0 ? android::BufferTransformFlags::FlipV
+                                    : android::BufferTransformFlags::Unset;
+}
 
 inline Common::Rectangle<int> Nx2PresentCrop(u32 origin, u32 end, u32 flags, u32 width,
                                             u32 height) {

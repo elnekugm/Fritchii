@@ -2582,7 +2582,7 @@ private:
             // Preference word 6: 1 = RGBA8, 4 = RGB10A2.
             .pixel_format = image_format == 4 ? android::PixelFormat::Rgba1010102
                                               : android::PixelFormat::Rgba8888,
-            .transform_flags = android::BufferTransformFlags::Unset,
+            .transform_flags = Nx2PresentTransform(flags),
             .crop_rect = crop,
             .blending = Tegra::BlendMode::Opaque,
             .native_tiling = true,
