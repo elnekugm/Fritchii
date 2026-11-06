@@ -152,6 +152,8 @@ add_executable(tests
     core/nx2_video_input_queue.cpp
     core/ldn.cpp
     core/internal_network/socket_proxy.cpp
+    core/nup_writer.cpp
+    core/loose_directory.cpp
     core/priority_queue.cpp
     core/internal_network/network.cpp
     video_core/shader_object_pool.cpp

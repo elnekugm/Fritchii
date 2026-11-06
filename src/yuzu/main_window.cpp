@@ -4,6 +4,7 @@
 // Static Qt on macOS doesn't use Vulkan
 // Other platforms do, and thus have conflicting VulkanMemoryAllocator symbols
 #include "core/launch_params.h"
+#include "core/loader/loose_directory.h"
 #if defined(QT_STATICPLUGIN) && !defined(__APPLE__)
 #undef VMA_IMPLEMENTATION
 #endif
@@ -3229,13 +3230,15 @@ void MainWindow::OnMenuLoadFolder() {
         return;
     }
 
-    const QDir dir{dir_path};
-    const QStringList matching_main = dir.entryList({QStringLiteral("main")}, QDir::Files);
-    if (matching_main.size() == 1) {
-        BootGame(dir.path() + QDir::separator() + matching_main[0], ApplicationAppletParameters());
+    const auto main = Loader::ResolveLooseProgramPath(
+        std::filesystem::path{Common::FS::ToU8String(dir_path.toStdString())});
+    if (main) {
+        BootGame(QString::fromStdString(Common::FS::PathToUTF8String(*main)),
+                 ApplicationAppletParameters());
     } else {
         QMessageBox::warning(this, tr("Invalid Directory Selected"),
-                             tr("The directory you have selected does not contain a 'main' file."));
+                             tr("The directory you have selected does not contain a usable extracted "
+                                "game."));
     }
 }
 

@@ -32,7 +32,7 @@
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/submission_package.h"
 #include "core/loader/loader.h"
-#include "core/loader/nx.h"
+#include "core/loader/loose_directory.h"
 
 #include "qt_common/config/uisettings.h"
 #include "qt_common/qt_common.h"
@@ -190,6 +190,13 @@ QString FormatGameName(const std::string& physical_name) {
 // <game>/updates/<title id>/exefs/main) have no control data, so they are named after their
 // game folder.
 QString LooseExeFSName(const std::string& physical_name) {
+    const std::filesystem::path path{Common::FS::ToU8String(physical_name)};
+    if (const auto game_root = Loader::LooseGameRootFromMain(path)) {
+        if (const auto selected = Loader::ResolveLooseProgramPath(*game_root);
+            selected && GameListDiscovery::IsUpgradeProgramMain(*selected)) {
+            return QString::fromStdString(Common::FS::PathToUTF8String(game_root->filename()));
+        }
+    }
     QDir dir = QFileInfo(QString::fromStdString(physical_name)).dir();
     if (dir.dirName().compare(QStringLiteral("exefs"), Qt::CaseInsensitive) != 0 || !dir.cdUp()) {
         return {};

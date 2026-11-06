@@ -32,6 +32,7 @@
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/fs_filesystem.h"
 #include "core/file_sys/nup_container.h"
+#include "core/loader/loose_directory.h"
 #include "core/file_sys/patch_manager.h"
 #include "core/file_sys/program_metadata.h"
 #include "core/file_sys/registered_cache.h"
@@ -118,6 +119,9 @@ FileSys::VirtualFile GetGameFileFromPath(const FileSys::VirtualFilesystem& vfs,
     }
 
     if (Common::FS::IsDir(path)) {
+        if (const auto main = Loader::ResolveLooseProgramPath(std::filesystem::path{Common::FS::ToU8String(path)})) {
+            return vfs->OpenFile(Common::FS::PathToUTF8String(*main), FileSys::OpenMode::Read);
+        }
         return vfs->OpenFile(path + "/main", FileSys::OpenMode::Read);
     }
 

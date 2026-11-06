@@ -32,6 +32,7 @@
 #include "core/file_sys/nup_container.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/loader/deconstructed_rom_directory.h"
+#include "core/loader/loose_directory.h"
 
 #include <fmt/format.h>
 
@@ -132,36 +133,25 @@ std::optional<u64> ParseDecimal(const std::string& name) {
     return value;
 }
 
-// The exefs folder a dump boots from: the newest updates/<version>, else base, else the root.
-// Each must hold main, main.npdm and a romfs folder next to it or under base.
+// Whether the selected program is a variant from the multi-program edition layout.
+bool IsProgramVariant(const fs::path& main) {
+    const auto package = main.parent_path().parent_path();
+    const auto index = ToUtf8(package.filename());
+    return (index == "0" || index == "1") &&
+           Lower(ToUtf8(package.parent_path().filename())) == "program";
+}
+
+// Share the loose loader's program selection so packing cannot silently select the legacy
+// executable when a usable edition program is present.
 bool HasBootableExeFS(const fs::path& root) {
-    const auto bootable = [](const fs::path& exefs) {
-        return !exefs.empty() && IsFile(exefs / "main") && IsFile(exefs / "main.npdm");
-    };
-    fs::path exefs;
-    std::optional<u64> best_version;
-    if (const auto updates = FindDirectory(root, "updates"); !updates.empty()) {
-        std::error_code ec;
-        for (const auto& entry : fs::directory_iterator(updates, ec)) {
-            const auto version = ParseDecimal(ToUtf8(entry.path().filename()));
-            const auto candidate = FindDirectory(entry.path(), "exefs");
-            if (version && bootable(candidate) && (!best_version || *version > *best_version)) {
-                best_version = version;
-                exefs = candidate;
-            }
-        }
-    }
-    const auto base = FindDirectory(root, "base");
-    if (exefs.empty()) {
-        exefs = FindDirectory(base, "exefs");
-    }
-    if (exefs.empty()) {
-        exefs = FindDirectory(root, "exefs");
-    }
-    if (!bootable(exefs)) {
+    const auto selected = Loader::ResolveLooseProgramPath(root);
+    if (!selected || !IsFile(*selected) || !IsFile(selected->parent_path() / "main.npdm")) {
         return false;
     }
-    return !FindDirectory(exefs.parent_path(), "romfs").empty() ||
+    const auto package = selected->parent_path().parent_path();
+    const auto base = FindDirectory(root, "base");
+    return !FindDirectory(package, "romfs").empty() ||
+           (IsProgramVariant(*selected) && !FindDirectory(root, "dlc").empty()) ||
            !FindDirectory(base, "romfs").empty();
 }
 
@@ -558,29 +548,13 @@ public:
         const auto base = FindDirectory(dump_root, "base");
         const auto updates = FindDirectory(dump_root, "updates");
         const auto dlc = FindDirectory(dump_root, "dlc");
+        const auto selected = Loader::ResolveLooseProgramPath(dump_root);
+        const bool program_variant = selected && IsProgramVariant(*selected);
 
         std::optional<u64> base_title_id;
-        std::error_code ec;
         if (program_variant) {
             // A legacy base/update must not shadow the native edition's selected executable.
-            const auto program = selected->parent_path().parent_path();
-            base_title_id = AddPackage(KindBase, program, 0, {});
-            // The other programs follow as further base packages, keyed by program index:
-            // Switch 2 Editions read the original game data of program 0.
-            std::vector<std::pair<u64, fs::path>> siblings;
-            for (const auto& sibling : fs::directory_iterator(program.parent_path(), ec)) {
-                const auto index = ParseDecimal(ToUtf8(sibling.path().filename()));
-                const auto romfs = FindDirectory(sibling.path(), "romfs");
-                if (index && *index <= 0xFF && sibling.path() != program && !romfs.empty() &&
-                    DirHasFiles(romfs)) {
-                    siblings.emplace_back(*index, sibling.path());
-                }
-            }
-            std::ranges::sort(siblings);
-            for (const auto& [index, path] : siblings) {
-                AddPackage(KindBase, path, 0, {});
-                plan.packages.back().title_id = GetBaseTitleIDWithProgramIndex(*base_title_id, index);
-            }
+            base_title_id = AddPackage(KindBase, selected->parent_path().parent_path(), 0, {});
         } else if (!base.empty() && HasContent(base)) {
             base_title_id = AddPackage(KindBase, base, 0, {});
         } else if (updates.empty() && HasContent(dump_root)) {
@@ -588,6 +562,7 @@ public:
         }
 
         std::vector<std::pair<u64, fs::path>> versions;
+        std::error_code ec;
         if (!program_variant && !updates.empty()) {
             for (const auto& entry : fs::directory_iterator(updates, ec)) {
                 const auto version = ParseDecimal(ToUtf8(entry.path().filename()));
@@ -1509,17 +1484,11 @@ std::optional<fs::path> DumpRootFromMain(const fs::path& main) {
     if (Lower(ToUtf8(exefs.filename())) != "exefs") {
         return std::nullopt;
     }
-    auto root = exefs.parent_path();
-    const auto name = Lower(ToUtf8(root.filename()));
-    if (name == "base") {
-        root = root.parent_path();
-    } else if (ParseDecimal(name) && Lower(ToUtf8(root.parent_path().filename())) == "updates") {
-        root = root.parent_path().parent_path();
-    }
-    if (!IsLooseDump(root)) {
+    const auto root = Loader::LooseGameRootFromMain(exefs / "main");
+    if (!root || !IsLooseDump(*root)) {
         return std::nullopt;
     }
-    return root;
+    return *root;
 }
 
 Metadata ProbeMetadata(const fs::path& dump_root) {
@@ -1573,6 +1542,12 @@ Metadata ProbeMetadata(const fs::path& dump_root) {
             }
         }
     };
+    if (const auto selected = Loader::ResolveLooseProgramPath(dump_root);
+        selected && IsProgramVariant(*selected)) {
+        probe(selected->parent_path().parent_path(),
+              "program " + ToUtf8(selected->parent_path().parent_path().filename()), true);
+        return result;
+    }
     for (const auto& [version, dir] : update_dirs) {
         probe(dir, "update " + std::to_string(version), false);
     }

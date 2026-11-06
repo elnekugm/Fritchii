@@ -5,9 +5,12 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#include "core/loader/loose_directory.h"
 
 namespace GameListDiscovery {
 
@@ -24,6 +27,22 @@ inline bool IsExeFS(const std::filesystem::path& path) {
            std::filesystem::is_regular_file(path / "main.npdm", ec);
 }
 
+// Only edition layouts collapse sibling executables; legacy base/update entries stay distinct.
+inline bool IsUpgradeProgramMain(const std::filesystem::path& main) {
+    const auto equals = [](const std::filesystem::path& path, std::u8string_view expected) {
+        auto name = path.filename().u8string();
+        std::transform(name.begin(), name.end(), name.begin(), [](char8_t c) {
+            return static_cast<char8_t>(std::tolower(static_cast<unsigned char>(c)));
+        });
+        return name == expected;
+    };
+    const auto package = main.parent_path().parent_path();
+    return equals(main, u8"main") && equals(main.parent_path(), u8"exefs") &&
+           (equals(package, u8"0") || equals(package, u8"1")) &&
+           equals(package.parent_path(), u8"program") &&
+           equals(package.parent_path().parent_path().parent_path(), u8"upgrade");
+}
+
 template <typename Supported, typename Stopped>
 Result Discover(const std::filesystem::path& root, bool deep, Supported supported,
                 Stopped stopped) {
@@ -31,14 +50,31 @@ Result Discover(const std::filesystem::path& root, bool deep, Supported supporte
     Result result;
     std::unordered_set<fs::path> files;
     std::unordered_set<fs::path> directories;
-    const auto add_file = [&](const fs::path& path) {
-        if (files.insert(path).second) {
-            result.files.push_back(path);
-        }
-    };
     const auto watch = [&](const fs::path& path) {
         if (directories.insert(path).second) {
             result.directories.push_back(path);
+        }
+    };
+    const auto add_file = [&](const fs::path& path) {
+        fs::path chosen = path;
+        if (path.filename() == "main") {
+            if (const auto game_root = Loader::LooseGameRootFromMain(path)) {
+                if (const auto preferred = Loader::ResolveLooseProgramPath(*game_root);
+                    preferred && IsUpgradeProgramMain(*preferred)) {
+                    chosen = *preferred;
+                    // Watch the storage levels too, so a newly added program is discovered.
+                    for (auto directory = chosen.parent_path(); !directory.empty();
+                         directory = directory.parent_path()) {
+                        watch(directory);
+                        if (directory == *game_root || directory == directory.parent_path()) {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if (files.insert(chosen).second) {
+            result.files.push_back(std::move(chosen));
         }
     };
     const auto probe = [&](const fs::path& path) {
@@ -48,6 +84,11 @@ Result Discover(const std::filesystem::path& root, bool deep, Supported supporte
         }
     };
     const auto probe_layouts = [&](const fs::path& path) {
+        if (const auto preferred = Loader::ResolveLooseProgramPath(path);
+            preferred && IsUpgradeProgramMain(*preferred)) {
+            probe(preferred->parent_path());
+            return;
+        }
         for (const auto& content : {path, path / "base"}) {
             probe(content / "exefs");
             const auto updates = content / "updates";
