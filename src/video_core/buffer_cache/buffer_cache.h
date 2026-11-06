@@ -2053,7 +2053,9 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
     const Binding& binding = channel_state->uniform_buffers[stage][index];
     const DAddr device_addr = binding.device_addr;
     const u32 size = (std::min)(binding.size, (*channel_state->uniform_buffer_sizes)[stage][index]);
-    if (gpu_memory != nullptr && !gpu_memory->UsesNativeTiling() && binding.size == 0x10000 &&
+    // OpenGL may use fast-subdata/PABO instead of a mapped stream; keep its existing route.
+    if (!IS_OPENGL && gpu_memory != nullptr && !gpu_memory->UsesNativeTiling() &&
+        binding.size == 0x10000 &&
         (*channel_state->uniform_buffer_sizes)[stage][index] == 0x10000) {
         auto& mapping = channel_state->legacy_uniform_eligibility[stage][index];
         const auto segments =
