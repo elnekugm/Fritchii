@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include <array>
 #include <unordered_map>
 #include <catch2/catch_test_macros.hpp>
@@ -124,6 +125,7 @@ void Execute(const std::vector<u64>& words, std::array<u32, 256>& regs,
         auto op = w >> 48;
         if (op == 0xe300)
             break;
+        REQUIRE(((w >> 16) & 15) == 7); // The modeled execution is PT-only.
         ObjectPool<IR::Inst> pool;
         IR::Block block{pool};
         Maxwell::TranslatorVisitor v{env, block};
@@ -161,40 +163,45 @@ TEST_CASE("captured uniform carry pair preserves both predicate banks",
                                                     {{0, 1, 0xffffffffU}},
                                                     {{0xffffffffU, 0xffffffffU, 2}}}};
     for (auto in : inputs)
-        for (unsigned mask = 0; mask < 128; ++mask) {
-            std::array<u32, 256> r{};
-            r[227] = in[0];
-            r[220] = in[1];
-            r[229] = in[2];
-            r[226] = 0xffffffffU;
-            r[221] = 0x11223344;
-            r[232] = 0x55667788;
-            r[239] = 0xa5a55a95U;
-            std::array<bool, 7> p{};
-            for (unsigned i = 0; i < 7; ++i)
-                p[i] = (mask >> i) & 1;
-            auto old = p;
-            u32 old_up = r[239];
-            const u64 ab = u64{in[0]} + in[1];
-            const u64 abc = u64{u32(ab)} + in[2];
-            u32 c1 = ab >> 32, c2 = abc >> 32;
-            Execute(low.instructions, r, p);
-            CHECK(r[227] == u32(abc));
-            CHECK(r[239] == ((old_up & ~0x60U) | (c1 << 5) | (c2 << 6)));
-            CHECK(p == old);
-            // Exercise an ordinary P1-guarded selection between the two uniform ops.
-            r[10] = 0x1234;
-            r[11] = 0x5678;
-            const u64 select =
-                0x5ca0000000070000ULL | 12 | (u64{10} << 8) | (u64{11} << 20) | (u64{1} << 39);
-            Execute({select}, r, p);
-            CHECK(r[12] == (((mask >> 1) & 1) ? 0x1234U : 0x5678U));
-            CHECK(p == old);
-            Execute(high.instructions, r, p);
-            CHECK(r[226] == u32(u64{0xffffffffU} + 0x11223344U + 0x55667788U + c1 + c2));
-            CHECK(p == old);
-            CHECK(r[239] == ((old_up & ~0x60U) | (c1 << 5) | (c2 << 6)));
-        }
+        for (u32 initial_up : {0xa5a55a95U, 0xa5a55ab5U, 0xa5a55ad5U, 0xa5a55af5U})
+            for (unsigned mask = 0; mask < 128; ++mask) {
+                std::array<u32, 256> r{};
+                r[227] = in[0];
+                r[220] = in[1];
+                r[229] = in[2];
+                r[226] = 0xffffffffU;
+                r[221] = 0x11223344;
+                r[232] = 0x55667788;
+                r[239] = initial_up;
+                std::array<bool, 7> p{};
+                for (unsigned i = 0; i < 7; ++i)
+                    p[i] = (mask >> i) & 1;
+                auto old = p;
+                u32 old_up = r[239];
+                const u64 ab = u64{in[0]} + in[1];
+                const u64 abc = u64{u32(ab)} + in[2];
+                u32 c1 = ab >> 32, c2 = abc >> 32;
+                Execute(low.instructions, r, p);
+                CHECK(r[227] == u32(abc));
+                CHECK(r[239] == ((old_up & ~0x60U) | (c1 << 5) | (c2 << 6)));
+                CHECK(p == old);
+                // Exercise an ordinary P1-guarded selection between the two uniform ops.
+                r[10] = 0x1234;
+                r[11] = 0x5678;
+                const u64 select =
+                    0x5ca0000000070000ULL | 12 | (u64{10} << 8) | (u64{11} << 20) | (u64{1} << 39);
+                Execute({select}, r, p);
+                CHECK(r[12] == (((mask >> 1) & 1) ? 0x1234U : 0x5678U));
+                CHECK(p == old);
+                Execute(high.instructions, r, p);
+                CHECK(r[226] == u32(u64{0xffffffffU} + 0x11223344U + 0x55667788U + c1 + c2));
+                const u64 expected = ((u64{0xffffffffU} << 32) | in[0]) +
+                                     ((u64{0x11223344U} << 32) | in[1]) +
+                                     ((u64{0x55667788U} << 32) | in[2]);
+                CHECK(((u64{r[226]} << 32) | r[227]) == expected);
+                CHECK(p == old);
+                CHECK(r[239] == ((old_up & ~0x60U) | (c1 << 5) | (c2 << 6)));
+            }
 }
 TEST_CASE("uniform carry inputs and destination aliases", "[yoshi_uniform_carry_ir]") {
     constexpr Instruction end{{0x794d, 0, 0x03800000, 0}};
