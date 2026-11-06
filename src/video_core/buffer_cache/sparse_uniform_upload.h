@@ -12,7 +12,7 @@
 
 namespace VideoCommon {
 
-// Native indirect uniform banks describe an upper bound, including device pages without backing.
+// Eligible indirect uniform banks describe an upper bound, including device pages without backing.
 // Preserve that whole descriptor range: holes read zero, and mapped pages after holes still count.
 // Other buffer reads retain their strict unmapped-memory diagnostics.
 template <class Memory>
@@ -60,6 +60,107 @@ struct SparseUniformReadView {
     void ReadBlockUnsafe(u64 address, void* destination, size_t size) {
         ReadSparseUniformMemory(memory, address, std::span{static_cast<u8*>(destination), size});
     }
+};
+
+// Legacy banks qualify only when the guest bound the whole indirect bank and every GPU page
+// maps continuously to the device range retained by the binding. Device backing may still be
+// sparse; a missing/discontinuous GPU mapping is a different error and retains strict reads.
+template <class GpuMemory>
+bool IsLegacySparseUniformBank(GpuMemory& memory, u64 gpu_address, u64 device_address,
+                               u32 descriptor_size, u32 shader_size) {
+    constexpr u32 bank_size = 0x10000;
+    if (descriptor_size != bank_size || shader_size != bank_size || gpu_address == 0 ||
+        device_address == 0) {
+        return false;
+    }
+    const auto translated = memory.GpuToCpuAddress(gpu_address);
+    return translated && *translated == device_address &&
+           memory.IsContinuousRange(gpu_address, bank_size);
+}
+
+// One cache per uniform slot avoids walking the GPU page table on every draw. Both positive
+// and negative answers are reusable until a mapping changes, the owner changes, or the binding
+// moves. Descriptor-size checks stay outside the cache so a short bank can never reuse admission.
+class LegacyUniformEligibilityCache {
+public:
+    template <class GpuMemory>
+    bool IsEligible(GpuMemory& memory, u64 gpu_address, u64 device_address, u32 descriptor_size,
+                    u32 shader_size) {
+        if (descriptor_size != 0x10000 || shader_size != 0x10000 || gpu_address == 0 ||
+            device_address == 0) {
+            return false;
+        }
+        const u64 generation = memory.GpuMappingGeneration();
+        if (owner == &memory && gpu == gpu_address && device == device_address &&
+            mapping_generation == generation) {
+            return eligible;
+        }
+        const bool result = IsLegacySparseUniformBank(memory, gpu_address, device_address,
+                                                      descriptor_size, shader_size);
+        owner = &memory;
+        gpu = gpu_address;
+        device = device_address;
+        mapping_generation = generation;
+        eligible = result;
+        return result;
+    }
+
+private:
+    const void* owner{};
+    u64 gpu{};
+    u64 device{};
+    u64 mapping_generation{};
+    bool eligible{};
+};
+
+// Device mappings, unlike CPU writes, do not dirty retained buffer-cache bytes. Scan backing
+// once per mapping epoch, including the aligned edge pages that cached uploads also read.
+// Fully backed legacy banks keep ordinary dirty tracking; banks that contained holes refresh
+// after each mapping change, including after all holes acquire backing. There is no frame refresh.
+class LegacyUniformUploadTracker {
+public:
+    struct Bank {
+        u64 inspected_generation{~u64{0}};
+        u64 refreshed_generation{~u64{0}};
+        u64 diagnostic_generation{~u64{0}};
+        u32 mapped_pages{};
+        u32 hole_pages{};
+        bool previously_sparse{};
+
+        bool NeedsRefresh(u64 generation) const {
+            return previously_sparse && refreshed_generation != generation;
+        }
+    };
+
+    template <class Memory>
+    Bank& Inspect(Memory& memory, u64 address, u64 generation) {
+        static_assert(Memory::AS_BITS < 64);
+        constexpr u64 address_limit = u64{1} << Memory::AS_BITS;
+        constexpr u64 page_size = 0x1000;
+        auto& bank = banks[address];
+        if (bank.inspected_generation == generation) {
+            return bank;
+        }
+        bank.inspected_generation = generation;
+        bank.mapped_pages = 0;
+        bank.hole_pages = 0;
+        // The descriptor is exactly 64 KiB. Subtraction bounds the final unaligned page without
+        // permitting an overflowing end address or querying the device table out of bounds.
+        for (u64 offset = 0; offset < 0x10000 + (address & (page_size - 1)); offset += page_size) {
+            const u64 page = address & ~(page_size - 1);
+            if (page < address_limit && offset < address_limit - page &&
+                memory.template GetPointer<u8>(page + offset)) {
+                ++bank.mapped_pages;
+            } else {
+                ++bank.hole_pages;
+            }
+        }
+        bank.previously_sparse |= bank.hole_pages != 0;
+        return bank;
+    }
+
+private:
+    std::unordered_map<u64, Bank> banks;
 };
 
 // Each bank is refreshed once per frame, and again if device mappings change in that frame.

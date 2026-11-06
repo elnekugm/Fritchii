@@ -21,6 +21,7 @@
 #include <vector>
 #include <fmt/ranges.h>
 
+#include "common/hitch_diagnostic.h"
 #include "common/range_sets.inc"
 #include "common/unmapped_read_diagnostic.h"
 #include "video_core/buffer_cache/buffer_cache_base.h"
@@ -1069,6 +1070,7 @@ void BufferCache<P>::BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr
     }
     current = Binding{
         .device_addr = *device_addr,
+        .gpu_addr = gpu_addr,
         .size = size,
         .buffer_id = BufferId{},
     };

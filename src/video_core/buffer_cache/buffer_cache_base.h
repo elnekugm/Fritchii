@@ -147,6 +147,8 @@ public:
     Binding index_buffer;
     std::array<Binding, NUM_VERTEX_BUFFERS> vertex_buffers;
     std::array<std::array<Binding, NUM_GRAPHICS_UNIFORM_BUFFERS>, NUM_STAGES> uniform_buffers;
+    std::array<std::array<LegacyUniformEligibilityCache, NUM_GRAPHICS_UNIFORM_BUFFERS>, NUM_STAGES>
+        legacy_uniform_eligibility;
     std::array<std::array<Binding, NUM_STORAGE_BUFFERS>, NUM_STAGES> storage_buffers;
     std::array<std::array<TextureBufferBinding, NUM_TEXTURE_BUFFERS>, NUM_STAGES> texture_buffers;
     std::array<Binding, NUM_TRANSFORM_FEEDBACK_BUFFERS> transform_feedback_buffers;
