@@ -7,7 +7,9 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
+#include <limits>
 #include <span>
 
 #include "common/alignment.h"
@@ -257,6 +259,10 @@ void UnswizzleTexture(std::span<u8> output, std::span<const u8> input, u32 bytes
                       u32 width, u32 height, u32 depth, u32 block_height, u32 block_depth,
                       u32 stride_alignment, bool native_tiling) {
     const u32 stride = Common::AlignUpLog2(width, stride_alignment) * bytes_per_pixel;
+    if (TryUnswizzleGobs2D(output, input, bytes_per_pixel, width, height, depth, block_height,
+                            block_depth, stride, native_tiling)) {
+        return;
+    }
     const u32 new_bpp = (std::min)(4U, static_cast<u32>(std::countr_zero(width * bytes_per_pixel)));
     width = (width * bytes_per_pixel) >> new_bpp;
     bytes_per_pixel = 1U << new_bpp;
