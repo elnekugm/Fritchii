@@ -237,7 +237,7 @@ TEST_CASE("Legacy uniform linear-bank guard requires an exact descriptor and cur
     CHECK_FALSE(eligible(0x10001));
     CHECK_FALSE(eligible(0x10000, 0xffff));
     gpu.continuous = false;
-    CHECK_FALSE(eligible()); // A full but noncontiguous GPU mapping must retain strict reads.
+    CHECK_FALSE(eligible()); // A split bank cannot be mistaken for one linear device range.
     gpu.continuous = true;
     gpu.mapped = false;
     CHECK_FALSE(eligible());
@@ -297,8 +297,8 @@ struct SplitGpuMapping {
     bool fully_mapped{true};
     bool virtual_gap{};
     mutable size_t range_queries{};
-    static constexpr u32 FirstSize = 0xc600;
-    static constexpr u32 SecondSize = 0x3a00;
+    static constexpr u32 FirstSize = 0xf600;
+    static constexpr u32 SecondSize = 0xa00;
     u64 GpuMappingGeneration() const {
         return generation;
     }
@@ -323,37 +323,44 @@ struct SplitGpuMapping {
     }
 };
 
-struct StrictSegmentMemory : SparseMemoryImpl<18> {
+struct SegmentMemory : SparseMemoryImpl<18> {
     std::vector<std::string> events;
-    void ReadBlockUnsafe(u64 address, void* destination, size_t size) {
-        events.emplace_back("read");
-        REQUIRE(address < bytes.size());
-        REQUIRE(size <= bytes.size() - address);
-        auto* output = static_cast<u8*>(destination);
-        while (size != 0) {
-            const size_t count = (std::min)(size, PageSize - address % PageSize);
-            const u8* pointer = GetPointer<u8>(address);
-            REQUIRE(pointer != nullptr); // A wrong linear-tail read must fail, never become zero.
-            std::memcpy(output, pointer, count);
-            output += count;
-            address += count;
-            size -= count;
-        }
+    template <class T>
+    T* GetPointer(u64 address) {
+        events.emplace_back("source");
+        return SparseMemoryImpl<18>::GetPointer<T>(address);
+    }
+    const u8* GetSpan(u64 address, size_t size) {
+        events.emplace_back("source");
+        return SparseMemoryImpl<18>::GetSpan(address, size);
     }
 };
+
+std::vector<std::string> ControlEvents(const SegmentMemory& memory) {
+    std::vector<std::string> result;
+    for (const auto& event : memory.events) {
+        if (event != "source") {
+            result.push_back(event);
+        }
+    }
+    return result;
+}
 } // namespace
 
 TEST_CASE("Split legacy uniform banks gather actual device segments and download GPU-owned bytes",
           "[video_core][sparse_uniform]") {
     SplitGpuMapping gpu;
-    StrictSegmentMemory memory;
+    SegmentMemory memory;
     for (size_t page = 1; page < 14; ++page) {
         memory.Map(page, static_cast<int>(page));
     }
     for (size_t page = 33; page <= 36; ++page) {
         memory.Map(page, static_cast<int>(page + 4));
     }
-    // The first segment's fictitious linear suffix (pages 14..17) is deliberately unmapped.
+    // Wonder geometry: the ACTUAL first segment contains three backing holes (pages 14..16).
+    // Its later virtual suffix lives at another device address, not the poisoned linear tail.
+    memory.Map(17, 18);
+    std::fill_n(memory.bytes.begin() + 18 * memory.PageSize, memory.PageSize, 0xd3);
     VideoCommon::LegacyUniformEligibilityCache cache;
     std::vector<u8> descriptor;
     bool gpu_modified = true;
@@ -385,13 +392,26 @@ TEST_CASE("Split legacy uniform banks gather actual device segments and download
                    std::span<const u8>{descriptor}.subspan(SplitGpuMapping::FirstSize));
     };
     bind();
-    REQUIRE(memory.events == std::vector<std::string>{"download", "allocate", "read", "read"});
+    REQUIRE(ControlEvents(memory) == std::vector<std::string>{"download", "allocate"});
     CHECK(downloads == 1);
     CHECK(descriptor[SplitGpuMapping::FirstSize] == 0x7e);
+    const size_t hole_offset = 14 * memory.PageSize - gpu.first;
+    CHECK(std::all_of(descriptor.begin() + hole_offset,
+                      descriptor.begin() + SplitGpuMapping::FirstSize,
+                      [](u8 value) { return value == 0; }));
+    CHECK(descriptor[SplitGpuMapping::FirstSize] != 0xd3); // Never copy fictitious linear tail.
+    memory.Map(14, 55); // Backing installed inside an actual translated segment, no GPU map change.
+    *memory.GetPointer<u8>(14 * memory.PageSize) = 0xb4;
+    bind();
+    CHECK(descriptor[hole_offset] == 0xb4);
+    memory.Map(14, 56); // A later backing remap must replace retained bytes, without a CPU write.
+    *memory.GetPointer<u8>(14 * memory.PageSize) = 0xd7;
+    bind();
+    CHECK(descriptor[hole_offset] == 0xd7);
     REQUIRE(gpu.range_queries == 1);
     memory.events.clear();
     bind();
-    CHECK(memory.events == std::vector<std::string>{"allocate", "read", "read"});
+    CHECK(ControlEvents(memory) == std::vector<std::string>{"allocate"});
     CHECK(downloads == 1);
     CHECK(gpu.range_queries == 1); // The GPU segment layout is reused across stable draws.
     memory.Map(33,
@@ -436,7 +456,7 @@ TEST_CASE("Split legacy uniform admission rejects virtual holes, stale bindings 
 
 TEST_CASE("Malformed split uniform layouts cannot trigger downloads or partial descriptor reads",
           "[video_core][sparse_uniform]") {
-    StrictSegmentMemory memory;
+    SegmentMemory memory;
     size_t callbacks{};
     const auto attempt = [&](std::span<const VideoCommon::LegacyUniformSegment> segments) {
         return VideoCommon::StreamSplitUniformBank(
