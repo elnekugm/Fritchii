@@ -3,9 +3,12 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <limits>
 #include <optional>
 #include <span>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -368,4 +371,180 @@ TEST_CASE(
     gpu.gpu += 0x10000; // Moving this slot to another GPU bank invalidates the cached key, too.
     CHECK(cache.IsEligible(gpu, gpu.gpu, gpu.device, 0x10000, 0x10000));
     CHECK(gpu.translation_checks == previous_checks + 1);
+}
+
+namespace {
+struct SplitGpuMapping {
+    u64 gpu{0x40001a00};
+    u64 first{0x1a00};
+    u64 second{0x21000};
+    u64 generation{1};
+    bool fully_mapped{true};
+    bool virtual_gap{};
+    mutable size_t range_queries{};
+    static constexpr u32 FirstSize = 0xc600;
+    static constexpr u32 SecondSize = 0x3a00;
+    u64 GpuMappingGeneration() const {
+        return generation;
+    }
+    std::optional<u64> GpuToCpuAddress(u64 address) const {
+        if (address < gpu || address - gpu >= 0x10000 || !fully_mapped) {
+            return std::nullopt;
+        }
+        const u64 offset = address - gpu;
+        return offset < FirstSize ? first + offset : second + offset - FirstSize;
+    }
+    bool IsContinuousRange(u64, size_t) const {
+        return false;
+    }
+    bool IsFullyMappedRange(u64 address, size_t size) const {
+        return fully_mapped && address == gpu && size == 0x10000;
+    }
+    std::vector<std::pair<u64, size_t>> GetSubmappedRange(u64 address, size_t size) const {
+        REQUIRE(address == gpu);
+        REQUIRE(size == 0x10000);
+        ++range_queries;
+        return {{gpu, FirstSize}, {gpu + FirstSize + (virtual_gap ? 0x1000 : 0), SecondSize}};
+    }
+};
+
+struct StrictSegmentMemory : SparseMemoryImpl<18> {
+    std::vector<std::string> events;
+    void ReadBlockUnsafe(u64 address, void* destination, size_t size) {
+        events.emplace_back("read");
+        REQUIRE(address < bytes.size());
+        REQUIRE(size <= bytes.size() - address);
+        auto* output = static_cast<u8*>(destination);
+        while (size != 0) {
+            const size_t count = (std::min)(size, PageSize - address % PageSize);
+            const u8* pointer = GetPointer<u8>(address);
+            REQUIRE(pointer != nullptr); // A wrong linear-tail read must fail, never become zero.
+            std::memcpy(output, pointer, count);
+            output += count;
+            address += count;
+            size -= count;
+        }
+    }
+};
+} // namespace
+
+TEST_CASE("Split legacy uniform banks gather actual device segments and download GPU-owned bytes",
+          "[video_core][sparse_uniform]") {
+    SplitGpuMapping gpu;
+    StrictSegmentMemory memory;
+    for (size_t page = 1; page < 14; ++page) {
+        memory.Map(page, static_cast<int>(page));
+    }
+    for (size_t page = 33; page <= 36; ++page) {
+        memory.Map(page, static_cast<int>(page + 4));
+    }
+    // The first segment's fictitious linear suffix (pages 14..17) is deliberately unmapped.
+    VideoCommon::LegacyUniformEligibilityCache cache;
+    std::vector<u8> descriptor;
+    bool gpu_modified = true;
+    size_t downloads{};
+    const auto bind = [&] {
+        const auto segments = cache.SplitSegments(gpu, gpu.gpu, gpu.first, 0x10000, 0x10000);
+        REQUIRE(segments.size() == 2);
+        REQUIRE(VideoCommon::StreamSplitUniformBank(
+            memory, segments,
+            [&](u64 address, u32) { return gpu_modified && address == gpu.second; },
+            [&](u64 address, u32 size) {
+                REQUIRE(address == gpu.second);
+                REQUIRE(size == SplitGpuMapping::SecondSize);
+                memory.events.emplace_back("download");
+                // Model DownloadMemory making the latest GPU-owned byte authoritative on CPU.
+                *memory.GetPointer<u8>(address) = 0x7e;
+                gpu_modified = false;
+                ++downloads;
+            },
+            [&](u32 size) {
+                memory.events.emplace_back("allocate");
+                descriptor.assign(size, 0xa5);
+                return std::span<u8>{descriptor};
+            }));
+        REQUIRE(descriptor.size() == 0x10000);
+        CheckBytes(memory, gpu.first,
+                   std::span<const u8>{descriptor}.first(SplitGpuMapping::FirstSize));
+        CheckBytes(memory, gpu.second,
+                   std::span<const u8>{descriptor}.subspan(SplitGpuMapping::FirstSize));
+    };
+    bind();
+    REQUIRE(memory.events == std::vector<std::string>{"download", "allocate", "read", "read"});
+    CHECK(downloads == 1);
+    CHECK(descriptor[SplitGpuMapping::FirstSize] == 0x7e);
+    REQUIRE(gpu.range_queries == 1);
+    memory.events.clear();
+    bind();
+    CHECK(memory.events == std::vector<std::string>{"allocate", "read", "read"});
+    CHECK(downloads == 1);
+    CHECK(gpu.range_queries == 1); // The GPU segment layout is reused across stable draws.
+    memory.Map(33,
+               47); // Device-backing remap: gather sees fresh bytes without a GPU layout change.
+    bind();
+    CHECK(gpu.range_queries == 1);
+    gpu.second = 0x31000;
+    for (size_t page = 49; page <= 52; ++page) {
+        memory.Map(page, static_cast<int>(page - 40));
+    }
+    ++gpu.generation;
+    bind();
+    CHECK(gpu.range_queries == 2); // GPU remap replaces the retained segment addresses.
+}
+
+TEST_CASE("Split legacy uniform admission rejects virtual holes, stale bindings and short banks",
+          "[video_core][sparse_uniform]") {
+    SplitGpuMapping gpu;
+    VideoCommon::LegacyUniformEligibilityCache cache;
+    const auto segments = [&] {
+        return cache.SplitSegments(gpu, gpu.gpu, gpu.first, 0x10000, 0x10000);
+    };
+    REQUIRE(segments().size() == 2);
+    gpu.fully_mapped = false;
+    ++gpu.generation;
+    CHECK(segments().empty());
+    CHECK(segments().empty());
+    CHECK(gpu.range_queries == 1);
+    gpu.fully_mapped = true;
+    gpu.virtual_gap = true;
+    ++gpu.generation;
+    CHECK(segments().empty()); // Full-map claims do not replace explicit segment coverage checks.
+    CHECK(segments().empty());
+    CHECK(gpu.range_queries == 2);
+    gpu.virtual_gap = false;
+    ++gpu.generation;
+    CHECK(segments().size() == 2);
+    CHECK(cache.SplitSegments(gpu, gpu.gpu, gpu.first + 0x1000, 0x10000, 0x10000).empty());
+    CHECK(cache.SplitSegments(gpu, gpu.gpu, gpu.first, 0xffff, 0x10000).empty());
+    CHECK(cache.SplitSegments(gpu, gpu.gpu, gpu.first, 0x10000, 0xffff).empty());
+}
+
+TEST_CASE("Malformed split uniform layouts cannot trigger downloads or partial descriptor reads",
+          "[video_core][sparse_uniform]") {
+    StrictSegmentMemory memory;
+    size_t callbacks{};
+    const auto attempt = [&](std::span<const VideoCommon::LegacyUniformSegment> segments) {
+        return VideoCommon::StreamSplitUniformBank(
+            memory, segments,
+            [&](u64, u32) {
+                ++callbacks;
+                return true;
+            },
+            [&](u64, u32) { ++callbacks; },
+            [&](u32) {
+                ++callbacks;
+                return std::span<u8>{};
+            });
+    };
+    const std::array short_bank{VideoCommon::LegacyUniformSegment{0x1000, 0x1000},
+                                VideoCommon::LegacyUniformSegment{0x9000, 0x1000}};
+    CHECK_FALSE(attempt(short_bank));
+    const std::array oversized{VideoCommon::LegacyUniformSegment{0x1000, 0xffff},
+                               VideoCommon::LegacyUniformSegment{0x9000, 2}};
+    CHECK_FALSE(attempt(oversized));
+    const std::array zero_segment{VideoCommon::LegacyUniformSegment{0x1000, 0x10000},
+                                  VideoCommon::LegacyUniformSegment{0x9000, 0}};
+    CHECK_FALSE(attempt(zero_segment));
+    CHECK(callbacks == 0);
+    CHECK(memory.events.empty());
 }

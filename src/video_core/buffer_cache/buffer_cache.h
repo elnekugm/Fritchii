@@ -2053,6 +2053,51 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
     const Binding& binding = channel_state->uniform_buffers[stage][index];
     const DAddr device_addr = binding.device_addr;
     const u32 size = (std::min)(binding.size, (*channel_state->uniform_buffer_sizes)[stage][index]);
+    if (gpu_memory != nullptr && !gpu_memory->UsesNativeTiling() && binding.size == 0x10000 &&
+        (*channel_state->uniform_buffer_sizes)[stage][index] == 0x10000) {
+        auto& mapping = channel_state->legacy_uniform_eligibility[stage][index];
+        const auto segments =
+            mapping.SplitSegments(*gpu_memory, binding.gpu_addr, device_addr, binding.size, size);
+        if (!segments.empty()) {
+            const bool trace = Common::HitchDiagnostic::Enabled();
+            const s64 begin = trace ? Common::HitchDiagnostic::NowNs() : 0;
+            u32 downloaded_segments{};
+            const bool streamed = StreamSplitUniformBank(
+                device_memory, segments,
+                [&](u64 address, u32 length) {
+                    return memory_tracker.IsRegionGpuModified(address, length);
+                },
+                [&](u64 address, u32 length) {
+                    ++downloaded_segments;
+                    DownloadMemory(address, length);
+                },
+                [&](u32 length) {
+                    return runtime.BindMappedUniformBuffer(stage, binding_index, length);
+                });
+            if (streamed) {
+                channel_state->fast_bound_uniform_buffers[stage] |= 1u << binding_index;
+                channel_state->uniform_buffer_binding_sizes[stage][binding_index] = size;
+                if (trace && legacy_uniform_gather_diagnostic_count < 32 &&
+                    (downloaded_segments != 0 || mapping.ClaimSplitDiagnostic())) {
+                    ++legacy_uniform_gather_diagnostic_count;
+                    LOG_WARNING(Render,
+                                "LegacyUniformGather begin_ns={} end_ns={} gpu=0x{:X} "
+                                "descriptor={} bound={} segments={} first_device=0x{:X}+{} "
+                                "last_device=0x{:X}+{} gpu_download_segments={} gpu_epoch={} "
+                                "policy=strict-gpu-segments",
+                                begin, Common::HitchDiagnostic::NowNs(), binding.gpu_addr,
+                                binding.size, size, segments.size(),
+                                segments.front().device_address, segments.front().size,
+                                segments.back().device_address, segments.back().size,
+                                downloaded_segments, gpu_memory->GpuMappingGeneration());
+                    if (legacy_uniform_gather_diagnostic_count == 32) {
+                        LOG_WARNING(Render, "LegacyUniformGather cap_reached=32");
+                    }
+                }
+                return;
+            }
+        }
+    }
     Buffer& buffer = slot_buffers[binding.buffer_id];
     TouchBuffer(buffer, binding.buffer_id);
     const bool has_host_buffer = binding.buffer_id != NULL_BUFFER_ID;

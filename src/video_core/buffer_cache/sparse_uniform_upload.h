@@ -7,6 +7,7 @@
 #include <cstring>
 #include <span>
 #include <unordered_map>
+#include <vector>
 
 #include "common/common_types.h"
 
@@ -64,7 +65,7 @@ struct SparseUniformReadView {
 
 // Legacy banks qualify only when the guest bound the whole indirect bank and every GPU page
 // maps continuously to the device range retained by the binding. Device backing may still be
-// sparse; a missing/discontinuous GPU mapping is a different error and retains strict reads.
+// sparse; missing or discontinuous GPU mappings cannot use this linear sparse reader.
 template <class GpuMemory>
 bool IsLegacySparseUniformBank(GpuMemory& memory, u64 gpu_address, u64 device_address,
                                u32 descriptor_size, u32 shader_size) {
@@ -76,6 +77,48 @@ bool IsLegacySparseUniformBank(GpuMemory& memory, u64 gpu_address, u64 device_ad
     const auto translated = memory.GpuToCpuAddress(gpu_address);
     return translated && *translated == device_address &&
            memory.IsContinuousRange(gpu_address, bank_size);
+}
+
+struct LegacyUniformSegment {
+    u64 device_address;
+    u32 size;
+};
+
+// Fully GPU-mapped banks may jump between device ranges. Resolve those ranges before allocating
+// the stream, download GPU-owned source bytes first, then use strict reads of the actual segments.
+// This must not interpret the unrelated linear tail after the first segment as sparse zero data.
+template <class Memory, class IsGpuModified, class Download, class Allocate>
+bool StreamSplitUniformBank(Memory& memory, std::span<const LegacyUniformSegment> segments,
+                            IsGpuModified&& is_gpu_modified, Download&& download,
+                            Allocate&& allocate) {
+    constexpr u32 bank_size = 0x10000;
+    u32 total{};
+    for (const auto& segment : segments) {
+        if (segment.size == 0 || segment.size > bank_size - total) {
+            return false;
+        }
+        total += segment.size;
+    }
+    if (total != bank_size || segments.size() < 2) {
+        return false;
+    }
+    for (const auto& segment : segments) {
+        if (is_gpu_modified(segment.device_address, segment.size)) {
+            download(segment.device_address, segment.size);
+        }
+    }
+    // Download may finish a scheduler tick. Allocate afterwards so the stream belongs to the
+    // tick that will actually consume this descriptor, rather than an already submitted tick.
+    const std::span<u8> destination = allocate(bank_size);
+    if (destination.size() < bank_size) {
+        return false;
+    }
+    u32 offset{};
+    for (const auto& segment : segments) {
+        memory.ReadBlockUnsafe(segment.device_address, destination.data() + offset, segment.size);
+        offset += segment.size;
+    }
+    return true;
 }
 
 // One cache per uniform slot avoids walking the GPU page table on every draw. Both positive
@@ -102,7 +145,58 @@ public:
         device = device_address;
         mapping_generation = generation;
         eligible = result;
+        split_checked = false;
+        split_diagnostic_claimed = false;
+        split_segments.clear();
         return result;
+    }
+
+    template <class GpuMemory>
+    std::span<const LegacyUniformSegment> SplitSegments(GpuMemory& memory, u64 gpu_address,
+                                                        u64 device_address, u32 descriptor_size,
+                                                        u32 shader_size) {
+        constexpr u32 bank_size = 0x10000;
+        if (descriptor_size != bank_size || shader_size != bank_size || gpu_address == 0 ||
+            device_address == 0 ||
+            IsEligible(memory, gpu_address, device_address, descriptor_size, shader_size)) {
+            return {};
+        }
+        if (split_checked) {
+            return split_segments;
+        }
+        split_checked = true;
+        const auto first_device = memory.GpuToCpuAddress(gpu_address);
+        if (!first_device || *first_device != device_address ||
+            !memory.IsFullyMappedRange(gpu_address, bank_size)) {
+            return {};
+        }
+        const auto ranges = memory.GetSubmappedRange(gpu_address, bank_size);
+        u32 covered{};
+        for (const auto& [address, size] : ranges) {
+            if (address != gpu_address + covered || size == 0 || size > bank_size - covered) {
+                split_segments.clear();
+                return {};
+            }
+            const auto translated = memory.GpuToCpuAddress(address);
+            if (!translated || *translated == 0) {
+                split_segments.clear();
+                return {};
+            }
+            split_segments.push_back({*translated, static_cast<u32>(size)});
+            covered += static_cast<u32>(size);
+        }
+        if (covered != bank_size || split_segments.size() < 2) {
+            split_segments.clear();
+        }
+        return split_segments;
+    }
+
+    bool ClaimSplitDiagnostic() {
+        if (split_diagnostic_claimed) {
+            return false;
+        }
+        split_diagnostic_claimed = true;
+        return true;
     }
 
 private:
@@ -111,6 +205,9 @@ private:
     u64 device{};
     u64 mapping_generation{};
     bool eligible{};
+    bool split_checked{};
+    bool split_diagnostic_claimed{};
+    std::vector<LegacyUniformSegment> split_segments;
 };
 
 // Device mappings, unlike CPU writes, do not dirty retained buffer-cache bytes. Scan backing
