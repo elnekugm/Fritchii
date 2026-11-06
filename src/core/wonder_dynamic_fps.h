@@ -73,9 +73,25 @@ public:
             wall_seconds += elapsed / 1e9;
             game_seconds += scale / 60.0;
             ++frames;
+            if (elapsed <= 33'333'333) {
+                above30_wall_seconds += elapsed / 1e9;
+                above30_game_seconds += scale / 60.0;
+                above30_run_seconds += elapsed / 1e9;
+                // Exclude the first two seconds after a dip/reset: rate feedback is
+                // delayed by one frame and may still be correcting the prior stall.
+                if (above30_run_seconds > 2.0) {
+                    steady30_wall_seconds += elapsed / 1e9;
+                    steady30_game_seconds += scale / 60.0;
+                }
+            } else {
+                below30_wall_seconds += elapsed / 1e9;
+                below30_game_seconds += scale / 60.0;
+                above30_run_seconds = 0;
+            }
         } else if (initialized && elapsed > 0) {
             uncovered_seconds += elapsed / 1e9;
             ++discontinuities;
+            above30_run_seconds = 0;
         }
         initialized = true;
         last_ns = now_ns;
@@ -88,11 +104,14 @@ public:
     }
     double wall_seconds{}, game_seconds{}, uncovered_seconds{};
     u64 frames{}, discontinuities{};
+    double above30_wall_seconds{}, above30_game_seconds{};
+    double below30_wall_seconds{}, below30_game_seconds{};
+    double steady30_wall_seconds{}, steady30_game_seconds{};
 
 private:
     bool initialized{};
     u64 last_present{};
     s64 last_ns{};
-    double last_report{};
+    double last_report{}, above30_run_seconds{};
 };
 } // namespace Core

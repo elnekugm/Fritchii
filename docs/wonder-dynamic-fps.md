@@ -66,3 +66,20 @@ The initial audit attempt crashed because the physical core's transient debug
 interface is cleared before SVC dispatch. The corrected audit uses the process
 interface by core index. The legacy local MCP collector still expects
 eden_log.txt; actual evidence is in the per-game Orchid log instead.
+
+## Overworld diagnosis and separated 30-FPS audit
+
+Strict max-gap filtering of the completed live run found 13 covered audit
+intervals (65.055 seconds) near real time: weighted engine scaling100.0237%.
+Mean FPS alone is insufficient because it hides individual long stalls. The
+new audit retains separate above/below30 totals and a continuously above30
+subset after2 seconds settling; skipped/long frames remain explicitly uncovered.
+`EDEN_WONDER_SPEED_CSV=1` writes every unique-present timing readback. Existing
+`EDEN_NX2_HITCH_TRACE=1` preserves every native present, including sub30 drops.
+
+A25-second live profile at Pipe-Rock Plateau identified CPU texture unswizzling
+and upload during new cache-image insertion as a hotspot; per-process physical
+GPU activity was low. This justifies a cache-churn diagnostic, not a speculative
+cache-matching change. `EDEN_NX2_TC_LOG=1` already provides the necessary first
+creation/deletion/collector/upload counters. Independent reproduction was
+blocked by another isolated GPU session. No other session was interrupted.

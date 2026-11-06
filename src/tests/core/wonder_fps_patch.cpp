@@ -185,3 +185,24 @@ TEST_CASE("Wonder speed audit uses game scale and exposes lost coverage", "[wond
         slow.Observe(i, i * 16'666'667, 0.5f);
     CHECK(std::abs(slow.game_seconds / slow.wall_seconds - 0.5) < 0.000001);
 }
+
+TEST_CASE("Wonder audit separates slow frames and settled continuous above-30 runs",
+          "[wonder_fps]") {
+    Core::WonderSpeedAudit audit;
+    s64 now{};
+    audit.Observe(0, now, 1.0f);
+    for (u64 i = 1; i <= 300; ++i)
+        audit.Observe(i, now += 16'666'667, 1.0f);
+    CHECK(std::abs(audit.above30_wall_seconds - 5.0) < 0.000001);
+    CHECK(audit.below30_wall_seconds == 0);
+    CHECK(audit.steady30_wall_seconds > 2.99);
+    CHECK(audit.steady30_wall_seconds < 3.02);
+    const double before = audit.steady30_wall_seconds;
+    audit.Observe(301, now += 50'000'000, 1.0f);
+    CHECK(std::abs(audit.below30_wall_seconds - 0.05) < 0.000001);
+    for (u64 i = 302; i < 400; ++i)
+        audit.Observe(i, now += 16'666'667, 1.0f);
+    CHECK(audit.steady30_wall_seconds == before); // settling after the dip is excluded
+    audit.Observe(400, now += 500'000'000, 1.0f);
+    CHECK(audit.discontinuities == 1);
+}
