@@ -150,6 +150,7 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     u64 largest_upload{};    ///< Largest of them
     u64 layer_uploads{};     ///< Of them, uploads of only the written layers
     bool native_thresholds_applied{};
+    bool native_driver_budget_available{};
     u64 native_critical_memory{};
     u64 native_expected_memory{};
     u64 budget_check_frames{};
@@ -169,8 +170,7 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
 
     static constexpr s64 DEFAULT_EXPECTED_MEMORY = 1_GiB + 125_MiB;
     static constexpr s64 DEFAULT_CRITICAL_MEMORY = 1_GiB + 625_MiB;
-    /// The most device memory the collector lets the cache fill before it collects in earnest on
-    /// cards up to 8 GiB; larger ones 5/8 of the driver's budget (ApplyThresholdOverrides).
+    /// Conservative ceiling when not using Wonder's verified driver-budget policy.
     static constexpr u64 MaxCriticalMemory = 5_GiB;
     static constexpr size_t GC_EMERGENCY_COUNTS = 2;
 

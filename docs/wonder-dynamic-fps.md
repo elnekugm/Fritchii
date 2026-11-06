@@ -83,3 +83,38 @@ GPU activity was low. This justifies a cache-churn diagnostic, not a speculative
 cache-matching change. `EDEN_NX2_TC_LOG=1` already provides the necessary first
 creation/deletion/collector/upload counters. Independent reproduction was
 blocked by another isolated GPU session. No other session was interrupted.
+
+## Overworld cache-budget fix
+
+The bounded cache probe reproduced eviction/re-upload churn at the saved W1
+Pipe-Rock Plateau Badge House node: some600-present windows created over2000
+images and uploaded7–9 GiB while the collector was limited to a5-GiB critical
+ceiling. Raising the diagnostic limits reduced churn and reached stable windows
+with no uploads; a longer run still showed churn when that diagnostic cap filled.
+
+The actual fix lets this Wonder title follow the existing driver-budget policy
+when a nonzero native budget is available. The existing pressure margin, allocator
+slack reserve, headroom and periodic budget shrink handling remain in force.
+Other titles, unknown budgets and smaller devices retain their conservative
+limits. No physics-floor or texture-matching semantics change is involved.
+
+The test starter's old NAND path was also corrected: its current save had been
+written to the older wonder-loading-fix test profile. That NAND was copied into
+the current profile after exit, and the previous copy was retained. The source
+test profile remains available as rollback; new test launches use their own NAND.
+The authoritative saved Overworld seed is wonder-overworld-current-20261106.
+
+### Paired Overworld result
+
+One diagnostic A/B pair used the same saved Badge House node, scene settings and
+immutable save/config/cache seed, with80 seconds selected after the initial map
+load in each run. Native-present timing gave70.87 to73.79 mean FPS; individual
+frames slower than30 FPS fell from194/5669 (3.42%) to65/5901 (1.10%). The99th
+percentile frame gap fell from59.52 ms to35.05 ms. Both runs used the same
+lightweight cache/hitch/audit logging; this is one pair, not a universal guarantee.
+
+The final budget-driven run had long zero-upload stretches, but later driver
+budget shrink again forced collection and produced hitches. The fix reduces
+the demonstrated cache-cap problem; it does not eliminate every Overworld dip.
+Both owned runs exited without forced termination. Regression checks passed
+13 test cases /12172 assertions.

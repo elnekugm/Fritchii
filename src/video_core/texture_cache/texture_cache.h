@@ -26,6 +26,7 @@
 #include "common/memory_detect.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
+#include "common/game_fps.h"
 #include "common/slot_vector.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/dirty_flags.h"
@@ -34,7 +35,8 @@
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/texture_cache/conversion.h"
 #include "video_core/texture_cache/image_view_base.h"
-#include "video_core/texture_cache/conversion.h"
+#include "video_core/texture_cache/memory_budget.h"
+#include "video_core/texture_cache/physical_alias.h"
 #include "video_core/texture_cache/samples_helper.h"
 #include "video_core/texture_cache/texture_cache_base.h"
 #include "video_core/texture_cache/util.h"
@@ -427,43 +429,16 @@ bool TextureCache<P>::IsAllStale(DAddr addr, size_t size) const {
 
 template <class P>
 void TextureCache<P>::ApplyThresholdOverrides(bool log) {
-    // Past what a frame needs, more device memory only keeps the textures of earlier scenes
-    // (title 1 filled 6.7 GB of an 8 GB card and draws its races in ~5 GB), so collect from
-    // MaxCriticalMemory on rather than near the card's budget. Larger cards get 5/8 of the
-    // driver's budget (GetDeviceLocalMemory is capped near 7 GiB): at 5 GiB title 1's races
-    // recreate and upload ~8 MiB of render targets a frame (16 GB card: 53 -> 59 fps at 10 GiB).
-    // 5/8 of the budget only passes 5 GiB above an 8 GiB budget, so cards up to 8 GB (and
-    // integrated GPUs, whose budget is capped at 4-6 GiB) keep the 5 GiB cap.
-    u64 max_critical = MaxCriticalMemory;
-    if constexpr (requires { runtime.GetDeviceMemoryBudget(); }) {
-        const u64 budget = runtime.GetDeviceMemoryBudget();
-        max_critical = (std::max)(max_critical, budget / 8 * 5);
-        // Cards with 10 GiB or more of budget: 5/8 left ~7.3 GiB on a 12 GB RX 6700 XT, under what
-        // Ocarina's Kokiri Forest keeps alive, so every aggressive pass evicted its CostlyLoad ASTC
-        // textures (a 6144x6144 5x5 one, 31 MiB) and the game re-created them ~128 frames later:
-        // a 24 ms texture stall every ~3 s. Keep 2.5 GiB of the budget for everything else instead.
-        if (budget >= 10_GiB) {
-            max_critical = (std::max)(max_critical, budget - 2560_MiB);
-        }
-    }
-    critical_memory = (std::min)(critical_memory, max_critical);
-    expected_memory =
-        (std::min)(expected_memory, critical_memory - (std::min)(critical_memory, u64{768_MiB}));
-    minimum_memory =
-        (std::min)(minimum_memory, expected_memory - (std::min)(expected_memory, u64{1_GiB}));
-    // EDEN_NX2_TC_CEILING_MIB: a ceiling for the critical threshold (expected 1.5 GiB under it),
-    // which only ever lowers them, so cards with a smaller budget keep theirs. Fritchii builds it
-    // in at 7680 (2026-11-10, owner's playtests: 16 GB card, VRAM 10 -> ~6 GB, 4-6 GB of RAM kept
-    // free instead of ~1.5 since Windows charges device memory to commit, 58.8 fps over 30 min).
-    if (const char* value = std::getenv("EDEN_NX2_TC_CEILING_MIB")) {
-        const u64 ceiling = std::strtoull(value, nullptr, 10) << 20;
-        if (ceiling >= 2_GiB) {
-            critical_memory = (std::min)(critical_memory, ceiling);
-            expected_memory = (std::min)(expected_memory, ceiling - 1536_MiB);
-            minimum_memory = (std::min)(minimum_memory,
-                                        expected_memory - (std::min)(expected_memory, u64{1_GiB}));
-        }
-    }
+    // Wonder's Overworld working set exceeds the historical 5-GiB ceiling. Use
+    // the existing pressure/slack-adjusted driver budget for that title only;
+    // other titles and unavailable budgets retain the conservative ceiling.
+    const bool budget_driven = native_driver_budget_available &&
+                               Settings::GetCurrentProgramID() == Settings::WonderSwitch2ProgramId;
+    const auto limits = ClampTextureCacheThresholds(
+        {expected_memory, critical_memory, minimum_memory}, budget_driven, MaxCriticalMemory);
+    expected_memory = limits.expected;
+    critical_memory = limits.critical;
+    minimum_memory = limits.minimum;
     // EDEN_NX2_TC_EXPECTED_MIB / EDEN_NX2_TC_CRITICAL_MIB override the collector's thresholds.
     for (const auto& [name, target] : {std::pair{"EDEN_NX2_TC_EXPECTED_MIB", &expected_memory},
                                        std::pair{"EDEN_NX2_TC_CRITICAL_MIB", &critical_memory}}) {
@@ -530,6 +505,7 @@ void TextureCache<P>::TickFrame() {
             }
             if (native_thresholds_applied && budget_check_frames++ % 30 == 0) {
                 const u64 budget = runtime.GetDeviceMemoryBudget();
+                native_driver_budget_available = budget != 0;
                 if (budget != 0) {
                     const u64 old_critical = critical_memory;
                     const u64 margin = (std::min)(budget / 8, 1_GiB);
@@ -560,10 +536,8 @@ void TextureCache<P>::TickFrame() {
                     critical_memory = (std::min)(critical_memory, host_critical);
                     expected_memory = critical_memory - (std::min)(margin, critical_memory / 2);
                     ApplyThresholdOverrides(false);
-                    // Log the first values and real changes (the budget moves by a few MiB all
-                    // the time). Compared after the overrides: the value before them is above
-                    // the 5/8-of-budget cap on large cards, so every check looked like a change
-                    // and logged the same thresholds every 30 frames.
+                    // Compare final thresholds: small driver budget movements should not
+                    // flood the log, and legacy titles still have the conservative clamp.
                     const u64 change = critical_memory > old_critical
                                            ? critical_memory - old_critical
                                            : old_critical - critical_memory;
@@ -585,6 +559,8 @@ void TextureCache<P>::TickFrame() {
                                          : "the device budget bounds the thresholds");
                         }
                     }
+                } else {
+                    ApplyThresholdOverrides(false);
                 }
             }
         }
