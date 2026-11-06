@@ -66,6 +66,7 @@ SWITCHABLE(Language, true);
 SWITCHABLE(MemoryLayout, true);
 SWITCHABLE(NvdecEmulation, false);
 SWITCHABLE(Region, true);
+SWITCHABLE(WonderFps, true);
 SWITCHABLE(RendererBackend, true);
 SWITCHABLE(ScalingFilter, false);
 SWITCHABLE(FrameGenType, false);

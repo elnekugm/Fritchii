@@ -145,11 +145,14 @@ add_executable(tests
     common/unique_function.cpp
     common/zstd_compression.cpp
     core/core_timing.cpp
-    core/thread_startup_policy.cpp
-    core/nup_writer.cpp
-    core/nup_metadata.cpp
-    core/nx2_image_layout.cpp
-    core/nx2_video_input_queue.cpp
+    core/page_heap.cpp
+    core/read_traps.cpp
+    core/nx2_readback_cache.cpp
+    core/nx2_core_readback_capacity.cpp
+    core/wonder_fps_patch.cpp
+    core/nso.cpp
+    core/nrr.cpp
+    core/ncz_decompressor.cpp
     core/ldn.cpp
     core/internal_network/socket_proxy.cpp
     core/nup_writer.cpp

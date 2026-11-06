@@ -34,8 +34,9 @@
 #include "audio_core/sink/sink_stream.h"
 #include "common/alignment.h"
 #include "common/div_ceil.h"
-#include "common/dkb_frame_trace.h"
-#include "common/game_presets.h"
+#include "common/hitch_diagnostic.h"
+#include "common/fs/path_util.h"
+#include "common/game_fps.h"
 #include "common/settings.h"
 #include "common/swap.h"
 #include "common/thread.h"
@@ -2289,31 +2290,14 @@ private:
             LOG_INFO(Service, "nx2:vi2 present #{} swap interval {} at {} Hz (word 12 = {:#x})",
                      m_presents, swap_interval, refresh_rate, timing);
         }
-        auto interval =
-            high_refresh
-                ? OotHighRefreshInterval()
-                : std::chrono::nanoseconds{100'000'000'000LL * swap_interval / refresh_rate /
-                                           (oot_scale_address != 0 ? 100 : Settings::SpeedLimit())};
-        // Genlock: with the host frame pacer on, a frame period within 1% of a whole number of
-        // display refreshes becomes exactly that many measured refreshes (a "120 Hz" display at
-        // 119.98 Hz: 33.3389 ms instead of 33.3333). On the game's own clock its frames drifted
-        // against the display and missed their refresh about once a minute (a 41 ms frame, then
-        // a short one). The game runs at most 1% slower.
-        if (const long long host_refresh =
-                VideoCommon::Nx2Perf::g_host_refresh_ns.load(std::memory_order_relaxed);
-            host_refresh > 0) {
-            const long long refreshes =
-                (interval.count() + host_refresh / 2) / host_refresh;
-            const long long locked = refreshes * host_refresh;
-            if (refreshes >= 1 && std::abs(locked - interval.count()) * 100 < interval.count()) {
-                interval = std::chrono::nanoseconds{locked};
-            }
-        }
-        VideoCommon::Nx2Perf::g_guest_frame_interval_ns.store(interval.count(),
-                                                              std::memory_order_relaxed);
-        if (trace) {
-            m_frame_trace.target_ms = std::chrono::duration<double, std::milli>(interval).count();
-        }
+        // Wonder's patched simulation rate can exceed the display's nominal 60 Hz. Pace its
+        // presents at the rate actually patched into this boot, not at a changed UI preference.
+        const u32 wonder_fps =
+            system.GetApplicationProcessProgramID() == Settings::WonderSwitch2ProgramId
+                ? Settings::wonder_fps_active.load(std::memory_order_relaxed) : 0;
+        const auto interval = std::chrono::nanoseconds{
+            wonder_fps != 0 ? 100'000'000'000LL / wonder_fps / Settings::SpeedLimit()
+                            : 100'000'000'000LL * swap_interval / refresh_rate / Settings::SpeedLimit()};
         const auto now = std::chrono::steady_clock::now();
         auto pacing = m_present_pacer.Advance(now, interval);
         if (trace) {
