@@ -235,7 +235,7 @@ TEST_CASE("Ampere high multiply respects operand forms signs aliases and predica
     std::mt19937 random{0x949a921};
     for (const u32 opcode : {0x227U, 0x827U, 0xa27U}) {
         for (const bool is_signed : {false, true}) {
-            for (const u32 dest : {0U, 2U, 4U, 6U}) {
+            for (const u32 dest : {0U, 2U, 4U, 6U, 7U}) {
                 for (const u32 guard : {0U, 5U, 6U, 7U, 8U, 13U, 14U}) {
                     for (u32 test = 0; test < 24; ++test) {
                         auto machine = SeedMachine();
@@ -244,6 +244,7 @@ TEST_CASE("Ampere high multiply respects operand forms signs aliases and predica
                         machine.registers[4] =
                             test < 4 ? std::array{~0U, 2U, ~0U, 0x80000000U}[test] : random();
                         machine.registers[6] = random();
+                        machine.registers[7] = random();
                         machine.constants[2][4] = machine.registers[4];
                         const Instruction instruction{
                             {opcode | (guard << 12) | (dest << 16) | (2U << 24),
@@ -257,11 +258,11 @@ TEST_CASE("Ampere high multiply respects operand forms signs aliases and predica
                         const auto before = machine;
                         const bool active =
                             ((guard & 7) == 7 || before.predicates[guard & 7]) != bool(guard & 8);
-                        const u32 expected =
-                            active ? static_cast<u32>(
-                                         Product(before.Read(2), before.Read(4), is_signed) >> 32) +
-                                         before.Read(6)
-                                   : before.Read(dest);
+                        const u64 addend = u64{before.Read(6)} | (u64{before.Read(7)} << 32);
+                        const u32 expected = active
+                            ? static_cast<u32>((Product(before.Read(2), before.Read(4), is_signed) +
+                                                addend) >> 32)
+                            : before.Read(dest);
                         machine.Run(lowered.instructions);
                         REQUIRE(machine.Read(dest) == expected);
                         CheckUnchanged(before, machine, dest, 1);
@@ -270,6 +271,47 @@ TEST_CASE("Ampere high multiply respects operand forms signs aliases and predica
             }
         }
     }
+}
+
+TEST_CASE("Ampere high IMAD adds a register pair before selecting the high word",
+          "[video_core][ampere][integer_multiply][yoshi_imad_hi]") {
+    // Captured Yoshi resolve b820: the reciprocal in R13 is also the high addend.
+    constexpr Instruction refine{{0x0d0a7227, 0x0000000f, 0x078e000c, 0x000fe200}};
+    const auto lowered = LowerToMaxwell(std::array{refine, Exit});
+    REQUIRE(lowered);
+    for (const bool initial_carry : {false, true}) {
+        for (const auto values : std::array<std::array<u32, 3>, 6>{{
+                 {214748336U, 576U, 0U}, {~0U, ~0U, ~0U},
+                 {1U, 1U, ~0U}, {0U, ~0U, ~0U},
+                 {0x80000000U, 2U, 0U}, {0x12345678U, 0x87654321U, ~0U}}}) {
+            auto machine = SeedMachine();
+            machine.carry = initial_carry;
+            machine.registers[13] = values[0];
+            machine.registers[15] = values[1];
+            machine.registers[12] = values[2];
+            const auto before = machine;
+            const u64 addend = u64{values[2]} | (u64{values[0]} << 32);
+            const u32 expected = static_cast<u32>((u64{values[0]} * values[1] + addend) >> 32);
+            machine.Run(lowered.instructions);
+            REQUIRE(machine.Read(10) == expected);
+            if (values[0] == 214748336U) REQUIRE(expected == 214748364U);
+            CheckUnchanged(before, machine, 10, 1);
+        }
+    }
+    for (const u32 c : {1U, 245U, 246U, 254U}) {
+        auto invalid = refine;
+        invalid.words[2] = (invalid.words[2] & ~0xffU) | c;
+        REQUIRE_FALSE(LowerToMaxwell(std::array{invalid, Exit}));
+    }
+    auto zero_addend = refine;
+    zero_addend.words[2] = (zero_addend.words[2] & ~0xffU) | 255U;
+    const auto zero_lowered = LowerToMaxwell(std::array{zero_addend, Exit});
+    REQUIRE(zero_lowered);
+    auto machine = SeedMachine();
+    machine.registers[13] = ~0U;
+    machine.registers[15] = ~0U;
+    machine.Run(zero_lowered.instructions);
+    REQUIRE(machine.Read(10) == 0xfffffffeU);
 }
 
 TEST_CASE("Ampere wide multiply preserves the full sum for all operand forms and aliases",
