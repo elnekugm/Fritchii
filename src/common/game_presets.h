@@ -55,7 +55,7 @@ inline auto SessionSetter(bool global) {
 }
 
 /// Shared graphics baseline. Do not impose native GPU synchronization or clock settings here:
-/// Wonder uses the Switch 1 program layout and retains those preferences.
+/// Programs with the Switch 1 layout retain those preferences.
 inline void SetGraphicsBaseSettings(Values& settings, bool global) {
     const auto session = SessionSetter(global);
     session(settings.renderer_backend, RendererBackend::Vulkan);

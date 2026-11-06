@@ -192,7 +192,8 @@ TEST_CASE("Every visual quality retains each title's compatibility settings and 
                    : quality == Quality::High ? Settings::AnisotropyMode::X16
                                               : Settings::AnisotropyMode::X4));
             CHECK(settings->renderer_backend.GetValue() == Settings::RendererBackend::Vulkan);
-            const bool legacy = preset.program_id == Settings::SuperMarioBrosWonderProgramId;
+            const bool legacy = preset.program_id == Settings::SuperMarioBrosWonderProgramId ||
+                                preset.program_id == Settings::KirbyForgottenLandProgramId;
             CHECK(settings->gpu_accuracy.GetValue() ==
                   (legacy ? Settings::GpuAccuracy::High : Settings::GpuAccuracy::Low));
             CHECK(settings->use_asynchronous_shaders.GetValue());
@@ -247,13 +248,14 @@ TEST_CASE("Changing quality replaces every visual override and ignores unsupport
     CHECK(settings->resolution_setup.GetValue() == Settings::ResolutionSetup::Res1X);
 }
 
-TEST_CASE("The profile registry includes exactly the eight identified supported games",
+TEST_CASE("The profile registry includes exactly the nine identified owned games",
           "[game_presets]") {
     constexpr std::array expected{
         Settings::MarioTennisFeverProgramId,    Settings::HyruleWarriorsAgeOfImprisonmentProgramId,
         Settings::DonkeyKongBananzaProgramId,   Settings::KirbyAirRidersProgramId,
         Settings::PokemonPokopiaProgramId,      Settings::StarFoxProgramId,
-        Settings::YoshiMysteriousBookProgramId, Settings::SuperMarioBrosWonderProgramId};
+        Settings::YoshiMysteriousBookProgramId, Settings::SuperMarioBrosWonderProgramId,
+        Settings::KirbyForgottenLandProgramId};
     REQUIRE(std::size(Settings::GamePresets) == expected.size());
     for (const u64 id : expected) {
         const auto* preset = Settings::FindGamePreset(id);
@@ -285,42 +287,46 @@ TEST_CASE("Out-of-scope and different-edition game IDs do not receive graphics p
     }
 }
 
-TEST_CASE("Wonder quality presets preserve legacy GPU synchronization and clock choices",
+TEST_CASE("Wonder and Forgotten Land presets preserve legacy synchronization and clock choices",
           "[game_presets]") {
-    for (const bool per_game : {false, true}) {
-        auto settings = std::make_unique<Settings::Values>();
-        SetConflictingPreferences(*settings, per_game);
-        const auto set = [per_game](auto& setting, auto value) {
-            setting.SetGlobal(!per_game);
-            setting.SetValue(value);
-        };
-        set(settings->gpu_fence_behavior, Settings::GpuFenceBehavior::Accurate);
-        set(settings->cpu_clock, Settings::CpuClock::Overclock);
-        set(settings->gpu_clock, Settings::GpuClock::Overclock);
-        set(settings->async_presentation, false);
-        set(settings->fps30_patch, false);
-        set(settings->use_docked_mode, Settings::ConsoleMode::Docked);
-        for (const auto quality :
-             {Settings::GamePresetQuality::Low, Settings::GamePresetQuality::Standard,
-              Settings::GamePresetQuality::High}) {
-            REQUIRE(Settings::ApplyGamePreset(*settings, Settings::SuperMarioBrosWonderProgramId,
-                                              quality));
-            CHECK(settings->gpu_accuracy.GetValue() == Settings::GpuAccuracy::High);
-            CHECK(settings->use_reactive_flushing.GetValue());
-            CHECK(settings->gpu_fence_behavior.GetValue() == Settings::GpuFenceBehavior::Accurate);
-            CHECK(settings->cpu_clock.GetValue() == Settings::CpuClock::Overclock);
-            CHECK(settings->gpu_clock.GetValue() == Settings::GpuClock::Overclock);
-            CHECK_FALSE(settings->async_presentation.GetValue());
-            CHECK_FALSE(settings->fps30_patch.GetValue());
-            CHECK(settings->use_docked_mode.GetValue() == Settings::ConsoleMode::Docked);
-            CHECK(settings->gpu_accuracy.UsingGlobal() == !per_game);
-            CHECK(settings->use_reactive_flushing.UsingGlobal() == !per_game);
-            CHECK(settings->gpu_fence_behavior.UsingGlobal() == !per_game);
-            CHECK(settings->cpu_clock.UsingGlobal() == !per_game);
-            CHECK(settings->gpu_clock.UsingGlobal() == !per_game);
-            CHECK(settings->async_presentation.UsingGlobal() == !per_game);
-            CHECK(settings->fps30_patch.UsingGlobal() == !per_game);
-            CHECK(settings->use_docked_mode.UsingGlobal() == !per_game);
+    for (const u64 id :
+         {Settings::SuperMarioBrosWonderProgramId, Settings::KirbyForgottenLandProgramId}) {
+        CAPTURE(id);
+        for (const bool per_game : {false, true}) {
+            auto settings = std::make_unique<Settings::Values>();
+            SetConflictingPreferences(*settings, per_game);
+            const auto set = [per_game](auto& setting, auto value) {
+                setting.SetGlobal(!per_game);
+                setting.SetValue(value);
+            };
+            set(settings->gpu_fence_behavior, Settings::GpuFenceBehavior::Accurate);
+            set(settings->cpu_clock, Settings::CpuClock::Overclock);
+            set(settings->gpu_clock, Settings::GpuClock::Overclock);
+            set(settings->async_presentation, false);
+            set(settings->fps30_patch, false);
+            set(settings->use_docked_mode, Settings::ConsoleMode::Docked);
+            for (const auto quality :
+                 {Settings::GamePresetQuality::Low, Settings::GamePresetQuality::Standard,
+                  Settings::GamePresetQuality::High}) {
+                REQUIRE(Settings::ApplyGamePreset(*settings, id, quality));
+                CHECK(settings->gpu_accuracy.GetValue() == Settings::GpuAccuracy::High);
+                CHECK(settings->use_reactive_flushing.GetValue());
+                CHECK(settings->gpu_fence_behavior.GetValue() ==
+                      Settings::GpuFenceBehavior::Accurate);
+                CHECK(settings->cpu_clock.GetValue() == Settings::CpuClock::Overclock);
+                CHECK(settings->gpu_clock.GetValue() == Settings::GpuClock::Overclock);
+                CHECK_FALSE(settings->async_presentation.GetValue());
+                CHECK_FALSE(settings->fps30_patch.GetValue());
+                CHECK(settings->use_docked_mode.GetValue() == Settings::ConsoleMode::Docked);
+                CHECK(settings->gpu_accuracy.UsingGlobal() == !per_game);
+                CHECK(settings->use_reactive_flushing.UsingGlobal() == !per_game);
+                CHECK(settings->gpu_fence_behavior.UsingGlobal() == !per_game);
+                CHECK(settings->cpu_clock.UsingGlobal() == !per_game);
+                CHECK(settings->gpu_clock.UsingGlobal() == !per_game);
+                CHECK(settings->async_presentation.UsingGlobal() == !per_game);
+                CHECK(settings->fps30_patch.UsingGlobal() == !per_game);
+                CHECK(settings->use_docked_mode.UsingGlobal() == !per_game);
+            }
         }
     }
 }
