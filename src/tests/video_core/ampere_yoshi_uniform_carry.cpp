@@ -139,6 +139,8 @@ void Execute(const std::vector<u64>& words, std::array<u32, 256>& regs,
             v.R2P_imm(w);
         else if (op == 0x3800)
             v.BFE_imm(w);
+        else if (op == 0x5ca0)
+            v.SEL_reg(w);
         else
             FAIL("unexpected lowered word " << std::hex << w);
         Run(block, regs, preds);
@@ -180,8 +182,14 @@ TEST_CASE("captured uniform carry pair preserves both predicate banks",
             CHECK(r[227] == u32(abc));
             CHECK(r[239] == ((old_up & ~0x60U) | (c1 << 5) | (c2 << 6)));
             CHECK(p == old);
-            // The normal P1, used by an intervening ordinary guest instruction, remains unchanged.
-            CHECK(p[1] == bool((mask >> 1) & 1));
+            // Exercise an ordinary P1-guarded selection between the two uniform ops.
+            r[10] = 0x1234;
+            r[11] = 0x5678;
+            const u64 select =
+                0x5ca0000000070000ULL | 12 | (u64{10} << 8) | (u64{11} << 20) | (u64{1} << 39);
+            Execute({select}, r, p);
+            CHECK(r[12] == (((mask >> 1) & 1) ? 0x1234U : 0x5678U));
+            CHECK(p == old);
             Execute(high.instructions, r, p);
             CHECK(r[226] == u32(u64{0xffffffffU} + 0x11223344U + 0x55667788U + c1 + c2));
             CHECK(p == old);
