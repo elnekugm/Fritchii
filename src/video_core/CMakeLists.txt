@@ -17,6 +17,7 @@ add_library(video_core STATIC
     async_translate.h
     buffer_cache/buffer_base.h
     buffer_cache/buffer_cache_base.h
+    buffer_cache/sparse_uniform_upload.h
     buffer_cache/storage_buffer_size.h
     buffer_cache/buffer_cache.cpp
     buffer_cache/buffer_cache.h

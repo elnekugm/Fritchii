@@ -25,6 +25,7 @@
 #include "shader_recompiler/frontend/ampere/instruction.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/shader_snapshot.h"
 
 namespace Tegra {
 class Memorymanager;

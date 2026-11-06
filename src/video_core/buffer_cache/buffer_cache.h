@@ -2230,7 +2230,7 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
                     channel_state->uniform_buffer_binding_sizes[stage][binding_index] = size;
                     runtime.BindFastUniformBuffer(stage, binding_index, size);
                 }
-                const auto span = ImmediateBufferWithData(device_addr, size);
+                const auto span = ImmediateBufferWithData(device_addr, size, sparse_uniform);
                 runtime.PushFastUniformBuffer(stage, binding_index, span);
                 Nx2Profile::AddFine(Nx2Profile::FineCounter::UniformOther, 1);
                 return;
@@ -2271,7 +2271,7 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
     }
     Nx2Profile::AddFine(Nx2Profile::FineCounter::UniformCached, 1);
     // Classic cached path
-    if (SynchronizeBuffer(buffer, device_addr, size)) {
+    if (SynchronizeBuffer(buffer, device_addr, size, sparse_uniform)) {
         ++channel_state->uniform_cache_hits[0];
     }
     // Skip binding if it's not needed and if the bound buffer is not the fast version
@@ -4011,7 +4011,7 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
             Nx2Profile::Add(Nx2Profile::Counter::ComputeSyncBytes, total_size_bytes);
         }
         const std::span<BufferCopy> copies_span(upload_copies.data(), upload_copies.size());
-        UploadMemory(buffer, total_size_bytes, largest_copy, copies_span);
+        UploadMemory(buffer, total_size_bytes, largest_copy, copies_span, sparse_uniform);
         // Mapped uploads carry their own barriers (or run in the upload command buffer, which
         // ends with one); another barrier here only ended the render pass (~50 times a frame in
         // Pokopia).
@@ -4041,7 +4041,7 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
             Nx2Profile::Add(Nx2Profile::Counter::ComputeSyncBytes, total_size_bytes);
         }
         const std::span<BufferCopy> copies_span(copies.data(), copies.size());
-        UploadMemory(buffer, total_size_bytes, largest_copy, copies_span);
+        UploadMemory(buffer, total_size_bytes, largest_copy, copies_span, sparse_uniform);
         return false;
     }
 }
@@ -4095,24 +4095,32 @@ bool BufferCache<P>::VerifyComputeDirtyWalk(DAddr device_addr, u32 size) {
 
 template <class P>
 void BufferCache<P>::UploadMemory(Buffer& buffer, u64 total_size_bytes, u64 largest_copy,
-                                  std::span<BufferCopy> copies) {
+                                  std::span<BufferCopy> copies, bool sparse_uniform) {
     if constexpr (USE_MEMORY_MAPS_FOR_UPLOADS) {
-        MappedUploadMemory(buffer, total_size_bytes, copies);
+        MappedUploadMemory(buffer, total_size_bytes, copies, sparse_uniform);
     } else {
-        ImmediateUploadMemory(buffer, largest_copy, copies);
+        ImmediateUploadMemory(buffer, largest_copy, copies, sparse_uniform);
     }
 }
 
 template <class P>
 void BufferCache<P>::ImmediateUploadMemory([[maybe_unused]] Buffer& buffer,
                                            [[maybe_unused]] u64 largest_copy,
-                                           [[maybe_unused]] std::span<const BufferCopy> copies) {
+                                           [[maybe_unused]] std::span<const BufferCopy> copies,
+                                           [[maybe_unused]] bool sparse_uniform) {
     if constexpr (!USE_MEMORY_MAPS_FOR_UPLOADS) {
         std::span<u8> immediate_buffer;
         for (const BufferCopy& copy : copies) {
             std::span<const u8> upload_span;
             const DAddr device_addr = buffer.CpuAddr() + copy.dst_offset;
-            if (IsRangeGranular(device_addr, copy.size)) {
+            if (sparse_uniform) {
+                if (immediate_buffer.empty()) {
+                    immediate_buffer = ImmediateBuffer(largest_copy);
+                }
+                ReadSparseUniformMemory(device_memory, device_addr,
+                                        immediate_buffer.first(copy.size));
+                upload_span = immediate_buffer.first(copy.size);
+            } else if (IsRangeGranular(device_addr, copy.size)) {
                 auto* const ptr = device_memory.GetPointer<u8>(device_addr);
                 if (ptr != nullptr) {
                     upload_span = std::span(ptr, copy.size);
@@ -4132,14 +4140,20 @@ void BufferCache<P>::ImmediateUploadMemory([[maybe_unused]] Buffer& buffer,
 template <class P>
 void BufferCache<P>::MappedUploadMemory([[maybe_unused]] Buffer& buffer,
                                         [[maybe_unused]] u64 total_size_bytes,
-                                        [[maybe_unused]] std::span<BufferCopy> copies) {
+                                        [[maybe_unused]] std::span<BufferCopy> copies,
+                                        [[maybe_unused]] bool sparse_uniform) {
     if constexpr (USE_MEMORY_MAPS) {
         auto upload_staging = runtime.UploadStagingBuffer(total_size_bytes);
         const std::span<u8> staging_pointer = upload_staging.mapped_span;
         for (BufferCopy& copy : copies) {
             u8* const src_pointer = staging_pointer.data() + copy.src_offset;
             const DAddr device_addr = buffer.CpuAddr() + copy.dst_offset;
-            device_memory.ReadBlockUnsafe(device_addr, src_pointer, copy.size);
+            if (sparse_uniform) {
+                ReadSparseUniformMemory(device_memory, device_addr,
+                                        std::span{src_pointer, static_cast<size_t>(copy.size)});
+            } else {
+                device_memory.ReadBlockUnsafe(device_addr, src_pointer, copy.size);
+            }
             // Large uploads are mostly geometry the host GPU now has its own copy of: TickFrame
             // marks their guest memory cold (see TextureCache::RefreshContents).
             if (copy.size >= 256_KiB) {
@@ -4657,7 +4671,19 @@ TextureBufferBinding BufferCache<P>::GetTextureBufferBinding(GPUVAddr gpu_addr, 
 }
 
 template <class P>
-std::span<const u8> BufferCache<P>::ImmediateBufferWithData(DAddr device_addr, size_t size) {
+std::span<const u8> BufferCache<P>::ImmediateBufferWithData(DAddr device_addr, size_t size,
+                                                          bool sparse_uniform) {
+    if (sparse_uniform) {
+        constexpr u64 address_limit = u64{1} << Tegra::MaxwellDeviceMemoryManager::AS_BITS;
+        if (device_addr < address_limit && size <= address_limit - device_addr) {
+            if (const u8* pointer = device_memory.GetSpan(device_addr, size)) {
+                return std::span(pointer, size);
+            }
+        }
+        const std::span<u8> span = ImmediateBuffer(size);
+        ReadSparseUniformMemory(device_memory, device_addr, span);
+        return span;
+    }
     u8* const base_pointer = device_memory.GetPointer<u8>(device_addr);
     if (IsRangeGranular(device_addr, size) ||
         base_pointer + size == device_memory.GetPointer<u8>(device_addr + size)) {

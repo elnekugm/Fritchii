@@ -120,6 +120,7 @@ using VideoCommon::FileEnvironment;
 using VideoCommon::GenericEnvironment;
 using VideoCommon::GuessMissing;
 using VideoCommon::GraphicsEnvironment;
+using VideoCommon::ShaderSnapshotFailure;
 
 constexpr u32 CACHE_VERSION = VideoCommon::VulkanPipelineCacheVersion;
 // The warm-up builder writes these keys byte for byte (shader_warm/warm_records.h).

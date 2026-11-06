@@ -644,6 +644,7 @@ public:
         DAddr device_addr{};
         u32 size{};
         u64 epoch{~u64{0}};
+        bool sparse_uniform{};
     };
     std::array<Nx2SyncedRange, 512> nx2_synced_ranges{};
     /// Ranges recently added to a range set: adding one again before the set lost any range is a
@@ -818,20 +819,22 @@ private:
     void RefreshMultiRangeSegments(std::vector<MultiRangeSegment>& pool);
 
     bool SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 size,
+                           bool sparse_uniform = false,
                            std::source_location caller = std::source_location::current());
-    bool SynchronizeBufferPages(Buffer& buffer, DAddr device_addr, u32 size);
+    bool SynchronizeBufferPages(Buffer& buffer, DAddr device_addr, u32 size, bool sparse_uniform);
 
     /// EDEN_NX2_EXP59 & 8: before the full walk, counts and logs what the dirty-word walk would
     /// have left out. Returns whether the dirty-word walk would have walked anything.
     bool VerifyComputeDirtyWalk(DAddr device_addr, u32 size);
 
     void UploadMemory(Buffer& buffer, u64 total_size_bytes, u64 largest_copy,
-                      std::span<BufferCopy> copies);
+                      std::span<BufferCopy> copies, bool sparse_uniform);
 
     void ImmediateUploadMemory(Buffer& buffer, u64 largest_copy,
-                               std::span<const BufferCopy> copies);
+                               std::span<const BufferCopy> copies, bool sparse_uniform);
 
-    void MappedUploadMemory(Buffer& buffer, u64 total_size_bytes, std::span<BufferCopy> copies);
+    void MappedUploadMemory(Buffer& buffer, u64 total_size_bytes, std::span<BufferCopy> copies,
+                            bool sparse_uniform);
 
     void DownloadBufferMemory(Buffer& buffer_id);
 
@@ -877,7 +880,8 @@ private:
     [[nodiscard]] TextureBufferBinding GetTextureBufferBinding(GPUVAddr gpu_addr, u32 size,
                                                                PixelFormat format);
 
-    [[nodiscard]] std::span<const u8> ImmediateBufferWithData(DAddr device_addr, size_t size);
+    [[nodiscard]] std::span<const u8> ImmediateBufferWithData(DAddr device_addr, size_t size,
+                                                              bool sparse_uniform = false);
 
     [[nodiscard]] std::span<u8> ImmediateBuffer(size_t wanted_capacity);
 
