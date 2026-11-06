@@ -554,8 +554,6 @@ private:
 #endif
 
     MultiplayerState* multiplayer_state = nullptr;
-    /// Answers to the recommended settings prompt this session, by program id (asked once each).
-    std::unordered_map<u64, bool> recommended_settings_answers;
 
     GRenderWindow* render_window = nullptr;
     GameList* game_list = nullptr;

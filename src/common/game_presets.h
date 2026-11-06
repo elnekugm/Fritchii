@@ -2,9 +2,43 @@
 
 #pragma once
 
+#include <optional>
+#include <string_view>
+
 #include "common/settings.h"
 
 namespace Settings {
+
+enum class GamePresetQuality { Low, Standard, High };
+
+inline constexpr std::string_view GamePresetQualityToken(GamePresetQuality quality) {
+    switch (quality) {
+    case GamePresetQuality::Low:
+        return "low";
+    case GamePresetQuality::High:
+        return "high";
+    default:
+        return "standard";
+    }
+}
+
+inline constexpr std::optional<GamePresetQuality> ParseGamePresetQuality(std::string_view token) {
+    if (token == "low")
+        return GamePresetQuality::Low;
+    if (token == "standard")
+        return GamePresetQuality::Standard;
+    if (token == "high")
+        return GamePresetQuality::High;
+    return std::nullopt;
+}
+
+// Legacy headless answers retain their meaning; quality tokens also bypass the dialog.
+// Environment answers apply to this boot only and never become a saved UI preference.
+inline constexpr std::optional<GamePresetQuality> GamePresetEnvironmentQuality(
+    std::string_view value) {
+    return value == "1" ? std::optional{GamePresetQuality::Standard}
+                        : ParseGamePresetQuality(value);
+}
 
 inline constexpr u64 MarioKartWorldProgramId = 0x0400C3F00006E000ULL;
 inline constexpr u64 DonkeyKongBananzaProgramId = 0x040074A01BF12000ULL;
@@ -20,8 +54,7 @@ inline auto SessionSetter(bool global) {
     };
 }
 
-/// What every Switch 2 preset shares: 1x keeps the comparison with the console fair, the rest
-/// trades nothing visible for speed.
+/// Shared compatibility baseline. Visual quality is applied after each title's fixes.
 inline void SetSwitch2BaseSettings(Values& settings, bool global) {
     const auto session = SessionSetter(global);
     session(settings.renderer_backend, RendererBackend::Vulkan);
@@ -119,15 +152,40 @@ inline const GamePreset* FindGamePreset(u64 program_id) {
     return nullptr;
 }
 
-/// Applies the title's preset as per-game values for this session (RestoreGlobalState drops them
-/// when emulation stops). False when it was declined or the title has none.
-inline bool ApplyGamePreset(Values& settings, u64 program_id, bool accepted) {
+/// Applies the title's compatibility settings and visual quality for this session. Global and
+/// saved per-game values remain intact; RestoreGlobalState drops these overrides on stop.
+inline bool ApplyGamePreset(Values& settings, u64 program_id, GamePresetQuality quality) {
     const GamePreset* const preset = FindGamePreset(program_id);
-    if (!accepted || preset == nullptr) {
+    if (preset == nullptr) {
         return false;
     }
     preset->apply(settings, false);
+    const auto session = Detail::SessionSetter(false);
+    switch (quality) {
+    case GamePresetQuality::Low:
+        session(settings.resolution_setup, ResolutionSetup::Res3_4X);
+        session(settings.anti_aliasing, AntiAliasing::Fxaa);
+        session(settings.astc_recompression, AstcRecompression::Bc3);
+        session(settings.max_anisotropy, AnisotropyMode::X2);
+        break;
+    case GamePresetQuality::High:
+        session(settings.resolution_setup, ResolutionSetup::Res2X);
+        session(settings.anti_aliasing, AntiAliasing::Smaa);
+        session(settings.astc_recompression, AstcRecompression::Uncompressed);
+        session(settings.max_anisotropy, AnisotropyMode::X16);
+        break;
+    default:
+        session(settings.resolution_setup, ResolutionSetup::Res1X);
+        session(settings.anti_aliasing, AntiAliasing::Fxaa);
+        session(settings.astc_recompression, AstcRecompression::Bc3);
+        session(settings.max_anisotropy, AnisotropyMode::X4);
+        break;
+    }
     return true;
+}
+
+inline bool ApplyGamePreset(Values& settings, u64 program_id, bool accepted) {
+    return accepted && ApplyGamePreset(settings, program_id, GamePresetQuality::Standard);
 }
 
 } // namespace Settings

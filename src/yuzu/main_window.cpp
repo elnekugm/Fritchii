@@ -82,6 +82,11 @@
 #include <QActionGroup>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QLabel>
+#include <QVBoxLayout>
 #include <QDesktopServices>
 #include <QDir>
 #include <QElapsedTimer>
@@ -2184,6 +2189,17 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     config->SaveAllValues();
 
     u64 title_id{0};
+    bool boot_settings_loaded = false;
+    SCOPE_EXIT {
+        // A cancelled preset/user dialog or a failed boot must not leak session values or the
+        // loaded per-game input selection into the next title.
+        if (boot_settings_loaded && !emulation_running && !QtCommon::system->IsPoweredOn()) {
+            Settings::RestoreGlobalState(false);
+            QtCommon::system->HIDCore().ReloadInputDevices();
+            QtCommon::system->ApplySettings();
+            Settings::UpdateGPUAccuracy();
+        }
+    };
 
     last_filename_booted = filename;
 
@@ -2201,6 +2217,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
                                           ? Common::FS::PathToUTF8String(file_path.filename())
                                           : fmt::format("{:016X}", title_id);
         QtConfig per_game_config(config_file_name, Config::ConfigType::PerGameConfig);
+        boot_settings_loaded = true;
         QtCommon::system->HIDCore().ReloadInputDevices();
         QtCommon::system->ApplySettings();
     }
