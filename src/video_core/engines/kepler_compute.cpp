@@ -33,7 +33,6 @@
 #include "video_core/nx2_perf.h"
 #include "video_core/engines/fermi_2d.h"
 #include "video_core/engines/kepler_compute.h"
-#include "video_core/nx2_indirect_grid.h"
 #include "video_core/engines/native_upscale.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/game_dlss_status.h"
@@ -1954,18 +1953,63 @@ bool KeplerCompute::TryFireEmblemUpscale(bool allow_history) {
         return false;
     }
     const auto image = [&](u32 offset) -> std::optional<Texture::TICEntry> {
-        const u32 index = memory_manager.Read<u32>(address + offset) & 0xfffff;
-        if (index > regs.tic.limit || !memory_manager.IsFullyMappedRange(
-                regs.tic.Address() + u64{index} * sizeof(Texture::TICEntry), sizeof(Texture::TICEntry))) {
-            return std::nullopt;
-        }
-        return GetTICEntry(index);
+        const u32 tic_index = memory_manager.Read<u32>(cbuf_address + offset) & 0xfffff;
+        if (tic_index > regs.tic.limit) return std::nullopt;
+        return GetTICEntry(tic_index);
     };
-    const auto input = image(OutputColorInputOffset);
-    const auto output = image(OutputColorOffset);
-    if (!input || !output || !ValidPair(*input, *output, dlss_chain.spatial_only) ||
-        jitter->color != input->Address() || (use_history && dlss_motion_color != input->Address()) ||
-        jitter->width != input->Width() || jitter->height != input->Height()) {
+    const auto upscale_pair = [](const std::optional<Texture::TICEntry>& from,
+                                 const std::optional<Texture::TICEntry>& to) {
+        return from && to && from->format == to->format && from->Address() != 0 &&
+               to->Address() != 0 && to->Width() > from->Width() && from->IsBlockLinear() &&
+               to->IsBlockLinear();
+    };
+    const auto converting_pair = [](const std::optional<Texture::TICEntry>& from,
+                                    const std::optional<Texture::TICEntry>& to) {
+        return from && to && from->Address() != 0 && to->Address() != 0 &&
+               from->Address() != to->Address() && to->Width() >= from->Width() &&
+               to->Height() >= from->Height() && from->IsBlockLinear() && to->IsBlockLinear();
+    };
+    std::optional<Texture::TICEntry> input = image(0x90), output = image(0xa0);
+    bool fortunes_weave = false;
+    bool compact_parameters = false;
+    if (!upscale_pair(input, output)) {
+        input = image(0x328);
+        output = image(0x348);
+        fortunes_weave = upscale_pair(input, output);
+    }
+    if (!upscale_pair(input, output)) {
+        input = image(0x60);
+        output = image(0x70);
+        compact_parameters = upscale_pair(input, output);
+    }
+    if (!upscale_pair(input, output)) {
+        input.reset();
+        output.reset();
+        for (u32 first = 0x80; first < 0x120 && !input; first += 4) {
+            const auto from = memory_manager.Read<u32>(cbuf_address + first) != 0 ? image(first)
+                                                                                    : std::nullopt;
+            for (u32 second = first + 4; from && second < 0x120; second += 4) {
+                if (memory_manager.Read<u32>(cbuf_address + second) == 0) continue;
+                const auto to = image(second);
+                if (upscale_pair(from, to)) {
+                    input = from;
+                    output = to;
+                    break;
+                }
+            }
+        }
+    }
+    bool converting = false;
+    for (const auto& [from, to] : {std::pair{0x90U, 0xa0U}, {0x328U, 0x348U}, {0x60U, 0x70U}}) {
+        if (input) break;
+        if (converting_pair(image(from), image(to))) {
+            input = image(from);
+            output = image(to);
+            converting = true;
+            compact_parameters = from == 0x60;
+        }
+    }
+    if (!input || !output)
         return false;
     }
     const auto surface = [](const Texture::TICEntry& tic, Tegra::RenderTargetFormat format) {
@@ -1982,21 +2026,180 @@ bool KeplerCompute::TryFireEmblemUpscale(bool allow_history) {
         result.addr_lower = static_cast<u32>(tic.Address());
         return result;
     };
-    const auto input_format = dlss_chain.spatial_only ? Tegra::RenderTargetFormat::A8B8G8R8_SRGB
-                                                     : Tegra::RenderTargetFormat::B10G11R11_FLOAT;
-    const auto output_format = dlss_chain.spatial_only ? Tegra::RenderTargetFormat::R16G16B16A16_FLOAT
-                                                      : Tegra::RenderTargetFormat::B10G11R11_FLOAT;
-    const bool done = rasterizer->AccelerateTemporalUpscale(
-        surface(*input, input_format), surface(*output, output_format),
-        use_history ? surface(*motion, Tegra::RenderTargetFormat::R16G16_FLOAT) : Fermi2D::Surface{},
-        use_history ? &*depth : nullptr, jitter->offset,
-        use_history ? std::array{1.0f, 1.0f} : std::array{0.0f, 0.0f}, use_history);
-    static std::array<u32, 2> logged{};
-    if (logged[game_index]++ < 8) {
-        LOG_INFO(HW_GPU, "{} DLSS replacement: {} temporal={} input={:#x} {}x{} output={:#x} {}x{} jitter={},{}",
-                 game, done ? "applied" : "unavailable; retaining native dispatch", use_history,
-                 input->Address(), input->Width(), input->Height(), output->Address(),
-                 output->Width(), output->Height(), jitter->offset[0], jitter->offset[1]);
+    // Title 4's program ends by decoding its result from sRGB to linear (the 0.04045 threshold
+    // and the 2.4 exponent as half-precision immediates of HSETP2 and HMUL2). The copy of its
+    // sRGB input left the frame gamma-encoded twice, washed out: decode in the copy when the
+    // program does.
+    static std::unordered_map<GPUVAddr, bool> decodes_srgb;
+    const GPUVAddr program = regs.code_loc.Address();
+    const auto [known, inserted] = decodes_srgb.try_emplace(program, false);
+    if (inserted) {
+        bool threshold = false, exponent = false;
+        std::array<u32, 0x400> block{};
+        for (u64 offset = 0; offset < 0x20000 && !(threshold && exponent); offset += sizeof(block)) {
+            if (!memory_manager.IsFullyMappedRange(program + offset, sizeof(block))) break;
+            memory_manager.ReadBlock(program + offset, block.data(), sizeof(block));
+            for (size_t word = 0; word < block.size(); word += 4) {
+                const u32 opcode = block[word] & 0xfff;
+                threshold |= opcode == 0x434 && block[word + 1] == 0x292d292d;
+                exponent |= opcode == 0x832 && block[word + 1] == 0x40cc40cc;
+            }
+        }
+        known->second = threshold && exponent;
+        LOG_INFO(HW_GPU, "Upscale fallback for program {:#x}: {}", program,
+                 known->second ? "decodes sRGB like the program" : "plain copy");
+    }
+    Fermi2D::Config config{
+        .operation = known->second ? Fermi2D::Operation::SrcCopySrgbToLinear
+                                   : Fermi2D::Operation::SrcCopy,
+        .filter = Fermi2D::Filter::Bilinear,
+        .must_accelerate = true,
+        .dst_x0 = 0,
+        .dst_y0 = 0,
+        .dst_x1 = static_cast<s32>(output->Width()),
+        .dst_y1 = static_cast<s32>(output->Height()),
+        .src_x0 = 0,
+        .src_y0 = 0,
+        .src_x1 = static_cast<s32>(input->Width()),
+        .src_y1 = static_cast<s32>(input->Height()),
+    };
+    if (compact_parameters && cbuf.size.Value() >= 0x30 &&
+        launch_description.block_dim_y == 1 && launch_description.block_dim_z == 1) {
+        std::array<u32, 12> parameters{};
+        memory_manager.ReadBlock(cbuf_address, parameters.data(), sizeof(parameters));
+        const auto regions = DecodeNativeUpscaleRegions(
+            parameters,
+            {launch_description.block_dim_x.Value(), launch_description.grid_dim_x.Value(),
+             launch_description.grid_dim_y.Value(), launch_description.grid_dim_z.Value()},
+            {input->Width(), input->Height()}, {output->Width(), output->Height()});
+        if (regions) {
+            config.src_x0 = static_cast<s32>(regions->source[0]);
+            config.src_y0 = static_cast<s32>(regions->source[1]);
+            config.src_x1 = static_cast<s32>(regions->source[2]);
+            config.src_y1 = static_cast<s32>(regions->source[3]);
+            config.dst_x0 = static_cast<s32>(regions->destination[0]);
+            config.dst_y0 = static_cast<s32>(regions->destination[1]);
+            config.dst_x1 = static_cast<s32>(regions->destination[2]);
+            config.dst_y1 = static_cast<s32>(regions->destination[3]);
+        }
+    }
+    // Debug (EDEN_NX2_SAMPLE_AT=<n>): at the n-th upscale, download the input, output and targets
+    // and count non-zero words. Off by default: the downloads froze Donkey Kong Bananza for ~1.3 s.
+    static const u32 sample_at = [] {
+        const char* value = std::getenv("EDEN_NX2_SAMPLE_AT");
+        return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : ~0U;
+    }();
+    if (static u32 sampled{}; sampled++ == sample_at) {
+        const auto sample = [&](const Texture::TICEntry& tic) {
+            const u64 size = u64{tic.Width()} * tic.Height() * 4;
+            if (const auto device = memory_manager.GpuToCpuAddress(tic.Address())) {
+                rasterizer->FlushRegion(*device, size, VideoCommon::CacheType::All);
+            }
+            u32 nonzero{}, samples{};
+            u64 sum{};
+            for (u64 offset = 0; offset < size; offset += 4096 + 4) {
+                const u32 word = memory_manager.Read<u32>(tic.Address() + offset);
+                ++samples;
+                nonzero += word != 0;
+                sum += (word & 0x3ff) + ((word >> 10) & 0x3ff) + ((word >> 20) & 0x3ff);
+            }
+            LOG_INFO(HW_GPU, "Upscale fallback image {:#x}: {}/{} sampled words non-zero, mean channel {}",
+                     tic.Address(), nonzero, samples, samples ? sum / (samples * 3) : 0);
+        };
+        sample(*input);
+        sample(*output);
+        // Every 2560x1440 target the in-game passes draw to (from EDEN_NX2_RT_TRACE).
+        for (const GPUVAddr address : {0x8116a03000ULL, 0x8117ae5000ULL, 0x8114b62000ULL,
+                                       0x8115a63000ULL, 0x8117904000ULL, 0x8114a02000ULL}) {
+            Texture::TICEntry fake = *input;
+            const u64 size = 2560ULL * 1440 * 4;
+            if (const auto device = memory_manager.GpuToCpuAddress(address)) {
+                rasterizer->FlushRegion(*device, size, VideoCommon::CacheType::All);
+            }
+            u32 nonzero{}, samples{}, distinct{};
+            u32 last{};
+            for (u64 offset = 0; offset < size; offset += 4096 + 4) {
+                const u32 word = memory_manager.Read<u32>(address + offset);
+                ++samples;
+                nonzero += word != 0;
+                distinct += word != last;
+                last = word;
+            }
+            LOG_INFO(HW_GPU, "Upscale fallback target {:#x}: {}/{} non-zero, {} changes", address, nonzero,
+                     samples, distinct);
+            (void)fake;
+        }
+    }
+    auto source = surface(*input);
+    // EDEN_NX2_UPSCALE_SOURCE=<gpu address>: blit from another same-sized image (debug aid).
+    if (static const u64 override_source = [] {
+            const char* value = std::getenv("EDEN_NX2_UPSCALE_SOURCE");
+            return value ? std::strtoull(value, nullptr, 16) : 0ULL;
+        }();
+        override_source != 0) {
+        source.addr_upper = static_cast<u32>(override_source >> 32);
+        source.addr_lower = static_cast<u32>(override_source);
+        if (const char* value = std::getenv("EDEN_NX2_UPSCALE_SOURCE_FORMAT")) {
+            source.format = static_cast<RTFormat>(std::strtoul(value, nullptr, 16));
+        }
+    }
+    // Fortune's Weave: a temporal upscale along its motion vectors that undoes this frame's camera
+    // jitter (both from the frame's first DLSS pass) and accumulates the frames as DLSS would.
+    // EDEN_NX2_TEMPORAL_UPSCALE=0 blits instead.
+    const auto upscale_temporally = [&] {
+        static const bool enabled = [] {
+            const char* value = std::getenv("EDEN_NX2_TEMPORAL_UPSCALE");
+            return value == nullptr || std::string_view{value} != "0";
+        }();
+        if (!fortunes_weave || !enabled || !dlss_motion_vectors ||
+            dlss_motion_color != input->Address())
+            return false;
+        Fermi2D::Surface motion = surface(*dlss_motion_vectors);
+        motion.format = RTFormat::R16G16_FLOAT;
+        return rasterizer->AccelerateTemporalUpscale(source, surface(*output), motion,
+                                                     dlss_depth ? &*dlss_depth : nullptr,
+                                                     dlss_jitter, {1.0f, 1.0f});
+    };
+    auto destination = surface(*output);
+    destination.format = *output_format;
+    const bool done = upscale_temporally() ||
+                      rasterizer->AccelerateSurfaceCopy(source, destination, config);
+    if (static u32 checked{}; checked++ == sample_at) {
+        const u64 size = u64{output->Width()} * output->Height() * 4;
+        if (const auto device = memory_manager.GpuToCpuAddress(output->Address())) {
+            rasterizer->FlushRegion(*device, size, VideoCommon::CacheType::All);
+        }
+        u32 nonzero{}, samples{}, changes{}, last{};
+        for (u64 offset = 0; offset < size; offset += 4096 + 4) {
+            const u32 word = memory_manager.Read<u32>(output->Address() + offset);
+            ++samples;
+            nonzero += word != 0;
+            changes += word != last;
+            last = word;
+        }
+        LOG_INFO(HW_GPU, "Upscale fallback output after blit: {}/{} non-zero, {} changes", nonzero, samples,
+                 changes);
+    }
+    // Debug: trace the draws that follow one upscale (EDEN_NX2_RT_TRACE_AFTER_UPSCALE).
+    static const u32 trace_at = [] {
+        const char* value = std::getenv("EDEN_NX2_TRACE_AFTER_UPSCALE");
+        return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
+    }();
+    if (static u32 count{}; trace_at != 0 && ++count == trace_at) g_nx2_trace_draws_after_upscale = 40;
+    static u32 logged{};
+    if (logged++ < 4) {
+        LOG_INFO(HW_GPU, "Upscale fallback {:#x} {}x{} block {}/{}/{} -> {:#x} {}x{} block {}/{}/{} levels {}: {}",
+                 input->Address(), input->Width(), input->Height(), input->block_width.Value(),
+                 input->block_height.Value(), input->block_depth.Value(), output->Address(),
+                 output->Width(), output->Height(), output->block_width.Value(),
+                 output->block_height.Value(), output->block_depth.Value(), output->max_mip_level.Value(),
+                 done ? "blitted" : "not accelerated");
+        LOG_INFO(HW_GPU, "Upscale active rectangles ({},{})-({},{}) -> ({},{})-({},{})",
+                 config.src_x0, config.src_y0, config.src_x1, config.src_y1,
+                 config.dst_x0, config.dst_y0, config.dst_x1, config.dst_y1);
+        if (converting)
+            LOG_INFO(HW_GPU, "Upscale fallback converts format {:#x} -> {:#x}",
+                     static_cast<u32>(*input_format), static_cast<u32>(*output_format));
     }
     return done;
 }
