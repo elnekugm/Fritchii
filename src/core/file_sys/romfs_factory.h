@@ -36,7 +36,7 @@ enum class StorageId : u8 {
 };
 
 // Extracted add-on content (<game>/dlc/<aoc title id>/<n>/romfs) has no NCA to register, so the
-// loose ExeFS loader hands its RomFS over here; aoc:u lists it and Open() serves it as Data.
+// loose ExeFS and NUP loaders hand their RomFS over here; aoc:u lists it and Open() serves it as Data.
 void SetLooseAOC(std::vector<std::pair<u64, VirtualFile>> entries);
 [[nodiscard]] std::vector<u64> GetLooseAOCTitleIDs();
 

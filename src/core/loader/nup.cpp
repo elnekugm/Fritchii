@@ -203,18 +203,6 @@ AppLoader_NUP::AppLoader_NUP(FileSys::VirtualFile file_)
                 meta.localized_icons.front().second, "icon.dat");
         }
     }
-
-    const auto addon_count = std::count_if(nup->GetPackages().begin(), nup->GetPackages().end(),
-                                           [](const auto& package) {
-                                               return package.kind ==
-                                                      NupContainer::PackageKind::Addon;
-                                           });
-    if (addon_count > 0) {
-        LOG_WARNING(Loader,
-                    "NUP container has {} add-on content package(s); AoC mounting is not "
-                    "supported yet",
-                    addon_count);
-    }
 }
 
 AppLoader_NUP::~AppLoader_NUP() = default;
@@ -238,6 +226,10 @@ AppLoader::LoadResult AppLoader_NUP::Load(Kernel::KProcess& process, Core::Syste
     if (result.first != ResultStatus::Success) {
         return result;
     }
+
+    // The secondary ExeFS loader resets loose content. Publish the NUP entries only
+    // after it succeeds, before the guest can enumerate or open add-on content.
+    FileSys::SetLooseAOC(nup->GetAddonRomFS(base_title_id));
 
     system.GetFileSystemController().RegisterProcess(
         process.GetProcessId(), base_title_id,

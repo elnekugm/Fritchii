@@ -23,8 +23,36 @@
 #include "common/logging.h"
 #include "common/swap.h"
 #include "core/file_sys/vfs/vfs_offset.h"
+#include "core/file_sys/common_funcs.h"
+#include "core/file_sys/romfs.h"
 
 namespace FileSys {
+
+std::vector<std::pair<u64, VirtualFile>> NupContainer::GetAddonRomFS(u64 program_id) {
+    std::map<u64, std::size_t> selected;
+    for (std::size_t i = 0; i < packages.size(); ++i) {
+        const auto& package = packages[i];
+        if (package.kind != PackageKind::Addon ||
+            GetBaseTitleID(package.title_id) != GetBaseTitleID(program_id) ||
+            package.title_id < GetAOCBaseTitleID(program_id) || GetRomFSDir(i) == nullptr) {
+            continue;
+        }
+        const auto it = selected.find(package.title_id);
+        if (it == selected.end() || package.version > packages[it->second].version) {
+            selected[package.title_id] = i;
+        }
+    }
+    std::vector<std::pair<u64, VirtualFile>> entries;
+    for (const auto& [title_id, index] : selected) {
+        if (auto romfs = CreateRomFS(GetRomFSDir(index))) {
+            LOG_INFO(Loader, "NUP add-on content {:016X} (v{}) mounted", title_id,
+                     packages[index].version);
+            entries.emplace_back(title_id, std::move(romfs));
+        }
+    }
+    return entries;
+}
+
 namespace {
 
 constexpr u32 NoDir = 0xFFFFFFFF;

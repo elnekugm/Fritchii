@@ -161,6 +161,9 @@ public:
     VirtualDir GetRomFSDir(std::size_t package_index);
     VirtualDir GetPackageDir(std::size_t package_index);
 
+    /// Newest usable add-on RomFS per title belonging to this application.
+    std::vector<std::pair<u64, VirtualFile>> GetAddonRomFS(u64 program_id);
+
     /// Stream-hashes every member file against its stored SHA-256.
     Loader::ResultStatus VerifyIntegrity(
         std::function<bool(std::size_t, std::size_t)> progress_callback) const;
