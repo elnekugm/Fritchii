@@ -324,6 +324,8 @@ void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
 }
 
 void Scheduler::WaitWorker() {
+    const bool trace = Common::HitchDiagnostic::Enabled();
+    const u64 begin_ns = trace ? Common::HitchDiagnostic::NowNs() : 0;
     DispatchWork();
 
     // Waits for the Vulkan worker (tools/nx2/critical_path.py's table): the queue, then the
@@ -364,6 +366,10 @@ void Scheduler::DispatchWork() {
         bool wake;
         {
             std::scoped_lock ql{queue_mutex};
+            if (Common::HitchDiagnostic::Enabled()) {
+                chunk->MarkDiagnosticQueued(Common::HitchDiagnostic::NowNs(), work_queue.size() + 1,
+                                             master_semaphore->CurrentTick());
+            }
             work_queue.push(std::move(chunk));
             wake = worker_waiting;
         }
@@ -646,6 +652,12 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
             } while (std::chrono::steady_clock::now() < end);
         }
 
+        const bool trace = Common::HitchDiagnostic::Enabled();
+        u64 dequeued_ns = 0;
+        u64 execute_begin_ns = 0;
+        u64 execute_end_ns = 0;
+        u64 ready_ns = 0;
+        bool has_submit = false;
         {
             std::unique_lock lk{queue_mutex};
 
@@ -664,6 +676,7 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
                 return;
             }
 
+            dequeued_ns = trace ? Common::HitchDiagnostic::NowNs() : 0;
             // Exchange lock ownership so that we take the execution lock before
             // the queue lock goes out of scope. This allows us to force execution
             // to complete in the next step.
@@ -675,11 +688,27 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
             Common::Nx2Timeline::Span timeline_span{has_submit ? "record commands + submit"
                                                                : "record commands"};
             work->ExecuteAll(current_cmdbuf, current_upload_cmdbuf);
+            execute_end_ns = trace ? Common::HitchDiagnostic::NowNs() : 0;
 
             // If the chunk was a submission, reallocate the command buffer.
             if (has_submit) {
                 AllocateWorkerCommandBuffer();
             }
+            ready_ns = trace ? Common::HitchDiagnostic::NowNs() : 0;
+        }
+        if (trace && HitchTrace::Claim(HitchTrace::Event::WorkerChunk,
+                                      ready_ns - work->diagnostic_enqueue_ns)) {
+            LOG_INFO(Render_Vulkan,
+                     "VulkanHitch worker_chunk enqueue_ns={} dequeue_ns={} execute_begin_ns={} "
+                     "execute_end_ns={} ready_ns={} queue_delay_ns={} execution_lock_ns={} "
+                     "execute_ns={} allocate_ns={} depth={} submit={} queued_logical_tick={} "
+                     "logical_tick={} submitted_tick={} gpu_tick={}",
+                     work->diagnostic_enqueue_ns, dequeued_ns, execute_begin_ns, execute_end_ns,
+                     ready_ns, dequeued_ns - work->diagnostic_enqueue_ns,
+                     execute_begin_ns - dequeued_ns, execute_end_ns - execute_begin_ns,
+                     ready_ns - execute_end_ns, work->diagnostic_queue_depth, has_submit,
+                     work->diagnostic_logical_tick, master_semaphore->CurrentTick(),
+                     master_semaphore->DiagnosticSubmittedTick(), master_semaphore->KnownGpuTick());
         }
 
         {
@@ -955,6 +984,8 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
             on_submit();
         }
 
+        const bool trace = Common::HitchDiagnostic::Enabled();
+        const u64 mutex_begin_ns = trace ? Common::HitchDiagnostic::NowNs() : 0;
         std::scoped_lock lock{submit_mutex};
         // Lines up with DkbFrameTrace's begin stamp and the driver's queue packets.
         if (Common::Nx2Timeline::Active()) {

@@ -2361,7 +2361,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         flags |= VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT;
     }
 
-    pipeline = device.GetLogical().CreateGraphicsPipeline({
+    const VkGraphicsPipelineCreateInfo graphics_ci{
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .pNext = nullptr,
         .flags = flags,
@@ -2385,7 +2385,12 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .subpass = 0,
         .basePipelineHandle = nullptr,
         .basePipelineIndex = 0,
-    }, *pipeline_cache);
+    };
+    const bool trace = Common::HitchDiagnostic::Enabled();
+    PipelineHitchTrace::Scope hitch{PipelineHitchTrace::Phase::DriverCreate,
+                                    "graphics-driver-create", trace ? key.Hash() : 0, trace};
+    pipeline = device.GetLogical().CreateGraphicsPipeline(graphics_ci, *pipeline_cache);
+    hitch.Finish();
 
     // Log graphics pipeline creation
     if (GPU::Logging::IsActive()) {

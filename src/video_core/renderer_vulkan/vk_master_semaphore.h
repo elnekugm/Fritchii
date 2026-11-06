@@ -38,6 +38,11 @@ public:
         return gpu_tick.load(std::memory_order_acquire);
     }
 
+    /// Diagnostic only: unlike CurrentTick(), advanced after the driver accepted a submission.
+    [[nodiscard]] u64 DiagnosticSubmittedTick() const noexcept {
+        return diagnostic_submitted_tick.load(std::memory_order_acquire);
+    }
+
     /// Returns true when a tick has been hit by the GPU.
     [[nodiscard]] bool IsFree(u64 tick) const noexcept {
         return KnownGpuTick() >= tick;

@@ -10,6 +10,8 @@
 
 #include <ranges>
 #include "common/settings.h"
+#include "common/scope_exit.h"
+#include "video_core/renderer_vulkan/vk_hitch_diagnostic.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/stall_diagnostics.h"
 #include "video_core/vulkan_common/vulkan_device.h"
@@ -81,6 +83,25 @@ void MasterSemaphore::Refresh() {
 }
 
 void MasterSemaphore::Wait(u64 tick) {
+    const bool trace = Common::HitchDiagnostic::Enabled();
+    const u64 begin_ns = trace ? Common::HitchDiagnostic::NowNs() : 0;
+    const u64 logical_begin = trace ? CurrentTick() : 0;
+    const u64 submitted_begin = trace ? DiagnosticSubmittedTick() : 0;
+    const u64 gpu_begin = trace ? KnownGpuTick() : 0;
+    SCOPE_EXIT {
+        if (trace) {
+            const u64 end_ns = Common::HitchDiagnostic::NowNs();
+            if (HitchTrace::Claim(HitchTrace::Event::GpuWait, end_ns - begin_ns)) {
+                LOG_INFO(Render_Vulkan,
+                         "VulkanHitch gpu_wait begin_ns={} end_ns={} wait_ns={} tick={} "
+                         "logical_begin={} logical_end={} submitted_begin={} submitted_end={} "
+                         "gpu_begin={} gpu_end={} unsubmitted_at_entry={} timeline={}",
+                         begin_ns, end_ns, end_ns - begin_ns, tick, logical_begin, CurrentTick(),
+                         submitted_begin, DiagnosticSubmittedTick(), gpu_begin, KnownGpuTick(),
+                         tick > submitted_begin, static_cast<bool>(semaphore));
+            }
+        }
+    };
     if (!semaphore) {
         // Fast check: already reached the requested tick?
         if (gpu_tick.load(std::memory_order_acquire) >= tick) {

@@ -421,6 +421,16 @@ private:
             return submit;
         }
 
+        void MarkDiagnosticQueued(u64 time_ns, size_t queue_depth, u64 logical_tick) {
+            diagnostic_enqueue_ns = time_ns;
+            diagnostic_queue_depth = queue_depth;
+            diagnostic_logical_tick = logical_tick;
+        }
+
+        u64 diagnostic_enqueue_ns{};
+        size_t diagnostic_queue_depth{};
+        u64 diagnostic_logical_tick{};
+
     private:
         Command* first = nullptr;
         Command* last = nullptr;

@@ -11,6 +11,7 @@
 #include <thread>
 #include <chrono>
 #include <condition_variable>
+#include <fstream>
 #include <cstring>
 #include <set>
 #include <span>
@@ -2101,6 +2102,11 @@ private:
         u32 presents{}, ran_ahead{};
         std::chrono::steady_clock::time_point last_present{};
     } m_stats{};
+    bool m_hitch_initialized{};
+    u32 m_hitch_reports{};
+    u32 m_hitch_io_reports{};
+    std::unique_ptr<std::ofstream> m_hitch_csv;
+    std::optional<Common::HitchDiagnostic::FrameTimes> m_hitch_previous;
     u32 m_previous_fence_id{~0U}; // none yet (WaitForFrame ignores ids >= 192)
     u32 m_previous_fence_value{};
     u32 m_frame_fence_relearn_logs{}; // the first 8 frame-fence learn lines
