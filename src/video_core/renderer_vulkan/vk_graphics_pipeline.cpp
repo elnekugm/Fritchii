@@ -2235,68 +2235,7 @@ void GraphicsPipeline::FillStates(PipelineStates& s) const {
         .dynamicStateCount = static_cast<u32>(dynamic_states.size()),
         .pDynamicStates = dynamic_states.data(),
     };
-}
-
-void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
-    if (IsMeshPipeline() && !device.IsExtMeshShaderSupported() && !mesh_emulation) {
-        return;
-    }
-    if (mesh_emulation) {
-        // The mesh program (stage 0, or mesh_stage after a task program in stage 0) is built as
-        // a compute shader, and so is the task program; the draw uses the vertex shader that
-        // reads the mesh program's output.
-        // Votes, ballots and shuffles span the guest's 32-thread warp, which a driver may split
-        // in compute shaders too (RDNA runs them wave64).
-        const VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT compute_subgroup_size_ci{
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT,
-            .pNext = nullptr,
-            .requiredSubgroupSize = GuestWarpSize,
-        };
-        const auto make_compute = [&](VkShaderModule module, VkPipelineLayout layout,
-                                      const Shader::Info* info) {
-            const bool uses_warp_ops{info && (info->uses_subgroup_vote ||
-                                              info->uses_subgroup_invocation_id ||
-                                              info->uses_subgroup_shuffles ||
-                                              info->uses_subgroup_mask ||
-                                              info->uses_quad_shuffles || info->uses_fswzadd)};
-            const bool force_warp_size{uses_warp_ops && device.IsExtSubgroupSizeControlSupported() &&
-                                       device.IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT)};
-            return device.GetLogical().CreateComputePipeline(
-                VkComputePipelineCreateInfo{
-                    .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-                    .pNext = nullptr,
-                    .flags = 0,
-                    .stage{
-                        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                        .pNext = force_warp_size ? &compute_subgroup_size_ci : nullptr,
-                        .flags = 0,
-                        .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-                        .module = module,
-                        .pName = "main",
-                        .pSpecializationInfo = nullptr,
-                    },
-                    .layout = layout,
-                    .basePipelineHandle = nullptr,
-                    .basePipelineIndex = 0,
-                },
-                *pipeline_cache);
-        };
-        mesh_vertex_module = BuildShader(device, mesh_emulation->vertex_spirv);
-        mesh_compute_pipeline = make_compute(*spv_modules[mesh_emulation->mesh_stage],
-                                             *pipeline_layout,
-                                             &stage_infos[mesh_emulation->mesh_stage]);
-        if (mesh_emulation->has_task) {
-            task_compute_pipeline =
-                make_compute(*spv_modules[0], *pipeline_layout, &stage_infos[0]);
-            distribution_module = BuildShader(device, mesh_emulation->distribution_spirv);
-            distribution_pipeline =
-                make_compute(*distribution_module, *distribution_layout, nullptr);
-        }
-    }
-    PipelineStates states;
-    FillStates(states);
-    const bool is_mesh{states.is_mesh};
-    [[maybe_unused]] const VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT subgroup_size_ci{
+    const VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT subgroup_size_ci{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT,
         .pNext = nullptr,
         .requiredSubgroupSize = GuestWarpSize,
@@ -2306,12 +2245,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         if (!(*spv_modules)[stage]) {
             continue;
         }
-        if (mesh_emulation && mesh_emulation->has_task && stage == mesh_emulation->mesh_stage) {
-            continue; // the mesh program runs as a compute shader
-        }
-        // Mesh emulation: stage 0 is the vertex shader reading the compute pass's output.
-        const bool emulated_vertex{mesh_emulation && stage == 0};
-        [[maybe_unused]] auto& stage_ci =
+        auto& stage_ci =
             shader_stages.emplace_back(VkPipelineShaderStageCreateInfo{
                 .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                 .pNext = nullptr,

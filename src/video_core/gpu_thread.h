@@ -9,12 +9,14 @@
 #include <functional>
 #include <atomic>
 #include <mutex>
+#include <memory>
 #include <optional>
 #include <thread>
 #include <variant>
 
 #include "common/bounded_threadsafe_queue.h"
 #include "common/polyfill_thread.h"
+#include "common/thread.h"
 #include "video_core/dma_pusher.h"
 #include "video_core/framebuffer_config.h"
 #include "video_core/rasterizer_download_area.h"
@@ -124,10 +126,11 @@ struct SynchState final {
     CommandQueue queue;
     u64 last_fence{};
     std::atomic<u64> signaled_fence{};
-    std::atomic<u64> readback_generation{1};
-    std::atomic<u64> published_work_sequence{};
-    std::atomic<u64> async_guest_writes{};
-    bool shutting_down{};
+    std::condition_variable_any cv;
+    Common::Event pending_wake;
+    std::atomic<bool> idle_on_pending{};
+    std::mutex pending_idle_mutex;
+    std::weak_ptr<Common::Event> pending_idle_wake;
 };
 
 /// Class used to manage the GPU thread
@@ -169,6 +172,16 @@ public:
     void Run(std::function<void()>&& func, bool is_async, bool before_later_reads = false);
 
     void NotifyShutdown();
+    [[nodiscard]] bool IsIdleOnPendingSemaphore() const noexcept {
+        return state.idle_on_pending.load(std::memory_order_acquire) && state.queue.Empty();
+    }
+    void SetPendingIdleWake(const std::shared_ptr<Common::Event>& event) {
+        std::scoped_lock lk{state.pending_idle_mutex};
+        state.pending_idle_wake = event;
+    }
+    void WakePending() {
+        state.pending_wake.Set();
+    }
 
 private:
     /// Pushes a command to be executed by the GPU thread

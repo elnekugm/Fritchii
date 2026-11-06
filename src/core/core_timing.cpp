@@ -94,12 +94,7 @@ void CoreTiming::Initialize(std::function<void()>&& on_thread_init_) {
 #endif
         timer_thread = std::jthread([this](std::stop_token stop_token) {
             Common::SetCurrentThreadName("HostTiming");
-            Common::SetCurrentThreadPriority(Common::ThreadPriority::VeryHigh);
-#ifdef __linux__
-            // This thread sleeps until the next event (vsync, guest timeouts, pollers) with timed
-            // waits, which Linux lets run late by the thread's timer slack, 50 us by default.
-            prctl(PR_SET_TIMERSLACK, 1UL, 0UL, 0UL, 0UL);
-#endif
+            Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
             Common::SetCurrentThreadToPerformanceCores();
             on_thread_init();
 #ifdef _WIN32

@@ -634,8 +634,10 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
             continue;
         }
         if (patch.build_id != build_id) {
-            LOG_INFO(Loader, "    - Skipping \"{}\": build id {} is not {}", patch.name, build_id,
-                     patch.build_id);
+            LOG_WARNING(Loader,
+                        "    - Skipping \"{}\": this game version's {} has build id {}; the patch is "
+                        "made for {}",
+                        patch.name, name, build_id, patch.build_id);
             continue;
         }
         if (patch.state_size != 0 && !InModuleBss(header, patch.state_offset, patch.state_size)) {
@@ -655,19 +657,41 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
                 apply = false;
                 break;
             }
-            if (record.checked) {
-                u32 original;
-                std::memcpy(&original, nso.data() + offset, sizeof(original));
-                if (original != record.original) {
+            const u8* const original = nso.data() + offset;
+            u32 word{};
+            std::memcpy(&word, original, sizeof(word));
+            // Word: the exact original, or the patch is skipped. BranchLink and Zero are what the
+            // patch was made against; the build id already pins the module, as it does for the
+            // community mod file, so a difference there is only logged.
+            switch (write.check) {
+            case BuiltinCheck::Word:
+                if (word != write.original) {
                     LOG_WARNING(Loader,
                                 "    - Skipping \"{}\": {}+{:#x} holds {:#010x}, expected {:#010x}",
-                                patch.name, name, record.module_offset, original, record.original);
-                    apply = false;
-                    break;
+                                patch.name, name, write.module_offset, word, write.original);
+                    applicable = false;
                 }
+                break;
+            case BuiltinCheck::BranchLink:
+                if ((word & 0xFC000000U) != 0x94000000U) {
+                    LOG_WARNING(Loader, "    - \"{}\": {}+{:#x} holds {:#010x}, not a BL; patching anyway",
+                                patch.name, name, write.module_offset, word);
+                }
+                break;
+            case BuiltinCheck::Zero:
+                if (!std::all_of(original, original + write.bytes.size(),
+                                 [](u8 byte) { return byte == 0; })) {
+                    LOG_WARNING(Loader,
+                                "    - \"{}\": {}+{:#x} is not empty (first word {:#010x}); patching "
+                                "anyway",
+                                patch.name, name, write.module_offset, word);
+                }
+                break;
             }
-            if (!std::equal(nso.begin() + offset, nso.begin() + offset + record.bytes.size(),
-                            out.begin() + offset)) {
+            if (!applicable) {
+                break;
+            }
+            if (std::memcmp(out.data() + offset, original, write.bytes.size()) != 0) {
                 LOG_INFO(Loader,
                          "    - Skipping \"{}\": a user mod already patched {}+{:#x}, the mod's "
                          "patch is used",

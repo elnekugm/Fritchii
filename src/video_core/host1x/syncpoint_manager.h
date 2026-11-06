@@ -100,8 +100,7 @@ private:
 
     std::mutex guard;
     u64 last_action_id{};
-    std::atomic<GuestIncrementHook> guest_increment_hook{};
-    std::atomic<void*> guest_increment_context{};
+    std::atomic<u64> pending_waiters{};
     std::condition_variable wait_guest_cv;
     std::condition_variable wait_host_cv;
     std::condition_variable actions_done_cv;

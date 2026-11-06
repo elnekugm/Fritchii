@@ -6,6 +6,9 @@
 
 #include <chrono>
 #include <thread>
+#if defined(ARCHITECTURE_x86_64)
+#include <immintrin.h>
+#endif
 
 #include "common/assert.h"
 #include "common/dkb_cpu_trace.h"
@@ -24,6 +27,7 @@
 #include "video_core/nx2_profile.h"
 #include "video_core/readback_diagnostics.h"
 #include "video_core/host1x/host1x.h"
+#include "video_core/nx2.h"
 #include "video_core/renderer_base.h"
 
 namespace VideoCommon::GPUThread {
@@ -89,12 +93,18 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
         Common::PinCurrentThread(Common::PinnedRole::GpuFront);
         Common::SetCurrentThreadToPerformanceCores();
+        VideoCommon::GpuSplit::PinCurrentThread("EDEN_NX2_PIN_FRONT");
         system.RegisterHostThread();
+        Tegra::Nx2SemaphoreWaiters::Get().SetWakeEvent(&state.pending_wake);
+        SCOPE_EXIT {
+            Tegra::Nx2SemaphoreWaiters::Get().SetWakeEvent(nullptr);
+        };
 
         auto current_context = context.Acquire();
         CommandDataContainer next;
         // When a pending channel last moved or a command arrived (see the polling below).
         auto last_progress = std::chrono::steady_clock::now();
+        u32 idle_polls = 0;
         namespace Profile = VideoCommon::Nx2Profile;
         // Before the split's back thread starts, which reads it too.
         Profile::Initialize();
@@ -109,34 +119,67 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                 }
             } else if (scheduler.HasPendingChannels()) {
                 // Suspended channels wait on semaphores the CPU releases: poll them meanwhile.
+                bool progressed = false;
                 {
                     Profile::Scope scope{Profile::Zone::ResumePending};
-                    scheduler.ResumePending(system.GPU());
+                    progressed = scheduler.ResumePending(system.GPU());
+                }
+                if (progressed) {
+                    state.idle_on_pending.store(false, std::memory_order_release);
+                    last_progress = std::chrono::steady_clock::now();
+                    idle_polls = 0;
                 }
                 if (!state.queue.TryPop(next)) {
-                    // EDEN_NX2_EXP27 & 1: what the resumed channels sent goes to the back before
-                    // this thread yields or sleeps (Commit publishes every 256 words).
-                    if (split.Active()) {
-                        split.PublishBeforeWait();
+                    if (!scheduler.HasPendingChannels()) {
+                        state.idle_on_pending.store(false, std::memory_order_release);
+                        continue;
                     }
-                    // The CPU usually releases the semaphore soon after: poll for half a
-                    // millisecond before sleeping, or every wait also waits out a host sleep
-                    // (title 1 waits ~25 times a second).
-                    // EDEN_NX2_EXP6 (zortos293/Lichii#446): 1 = 50 us sleeps (Ocarina waits here
-                    // ~330 times a second and its present waits for the work behind them; on
-                    // Windows a sleep still lasts one timer tick, ~0.5 ms), 2 = always yield.
+                    if (!state.idle_on_pending.load(std::memory_order_relaxed) &&
+                        state.queue.Empty()) {
+                        state.idle_on_pending.store(true, std::memory_order_seq_cst);
+                        if (!state.queue.Empty()) {
+                            state.idle_on_pending.store(false, std::memory_order_release);
+                            continue;
+                        }
+                        std::shared_ptr<Common::Event> to_wake;
+                        {
+                            std::scoped_lock lk{state.pending_idle_mutex};
+                            to_wake = state.pending_idle_wake.lock();
+                        }
+                        if (to_wake) {
+                            to_wake->Set();
+                        }
+                    }
                     Profile::Scope scope{Profile::Zone::PendingSleep};
-                    const int poll = VideoCore::Nx2Debug::Experiment(6);
-                    if (poll == 2 || std::chrono::steady_clock::now() - last_progress <
-                                         std::chrono::microseconds{500}) {
+                    const auto idle_for = std::chrono::steady_clock::now() - last_progress;
+                    if (idle_polls == 0) {
+                        ++idle_polls;
+#if defined(ARCHITECTURE_x86_64)
+                        for (u32 i = 0; i < 256; ++i) {
+                            _mm_pause();
+                        }
+#else
                         std::this_thread::yield();
-                    } else if (poll == 1) {
-                        std::this_thread::sleep_for(std::chrono::microseconds{50});
+#endif
+                    } else if (idle_for < std::chrono::milliseconds{2}) {
+                        ++idle_polls;
+                        Common::SetCurrentThreadPriority(Common::ThreadPriority::Normal);
+#if defined(ARCHITECTURE_x86_64)
+                        for (u32 i = 0; i < 256; ++i) {
+                            _mm_pause();
+                        }
+#endif
+                        std::this_thread::yield();
+                        Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
                     } else {
-                        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+                        state.pending_wake.WaitFor(std::chrono::milliseconds{1});
                     }
                 }
+                idle_polls = 0;
+                state.idle_on_pending.store(false, std::memory_order_release);
             } else {
+                idle_polls = 0;
+                state.idle_on_pending.store(false, std::memory_order_release);
                 Profile::Scope scope{Profile::Zone::Idle};
                 state.queue.PopWait(next, stop_token);
             }
@@ -175,22 +218,32 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                         Common::Nx2Timeline::Instant("front: list end", {"seq", next.fence});
                     }
                 } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
-                    split.Defer([gpu = &system.GPU()] { gpu->TickWork(); });
+                    // TickWork ends fast draw reuse itself when it runs a request.
+                    split.Defer([gpu = &system.GPU()] {
+                        Profile::Scope scope{Profile::Zone::Tick};
+                        gpu->TickWork();
+                    }, VideoCommon::GpuSplit::FastDrawNeutral);
                 } else if (auto* run = std::get_if<RunCommand>(&next.data)) {
+                    auto wrapped = [fn = std::move(run->func)]() mutable {
+                        Profile::Scope scope{Profile::Zone::Run};
+                        fn();
+                    };
                     if (run->before_later_reads) {
                         // GPU memory maps unmap caches (UnmapMemory downloads): the back's state.
-                        split.DeferFunction(std::move(run->func));
+                        split.DeferFunction(std::move(wrapped));
                         split.Drain(VideoCommon::DrainSite::Map);
                     } else {
-                        split.DeferFunction(std::move(run->func));
+                        split.DeferFunction(std::move(wrapped));
                         split.NoteMemoryWrite();
                     }
                 } else if (const auto* flush = std::get_if<FlushRegionCommand>(&next.data)) {
                     split.Defer([rasterizer_ptr, addr = flush->addr, size = flush->size] {
+                        Profile::Scope scope{Profile::Zone::FlushInvalidate};
                         rasterizer_ptr->FlushRegion(addr, size);
                     });
                 } else if (const auto* invalidate = std::get_if<InvalidateRegionCommand>(&next.data)) {
                     split.Defer([rasterizer_ptr, addr = invalidate->addr, size = invalidate->size] {
+                        Profile::Scope scope{Profile::Zone::FlushInvalidate};
                         rasterizer_ptr->OnCacheInvalidation(addr, size);
                     });
                 } else {
@@ -202,6 +255,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                     },
                     VideoCommon::GpuSplit::Effect::None);
                 split.Publish();
+                last_progress = std::chrono::steady_clock::now();
                 continue;
             }
             if (auto* submit_list = std::get_if<SubmitListCommand>(&next.data)) {
@@ -315,6 +369,7 @@ u64 ThreadManager::PushCommand(CommandData&& command_data, bool block, bool is_a
         }
     }
     state.queue.EmplaceWait(std::move(command_data), fence, block);
+    state.pending_wake.Set();
 
     lk.unlock();
     if (block) {
@@ -330,12 +385,8 @@ u64 ThreadManager::PushCommand(CommandData&& command_data, bool block, bool is_a
 
 void ThreadManager::NotifyShutdown() {
     if (thread.joinable()) {
-        {
-            std::scoped_lock lk{state.write_lock};
-            state.shutting_down = true;
-            InvalidateReadbackCache();
-            thread.request_stop();
-        }
+        thread.request_stop();
+        state.pending_wake.Set();
         thread.join();
     }
     VideoCommon::GpuSplit::Get().Stop();

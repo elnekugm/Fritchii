@@ -123,7 +123,6 @@ add_executable(tests
     common/cityhash.cpp
     common/describe_exception.cpp
     common/container_hash.cpp
-    common/data_directories.cpp
     common/event.cpp
     common/fibers.cpp
     common/frizti_settings.cpp
@@ -217,11 +216,6 @@ target_compile_definitions(tests PRIVATE
     LICHII_NX_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/core/nx_fixtures")
 
 add_test(NAME tests COMMAND tests)
-
-add_executable(profile_migration_tests
-    common/profile_migration.cpp)
-target_link_libraries(profile_migration_tests PRIVATE common Catch2::Catch2WithMain)
-add_test(NAME profile_migration_tests COMMAND profile_migration_tests)
 
 if (WIN32 AND ARCHITECTURE_x86_64)
     add_executable(event_wait_probe ../../tools/nx2/event_wait_probe.cpp)

@@ -4,8 +4,6 @@
 // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <chrono>
-#include <cstdlib>
 #include <thread>
 
 #include <ranges>
@@ -85,11 +83,13 @@ void MasterSemaphore::Wait(u64 tick) {
             return;
         }
 
+        const auto start = std::chrono::steady_clock::now();
         u64 last_tick = gpu_tick.load(std::memory_order_relaxed);
         while (gpu_tick.load(std::memory_order_acquire) < tick) {
             gpu_tick.wait(last_tick, std::memory_order_acquire);
             last_tick = gpu_tick.load(std::memory_order_relaxed);
         }
+        ReportSlowWait(tick, start);
         return;
     }
 
@@ -105,29 +105,29 @@ void MasterSemaphore::Wait(u64 tick) {
         return;
     }
 
-    // Titles that read GPU-written command lists wait here over a thousand times a second, for work
-    // that often ends within microseconds, and a sleep in the driver wakes up late. Poll first.
-    // EDEN_NX2_GPU_WAIT_SPIN_US=<microseconds> sets how long; 0 goes straight to the driver.
-    static const auto spin = std::chrono::microseconds{[] {
-        const char* value = std::getenv("EDEN_NX2_GPU_WAIT_SPIN_US");
-        return value != nullptr ? std::atoi(value) : 300;
-    }()};
-    if (spin.count() > 0) {
-        const auto end = std::chrono::steady_clock::now() + spin;
-        do {
-            std::this_thread::yield();
-            Refresh();
-            if (IsFree(tick)) {
-                return;
-            }
-        } while (std::chrono::steady_clock::now() < end);
-    }
-
     // If none of the above is hit, fallback to a regular wait
-    while (!semaphore.Wait(tick)) {
+    const auto start = std::chrono::steady_clock::now();
+    try {
+        while (!semaphore.Wait(tick)) {
+        }
+    } catch (const vk::Exception& exception) {
+        // The throw ends the process; say why first (a device loss reached nothing else here).
+        LOG_CRITICAL(Render_Vulkan, "Waiting for GPU tick {} failed: {}", tick, exception.what());
+        throw;
     }
+    ReportSlowWait(tick, start);
 
     Refresh();
+}
+
+void MasterSemaphore::ReportSlowWait(u64 tick, std::chrono::steady_clock::time_point start) {
+    // A wait this long is the GPU itself running slow or stuck (a hung shader shows here first,
+    // seconds before the driver reports the device lost).
+    const auto waited = std::chrono::steady_clock::now() - start;
+    if (waited >= std::chrono::milliseconds{500}) {
+        LOG_WARNING(Render_Vulkan, "Waited {} ms for the GPU to finish tick {}",
+                    std::chrono::duration_cast<std::chrono::milliseconds>(waited).count(), tick);
+    }
 }
 
 VkResult MasterSemaphore::SubmitQueue(vk::CommandBuffer& cmdbuf, vk::CommandBuffer& upload_cmdbuf,
@@ -373,7 +373,7 @@ void MasterSemaphore::WaitThread(std::stop_token token) {
             free_queue.push_front(std::move(fence));
             gpu_tick.store(host_tick, std::memory_order_release);
         }
-        gpu_tick.notify_all();
+        gpu_tick.notify_one();
     }
 }
 
