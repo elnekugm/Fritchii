@@ -11,7 +11,7 @@
 #include <deque>
 #include <mutex>
 #include <regex>
-#include <string_view>
+#include <mutex>
 #include <thread>
 
 #if defined(__ANDROID__)
@@ -246,7 +246,7 @@ struct ColorConsoleBackend final : public Backend {
 #ifndef __OPENORBIS__
 /// @brief Backend that writes to a file passed into the constructor
 struct FileBackend final : public Backend {
-    explicit FileBackend(const std::filesystem::path filename) noexcept {
+    explicit FileBackend(const std::filesystem::path filename) noexcept : current_path(filename) {
         auto old_filename = filename;
         old_filename += ".old.txt";
         // Existence checks are done within the functions themselves.
@@ -269,10 +269,43 @@ struct FileBackend final : public Backend {
     }
     ~FileBackend() noexcept override = default;
 
-    std::filesystem::path path;
-    bool primary_locked = false;
+    void SetGame(u64 program_id, std::string_view title) {
+        std::scoped_lock lock{mutex};
+        // ASCII initials are portable filename characters; the ID keeps titles unambiguous.
+        std::string short_name;
+        bool word_start = true;
+        for (unsigned char c : title) {
+            const bool alnum = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                               (c >= '0' && c <= '9');
+            if (alnum && word_start && short_name.size() < 12) {
+                short_name += static_cast<char>(c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c);
+            }
+            word_start = !alnum;
+        }
+        const auto filename = current_path.parent_path() /
+            fmt::format("orchid_{}{:016X}.txt", short_name.empty() ? "" : short_name + "_",
+                        program_id);
+        file->Flush();
+        // Retain startup diagnostics in each game's log, including version and host details.
+        const auto startup = current_path.parent_path() / LOG_FILE;
+        const auto header = FS::ReadStringFromFile(startup, FS::FileType::TextFile);
+        FS::IOFile next(filename, FS::FileAccessMode::Write, FS::FileType::TextFile);
+        if (!next.IsOpen()) {
+            return;
+        }
+        file.emplace(std::move(next));
+        current_path = filename;
+        bytes_written = file->WriteSpan(std::span<const char>{header.data(), header.size()});
+        enabled = true;
+    }
+
+    std::filesystem::path GetPath() {
+        std::scoped_lock lock{mutex};
+        return current_path;
+    }
 
     void Write(const Entry& entry) noexcept override {
+        std::scoped_lock lock{mutex};
         if (!enabled)
             return;
 
@@ -327,9 +360,13 @@ struct FileBackend final : public Backend {
     }
 
     void Flush() noexcept override {
+        std::scoped_lock lock{mutex};
         file->Flush();
     }
 private:
+    // Filesystem failures can themselves emit log messages on this thread.
+    std::recursive_mutex mutex;
+    std::filesystem::path current_path;
     std::optional<FS::IOFile> file;
     std::atomic<std::size_t> bytes_written = 0;
     std::atomic_bool enabled = true;
@@ -467,6 +504,23 @@ void Initialize() {
         logging_instance->file_backend.emplace(log_dir / LOG_FILE);
 #endif
     }
+}
+
+void SetGameLog(u64 program_id, std::string_view title) {
+#ifndef __OPENORBIS__
+    if (logging_instance && logging_instance->file_backend) {
+        logging_instance->file_backend->SetGame(program_id, title);
+    }
+#endif
+}
+
+std::filesystem::path GetLogFilePath() {
+#ifndef __OPENORBIS__
+    if (logging_instance && logging_instance->file_backend) {
+        return logging_instance->file_backend->GetPath();
+    }
+#endif
+    return FS::GetEdenPath(FS::EdenPath::LogDir) / LOG_FILE;
 }
 
 void Start() {

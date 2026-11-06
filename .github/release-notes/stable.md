@@ -1,27 +1,11 @@
 > [!IMPORTANT]
 > ## Report crashes from inside Orchid
-> If a game crashes, start Orchid again and pick **Help > Report a Crash on GitHub**. It opens a bug report with your build, system, GPU and driver and the end of the crash log already filled in, and opens the log folder so you can attach the full log of the crashed run. Please use it for every crash: reports with a log get fixed much faster, and reports without one are closed.
+> If a game crashes, start Orchid again and pick **Help > Report a Crash on GitHub**. It opens a bug report with your build, system, GPU and driver and the end of the crash log already filled in, and opens the log folder so you can attach the full log of the crashed run.
 
-## 0.8.2 — Wonder FPS selection
+## 0.8.3 — Custom Wonder FPS and per-game logs
 
-**Super Mario Bros. Wonder – Nintendo Switch 2 Edition + Meetup in Bellabel Park**
-now has a dedicated frame-rate selector in **Properties > System**:
-**30, 60, 90, 120, 180 or 240 FPS**, with **60 FPS as the default**.
+- **Super Mario Bros. Wonder – Nintendo Switch 2 Edition + Meetup in Bellabel Park** now accepts a custom **1–1000 FPS** target in **Properties > System > Frame rate (FPS, game patch)**. The default is 60 FPS; existing preset settings are migrated automatically. Restart the game after changing the target. Higher targets require sufficient CPU/GPU performance.
+- Logs now use the `orchid_` prefix. Each game's latest session is retained in its own file, with title initials and Title-ID (for example, `orchid_TLOZBOTW_01007EF00011E000.txt`). Starting that game again replaces its previous log without removing other games' logs.
+- Crash reports use the active game's log, or the most recently written game log after restarting Orchid. Game logs retain startup diagnostics such as the build and host information.
 
-- Patches the simulation rate and present interval together, keeping the game at its
-  intended speed instead of doubling its speed when forcing 60 FPS presentation alone.
-- Matches presentation pacing to the selected target. Above 60 FPS, supported Vulkan
-  presentation modes allow rendering ahead of the display instead of applying its VSync cap.
-- Shows the selector only for Wonder's native edition program, `040015100B514001`.
-- Shows the existing **Lock to 30 FPS** checkbox only in **Donkey Kong Bananza** properties.
-- Handles the earlier standalone **Wonder 60 FPS normal speed** test mod so it cannot
-  override the new selector.
-
-Stop the game before changing the setting, then start it again. Higher targets require
-sufficient CPU/GPU performance; the selector does not guarantee that every scene reaches
-that target. The built-in Wonder patch validates the NSO build ID and all three instruction
-sites, and leaves unsupported executables unchanged.
-
-Validated with a local build, 18 focused test cases (2,071 assertions), and short Wonder
-startup checks at 60 and 240 FPS. Extended gameplay at every target has not been tested.
-The Wonder loading fix from 0.8.1 remains included.
+The Wonder patch still validates the executable build and instruction sites before applying changes. Unsupported executables remain unchanged.

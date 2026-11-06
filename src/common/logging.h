@@ -7,6 +7,7 @@
 #pragma once
 
 #include <chrono>
+#include <filesystem>
 #include <algorithm>
 #include <filesystem>
 #include <string>
@@ -136,6 +137,10 @@ struct Filter {
 
 /// Initializes the logging system. This should be the first thing called in main.
 void Initialize();
+
+/// Begin the latest log for this game, replacing its previous session.
+void SetGameLog(u64 program_id, std::string_view title);
+std::filesystem::path GetLogFilePath();
 
 void Start();
 

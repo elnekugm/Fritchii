@@ -463,6 +463,7 @@ struct System::Impl {
             LOG_ERROR(Core, "Failed to read title for ROM!");
         }
 
+        Common::Log::SetGameLog(params.program_id, name == "Unknown program" ? "" : name);
         LOG_INFO(Core, "Loading {} ({:016X}) ...", name, params.program_id);
 
         // Expose program id to dump sites and other global readers.
