@@ -172,6 +172,7 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     static constexpr s64 DEFAULT_CRITICAL_MEMORY = 1_GiB + 625_MiB;
     /// Conservative ceiling when not using Wonder's verified driver-budget policy.
     static constexpr u64 MaxCriticalMemory = 5_GiB;
+    u64 large_budget_cap{}; ///< Raises MaxCriticalMemory on cards with a 12 GiB+ budget
     static constexpr size_t GC_EMERGENCY_COUNTS = 2;
 
     using Runtime = typename P::Runtime;

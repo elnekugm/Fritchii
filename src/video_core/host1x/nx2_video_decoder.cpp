@@ -147,12 +147,8 @@ struct Nx2VideoDecoder::Impl {
     std::unique_ptr<FFmpeg::DecoderContext> context;
     SwsContext* scaler{};
     bool open{};
-    bool ever_open{};
     bool using_hardware{};
     bool received_any{};
-    u64 errors_seen{};
-    u32 hardware_failures{}; ///< Packets in a row that failed on the GPU
-    u32 render_faults{};
     H264PacketConverter h264_packets;
     /// Timestamps of submitted frames not yet output, for frames that come out without one.
     std::multiset<u64> pending_pts;
@@ -164,47 +160,27 @@ struct Nx2VideoDecoder::Impl {
         hardware.reset();
     }
 
-    bool Open(bool use_gpu) {
+    bool Open(NvdecCommon::VideoCodec codec_type, bool use_gpu) {
         context.reset();
         hardware.reset();
-        decoder = std::make_unique<FFmpeg::Decoder>(*codec);
-        using_hardware = false;
-        received_any = false;
-        hardware_failures = 0;
-        pending_pts.clear();
-        h264_packets.Reset();
+        decoder.emplace(codec_type, use_gpu);
         if (decoder->GetCodec() == nullptr) {
-            LOG_ERROR(HW_GPU, "nx2 video: FFmpeg has no decoder for \"{}\"", name);
             return false;
         }
-        context = std::make_unique<FFmpeg::DecoderContext>(*decoder);
+        context.emplace(*decoder);
         if (use_gpu) {
-            hardware = std::make_unique<FFmpeg::HardwareContext>();
-            using_hardware = hardware->InitializeForDecoder(*context, *decoder);
-            if (!using_hardware) {
-                // No GPU decoder for this codec (libdav1d has none): the same context decodes
-                // on the CPU.
+            hardware.emplace();
+            if (!hardware->InitializeForDecoder(*context, *decoder)) {
                 hardware.reset();
+                return false;
             }
+        } else {
+            AVCodecContext* codec_context = context->GetCodecContext();
+            codec_context->flags &= ~AV_CODEC_FLAG_LOW_DELAY;
+            codec_context->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+            codec_context->thread_count = 4;
         }
-        bool opened = false;
-        unsigned long code = 0;
-        if (!Guarded([&] { opened = context->OpenContext(*decoder); }, code)) {
-            LOG_CRITICAL(HW_GPU, "nx2 video: opening \"{}\" faulted ({:#x})", name, code);
-            Abandon();
-            return false;
-        }
-        errors_seen = context->ErrorCount();
-        return opened;
-    }
-
-    /// Leaks the decoder objects after a fault inside them.
-    void Abandon() {
-        (void)context.release();
-        (void)hardware.release();
-        (void)decoder.release();
-        using_hardware = false;
-        open = false;
+        return context->OpenContext(*decoder);
     }
 
     void Receive(std::vector<Nx2Picture>& pictures) {
@@ -229,6 +205,7 @@ struct Nx2VideoDecoder::Impl {
             received_any = true;
             pictures.push_back({static_cast<u32>(f->width), static_cast<u32>(f->height), pts,
                                 std::move(frame)});
+            received_any = true;
         }
     }
 
@@ -291,20 +268,22 @@ Nx2VideoDecoder::Nx2VideoDecoder(std::string_view mime) : impl{std::make_unique<
         LOG_ERROR(HW_GPU, "nx2 video: no decoder for codec \"{}\"", mime);
         return;
     }
-    if (Settings::values.nvdec_emulation.GetValue() == Settings::NvdecEmulation::Gpu) {
-        impl->open = impl->Open(true);
-        if (!impl->open && impl->decoder && impl->decoder->GetCodec() != nullptr) {
-            LOG_WARNING(HW_GPU, "nx2 video: GPU decoder for \"{}\" failed to open, using the CPU",
-                        mime);
-            impl->open = impl->Open(false);
-        }
-    } else {
-        impl->open = impl->Open(false);
+    // Switch 2 movies decode on the CPU (dav1d for AV1, several threads) whatever the NVDEC
+    // setting: with GPU decoding, NVIDIA RTX 40/50 players crashed as Ocarina's title movie
+    // started. EDEN_NX2_VIDEO_HW=1 tries the GPU first again (falling back to the CPU).
+    static const bool video_hw = [] {
+        const char* value = std::getenv("EDEN_NX2_VIDEO_HW");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (video_hw && Settings::values.nvdec_emulation.GetValue() == Settings::NvdecEmulation::Gpu) {
+        impl->open = impl->Open(*codec, true);
+        impl->using_hardware = impl->open;
     }
-    impl->ever_open = impl->open;
-    LOG_INFO(HW_GPU, "nx2 video: decoder for \"{}\" {}{}", mime,
-             impl->open ? "open" : "failed to open",
-             impl->open ? (impl->using_hardware ? " (GPU)" : " (CPU)") : "");
+    if (!impl->open) {
+        impl->using_hardware = false;
+        impl->open = impl->Open(*codec, false);
+    }
+    LOG_INFO(HW_GPU, "nx2 video: decoder for \"{}\" {}", mime, impl->open ? "open" : "failed to open");
 }
 
 Nx2VideoDecoder::~Nx2VideoDecoder() = default;
@@ -344,11 +323,15 @@ void Nx2VideoDecoder::Decode(std::span<const u8> data, u64 pts, std::vector<Nx2P
         impl->pending_pts.erase(impl->pending_pts.begin());
     }
     impl->pending_pts.insert(pts);
-    if (!impl->SendReceive(packet, pictures) && impl->open) {
-        // The CPU decoder took over: give it this packet too (Open cleared the timestamps).
-        impl->pending_pts.insert(pts);
-        impl->SendReceive(packet, pictures);
+    if (!impl->context->SendPacket(packet) && impl->using_hardware && !impl->received_any) {
+        if (const auto codec = CodecFromMime(impl->name); codec && impl->Open(*codec, false)) {
+            impl->using_hardware = false;
+            LOG_INFO(HW_GPU, "nx2 video: hardware decode failed for \"{}\", falling back to CPU",
+                     impl->name);
+            impl->context->SendPacket(packet);
+        }
     }
+    impl->Receive(pictures);
 }
 
 void Nx2VideoDecoder::Drain(std::vector<Nx2Picture>& pictures) {

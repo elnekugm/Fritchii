@@ -716,7 +716,8 @@ void VisitUsages(Info& info, IR::Inst& inst) {
         break;
     case IR::Opcode::GlobalAtomicAddF32:
     case IR::Opcode::StorageAtomicAddF32:
-        info.used_storage_buffer_types |= IR::Type::U32;
+        // F32: the float view for a native atomic add (support_float32_atomic_add).
+        info.used_storage_buffer_types |= IR::Type::U32 | IR::Type::F32;
         info.uses_atomic_f32_add = true;
         break;
     case IR::Opcode::GlobalAtomicAddF16x2:

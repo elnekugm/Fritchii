@@ -35,6 +35,7 @@
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
+#include "video_core/renderer_vulkan/vk_pipeline_cache_prebuild.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/shader_cache.h"
 
@@ -180,6 +181,12 @@ private:
     /// Whether the current Switch 2 draw may be skipped while its pipeline builds (scene
     /// geometry, not a full screen pass). EDEN_NX2_ASYNC_SKIP=0 waits for every pipeline.
     [[nodiscard]] bool CanSkipNativeDraw() const;
+    /// How long a native draw may still wait for its pipeline before it is skipped.
+    [[nodiscard]] std::chrono::microseconds NativeWaitAllowance() const;
+    /// Counts the time a native draw spent waiting since `start` against the window's budget.
+    void NoteNativeWait(std::chrono::steady_clock::time_point start) const;
+    mutable std::chrono::steady_clock::time_point native_wait_window{};
+    mutable std::chrono::microseconds native_wait_spent{};
 
     /// Queues the translation of graphics_key's pipeline (native programs, environments detached
     /// from the 3D engine) on translation_workers. False when it has to be built here.
@@ -261,9 +268,11 @@ private:
     std::atomic<size_t> last_cache_size{};
     std::atomic_bool flush_in_flight{};
 
+    size_t num_pipeline_workers;
     Common::ThreadWorker workers;
     Common::ThreadWorker serialization_thread;
     DynamicFeatures dynamic_features;
+    PipelinePrebuild<GraphicsPipelineCacheKey, GraphicsPipeline> background_pipelines;
 
     /// Pipelines being translated on translation_workers, by key.
     ::Common::unordered_map<GraphicsPipelineCacheKey, std::future<TranslatedGraphics>> pending_graphics;

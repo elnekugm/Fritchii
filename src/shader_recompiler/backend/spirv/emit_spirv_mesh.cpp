@@ -277,10 +277,20 @@ void MeshEpilogue(EmitContext& ctx) {
     for (u32 first = 0; first < mesh.max_primitives; first += threads) {
         const Id primitive{ctx.OpIAdd(ctx.U32[1], invocation, ctx.Const(first))};
         If(ctx, ctx.OpULessThan(ctx.U1, primitive, count), [&] {
-            // Vertex indices: map bytes 4 + primitive_vertices * primitive.
-            const Id byte{ctx.OpIAdd(
-                ctx.U32[1], ctx.OpIMul(ctx.U32[1], primitive, ctx.Const(primitive_vertices)),
-                ctx.Const(4U))};
+            if (mesh.topology == 0) {
+                // Points: one vertex index a primitive, map byte 4 + primitive.
+                const Id address{ctx.OpIAdd(ctx.U32[1], primitive, ctx.Const(4U))};
+                const Id index{ctx.OpLoad(ctx.U32[1], SharedWord(ctx, ctx.mesh_map, address))};
+                const Id output_index{ctx.TypePointer(spv::StorageClass::Output, ctx.U32[1])};
+                ctx.OpStore(ctx.OpAccessChain(output_index, ctx.mesh_primitive_indices, primitive),
+                            index);
+                CopyLines(ctx, primitive, ctx.mesh_primitive_base, primitive_lines,
+                          ctx.mesh_primitive_targets);
+                return;
+            }
+            // Vertex indices: map bytes 4 + 3 * primitive.
+            const Id byte{ctx.OpIAdd(ctx.U32[1], ctx.OpIMul(ctx.U32[1], primitive, ctx.Const(3U)),
+                                     ctx.Const(4U))};
             std::array<Id, 3> indices;
             for (u32 element = 0; element < primitive_vertices; ++element) {
                 const Id address{ctx.OpIAdd(ctx.U32[1], byte, ctx.Const(element))};

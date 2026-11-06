@@ -7,7 +7,6 @@
 #pragma once
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <numeric>
 #include <cstdlib>
@@ -164,12 +163,34 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
             const char* value = std::getenv("EDEN_NX2_TC_MIN_AGE");
             return value != nullptr ? std::strtoull(value, nullptr, 10) : 0ULL;
         }();
-        ticks_to_destroy = (std::max)(ticks_to_destroy, min_age);
+        // Only while memory allows: kept at critical usage, OoT's Saria cutscene filled the GPU
+        // memory (images in host memory, then unbacked) and the game crashed. Near the limit
+        // the age shrinks to 120 frames; at the limit the collector evicts as usual.
+        if (!aggressive_mode) {
+            ticks_to_destroy = (std::max)(ticks_to_destroy,
+                                          high_priority_mode ? (std::min)(min_age, u64{120})
+                                                             : min_age);
+        }
         num_iterations = aggressive_mode ? 40 : (high_priority_mode ? 20 : 10);
     };
+    // Below the expected memory nothing is urgent: deleting an image can take a millisecond
+    // (its overlaps and aliases, framebuffers and views go with it) and the collector deleted
+    // up to 10 a frame, a sixth of the GPU back thread in OoT's fields. Spend at most
+    // EDEN_NX2_TC_GC_BUDGET_US (default 300) per frame there; under pressure, no limit.
+    static const s64 gc_budget_ns = [] {
+        const char* value = std::getenv("EDEN_NX2_TC_GC_BUDGET_US");
+        return (value != nullptr ? std::strtoll(value, nullptr, 10) : 300LL) * 1000LL;
+    }();
+    const auto gc_start = std::chrono::steady_clock::now();
     const auto Cleanup = [this, &num_iterations, &high_priority_mode, &aggressive_mode,
-                          &evict_old_costly, out_of_memory](ImageId image_id) {
+                          &evict_old_costly, gc_start](ImageId image_id) {
         if (num_iterations == 0) {
+            return true;
+        }
+        if (!high_priority_mode && gc_budget_ns > 0 &&
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - gc_start)
+                    .count() >= gc_budget_ns) {
             return true;
         }
         --num_iterations;
@@ -429,16 +450,17 @@ bool TextureCache<P>::IsAllStale(DAddr addr, size_t size) const {
 
 template <class P>
 void TextureCache<P>::ApplyThresholdOverrides(bool log) {
-    // Wonder's Overworld working set exceeds the historical 5-GiB ceiling. Use
-    // the existing pressure/slack-adjusted driver budget for that title only;
-    // other titles and unavailable budgets retain the conservative ceiling.
-    const bool budget_driven = native_driver_budget_available &&
-                               Settings::GetCurrentProgramID() == Settings::WonderSwitch2ProgramId;
-    const auto limits = ClampTextureCacheThresholds(
-        {expected_memory, critical_memory, minimum_memory}, budget_driven, MaxCriticalMemory);
-    expected_memory = limits.expected;
-    critical_memory = limits.critical;
-    minimum_memory = limits.minimum;
+    // On every GPU: past what a frame needs, more device memory only keeps the textures of earlier
+    // scenes (title 1 filled 6.7 GB of an 8 GB card and draws its races in ~5 GB), so collect from
+    // MaxCriticalMemory on rather than near the card's budget.
+    // Cards with a large budget (16 GB: ~15 GB) keep up to 3/4 of it: Ocarina's village alone
+    // keeps ~8 GB of textures, and under the 5 GiB cap the collector deleted and re-uploaded
+    // thousands of them every 20 s (~15% of the GPU back thread, 26-28 ms frames -> 23-24 ms).
+    critical_memory = (std::min)(critical_memory, (std::max)(MaxCriticalMemory, large_budget_cap));
+    expected_memory =
+        (std::min)(expected_memory, critical_memory - (std::min)(critical_memory, u64{768_MiB}));
+    minimum_memory =
+        (std::min)(minimum_memory, expected_memory - (std::min)(expected_memory, u64{1_GiB}));
     // EDEN_NX2_TC_EXPECTED_MIB / EDEN_NX2_TC_CRITICAL_MIB override the collector's thresholds.
     for (const auto& [name, target] : {std::pair{"EDEN_NX2_TC_EXPECTED_MIB", &expected_memory},
                                        std::pair{"EDEN_NX2_TC_CRITICAL_MIB", &critical_memory}}) {
@@ -505,8 +527,8 @@ void TextureCache<P>::TickFrame() {
             }
             if (native_thresholds_applied && budget_check_frames++ % 30 == 0) {
                 const u64 budget = runtime.GetDeviceMemoryBudget();
-                native_driver_budget_available = budget != 0;
-                if (budget != 0) {
+                if (budget > 2_GiB) {
+                    large_budget_cap = budget >= 12_GiB ? budget / 4 * 3 : 0;
                     const u64 old_critical = critical_memory;
                     const u64 margin = (std::min)(budget / 8, 1_GiB);
                     if constexpr (requires { runtime.GetDeviceMemorySlack(); }) {
@@ -2183,6 +2205,26 @@ bool TextureCache<P>::BlitImage(const Tegra::Engines::Fermi2D::Surface& dst,
 
     Image& dst_image = slot_images[dst_id];
     Image& src_image = slot_images[src_id];
+    if (static const u64 trace_destination = [] {
+            const char* value = std::getenv("EDEN_NX2_TRACE_DST");
+            return value ? std::strtoull(value, nullptr, 16) : 0ULL;
+        }();
+        trace_destination != 0 && dst.Address() == trace_destination) {
+        static u32 traced{};
+        if (traced++ < 16) {
+            LOG_INFO(HW_GPU,
+                     "nx2 blit images: src id={} addr={:#x} {}x{} format={} flags={:#x} "
+                     "samples={} | dst id={} addr={:#x} {}x{} format={} flags={:#x} samples={} "
+                     "| blit formats src={} dst={}",
+                     src_id.index, src_image.gpu_addr, src_image.info.size.width,
+                     src_image.info.size.height, static_cast<u32>(src_image.info.format),
+                     static_cast<u32>(src_image.flags), src_image.info.num_samples, dst_id.index,
+                     dst_image.gpu_addr, dst_image.info.size.width, dst_image.info.size.height,
+                     static_cast<u32>(dst_image.info.format), static_cast<u32>(dst_image.flags),
+                     dst_image.info.num_samples, static_cast<u32>(images.src_format),
+                     static_cast<u32>(images.dst_format));
+        }
+    }
     if (True(dst_image.flags & ImageFlagBits::Unbacked)) {
         static u32 logged{};
         if (logged++ < 64) {
@@ -4123,121 +4165,66 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
     }
     rt_stats.delete_ns += NsSince(ignored_delete_start);
 
-    // Whether one of the GPU copies below writes all of a single-level 2D image, so an upload
-    // before it is never seen. Ocarina of Time creates a D32 image at each new size of a
-    // dynamic-resolution target over the same memory, uploading 6-14 MiB of it each time.
-    const auto overwritten_by_copies = [&] {
-        const ImageInfo& image_info = new_image.info;
-        constexpr ImageFlagBits unusual = ImageFlagBits::Sparse | ImageFlagBits::SparseLayers |
-                                          ImageFlagBits::SparseTiles |
-                                          ImageFlagBits::UnwrittenSparse | ImageFlagBits::Unbacked;
-        if (image_info.type != ImageType::e2D || image_info.resources.levels != 1 ||
-            image_info.resources.layers != 1 || image_info.num_samples != 1 ||
-            True(new_image.flags & (unusual | ImageFlagBits::Converted |
-                                    ImageFlagBits::AsynchronousDecode))) {
+    // A new render target that the clear binding it overwrites whole (every channel, the whole
+    // image) needs no upload from guest memory first: Ocarina of Time creates ~4 such targets a
+    // frame outdoors, and uploading them was ~15% of the GPU back thread.
+    const auto overwritten_by_clear = [&] {
+        if (!clearing_render_targets || !join_copies_to_do.empty() ||
+            new_info.type != ImageType::e2D || new_info.resources.levels != 1 ||
+            new_info.resources.layers != 1 || new_info.num_samples != 1) {
             return false;
         }
-        const auto blocks = [](const ImageInfo& of, s32 level) {
-            const Extent3D size = MipSize(of.size, static_cast<u32>(level));
-            return Extent2D{
-                .width = Common::DivCeil(size.width, DefaultBlockWidth(of.format)),
-                .height = Common::DivCeil(size.height, DefaultBlockHeight(of.format)),
-            };
-        };
-        const Extent2D new_blocks = blocks(image_info, 0);
-        const auto covers = [&](const ImageInfo& overlap_info, s32 level) {
-            const Extent2D overlap_blocks = blocks(overlap_info, level);
-            return overlap_blocks.width >= new_blocks.width &&
-                   overlap_blocks.height >= new_blocks.height;
-        };
-        for (const JoinCopy& copy : join_copies_to_do) {
-            const ImageBase& overlap = slot_images[copy.id];
-            if (overlap.info.type != ImageType::e2D || overlap.info.num_samples != 1 ||
-                True(overlap.flags & unusual) ||
-                GetFormatType(overlap.info.format) != GetFormatType(image_info.format) ||
-                BytesPerBlock(overlap.info.format) != BytesPerBlock(image_info.format) ||
-                overlap.info.astc_opaque != image_info.astc_opaque) {
-                continue;
-            }
-            if (!copy.is_alias) {
-                // Copied whole (MakeShrinkImageCopies) when the GPU wrote it.
-                const std::optional<SubresourceBase> base = new_image.TryFindBase(overlap.gpu_addr);
-                if (True(overlap.flags & ImageFlagBits::GpuModified) && base &&
-                    base->level == 0 && base->layer == 0) {
-                    return true;
-                }
-                continue;
-            }
-            if (!overlap.IsSafeGpuCopy()) {
-                continue;
-            }
-            // The extent AddImageAlias gives the copy: the smaller of the two at the base found.
-            constexpr auto options = RelaxedOptions::Size | RelaxedOptions::Format;
-            if (std::ranges::find(join_left_aliased_ids, copy.id) != join_left_aliased_ids.end()) {
-                const std::optional<SubresourceBase> base =
-                    FindSubresource(image_info, overlap, new_image.gpu_addr, options, false, true);
-                if (base && covers(overlap.info, base->level)) {
-                    return true;
-                }
-            } else {
-                const std::optional<SubresourceBase> base =
-                    FindSubresource(overlap.info, new_image, overlap.gpu_addr, options, false, true);
-                if (base && base->level == 0 && base->layer == 0 && covers(overlap.info, 0)) {
-                    return true;
-                }
+        const auto& regs = maxwell3d->regs;
+        const auto& surface = regs.clear_surface;
+        if (surface.layer != 0) {
+            return false;
+        }
+        const u32 width = new_info.size.width;
+        const u32 height = new_info.size.height;
+        if (regs.clear_control.use_scissor != 0) {
+            const auto& scissor = regs.scissor_test[0];
+            if (scissor.min_x != 0 || scissor.min_y != 0 || scissor.max_x < width ||
+                scissor.max_y < height) {
+                return false;
             }
         }
-        return false;
+        // The clear covers the framebuffer's render area, the smallest bound target.
+        for (u32 index = 0; index < regs.rt_control.count && index < NUM_RT; ++index) {
+            const auto& rt = regs.rt[index];
+            if (rt.Address() != 0 && rt.format != Tegra::RenderTargetFormat::NONE &&
+                (rt.width < width || rt.height < height)) {
+                return false;
+            }
+        }
+        if (regs.zeta_enable && regs.zeta.Address() != 0 &&
+            (regs.zeta_size.width < width || regs.zeta_size.height < height)) {
+            return false;
+        }
+        const bool is_depth_target = regs.zeta_enable && regs.zeta.Address() == gpu_addr;
+        const bool full_stencil = surface.S && regs.stencil_front_mask == 0xFF;
+        switch (VideoCore::Surface::GetFormatType(new_info.format)) {
+        case VideoCore::Surface::SurfaceType::ColorTexture: {
+            const u32 index = surface.RT;
+            return surface.R && surface.G && surface.B && surface.A && index < NUM_RT &&
+                   index < regs.rt_control.count && regs.rt[index].Address() == gpu_addr;
+        }
+        case VideoCore::Surface::SurfaceType::Depth:
+            return is_depth_target && surface.Z;
+        case VideoCore::Surface::SurfaceType::Stencil:
+            return is_depth_target && full_stencil;
+        case VideoCore::Surface::SurfaceType::DepthStencil:
+            return is_depth_target && surface.Z && full_stencil;
+        default:
+            return false;
+        }
     };
-    const bool clear_skip = overwritten_by_clear();
-    // EDEN_NX2_EXP8 bit 2: skip the upload the copies overwrite.
-    const bool copy_skip =
-        !clear_skip && (VideoCore::Nx2Debug::Experiment(8) & 2) != 0 && overwritten_by_copies();
-    if (VideoCore::Nx2Debug::Experiment(7) != 0 && new_image.guest_size_bytes >= 1_MiB)
-        [[unlikely]] {
-        // Why a large new image was (or was not) uploaded from guest memory.
-        static std::atomic<u32> logged{};
-        if (logged.fetch_add(1, std::memory_order_relaxed) < 300) {
-            u32 aliases = 0;
-            u32 gpu_written = 0;
-            for (const JoinCopy& copy : join_copies_to_do) {
-                aliases += copy.is_alias ? 1 : 0;
-                const bool gpu = True(slot_images[copy.id].flags & ImageFlagBits::GpuModified);
-                gpu_written += gpu ? 1 : 0;
-            }
-            LOG_WARNING(HW_GPU,
-                        "New image format {} {}x{}x{} levels {} layers {} at {:#x}: {} copies "
-                        "({} aliases, {} GPU-written), {} bad overlaps, clearing {}, covered {}, "
-                        "upload {}{}{}",
-                        static_cast<u32>(new_info.format), new_info.size.width,
-                        new_info.size.height, new_info.size.depth, new_info.resources.levels,
-                        new_info.resources.layers, new_image.gpu_addr, join_copies_to_do.size(),
-                        aliases, gpu_written, join_bad_overlap_ids.size(),
-                        clearing_render_targets, overwritten_by_copies(),
-                        clear_skip  ? "skipped (clear)"
-                        : copy_skip ? "skipped (copies)"
-                                    : "done",
-                        clear_skip || clear_refusal[0] == '\0' ? "" : ", clear refused: ",
-                        clear_skip ? "" : clear_refusal);
-        }
-    }
-    const auto refresh_start = std::chrono::steady_clock::now();
-    if (clear_skip) {
+    if (overwritten_by_clear()) {
         // Stays CpuModified: UpdateRenderTargets' PrepareImage drops the upload only when
         // IsFullClear agrees the clear covers the whole image, and uploads it otherwise.
-        runtime.TransitionImageLayout(new_image);
-    } else if (copy_skip) {
-        // As RefreshContents leaves it, with the contents the copies write.
-        new_image.flags &= ~ImageFlagBits::CpuModified;
-        TrackImage(new_image, new_image_id);
         runtime.TransitionImageLayout(new_image);
     } else {
         // TODO: Only upload what we need
         RefreshContents(new_image, new_image_id);
-    }
-    rt_stats.refresh_ns += NsSince(refresh_start);
-    if (!relocation_tombstones.empty()) {
-        CheckTombstoneCreation(new_image_id, new_image, clear_skip); // EXP43=4
     }
 
     if (can_rescale) {
@@ -4354,6 +4341,10 @@ std::optional<typename TextureCache<P>::BlitImages> TextureCache<P>::GetBlitImag
     ImageId dst_id;
     ImageId src_id;
     RelaxedOptions try_options = FIND_OPTIONS;
+    // A packed RGB9E5 frame is written as R32_UINT storage: read it through an RGB9E5 view.
+    if (src_info.format == PixelFormat::E5B9G9R9_FLOAT) {
+        try_options |= RelaxedOptions::Format;
+    }
     if (can_be_depth_blit) {
         try_options |= RelaxedOptions::Format;
     }
@@ -4539,7 +4530,22 @@ ImageViewId TextureCache<P>::FindDepthBuffer() {
         return ImageViewId{};
     }
     const ImageInfo info(regs.zeta, regs.zeta_size, regs.anti_alias_samples_mode);
-    return FindRenderTargetView(info, gpu_addr);
+    const ImageViewId view_id = FindRenderTargetView(info, gpu_addr);
+    if (static const u64 trace_destination = [] {
+            const char* value = std::getenv("EDEN_NX2_TRACE_DST");
+            return value ? std::strtoull(value, nullptr, 16) : 0ULL;
+        }();
+        trace_destination != 0 && gpu_addr == trace_destination && view_id) {
+        static u32 traced{};
+        if (traced++ < 16) {
+            const ImageView& view = slot_image_views[view_id];
+            const Image& image = slot_images[view.image_id];
+            LOG_INFO(HW_GPU, "nx2 traced depth bound: image id={} {}x{} format={} flags={:#x}",
+                     view.image_id.index, image.info.size.width, image.info.size.height,
+                     static_cast<u32>(image.info.format), static_cast<u32>(image.flags));
+        }
+    }
+    return view_id;
 }
 
 template <class P>

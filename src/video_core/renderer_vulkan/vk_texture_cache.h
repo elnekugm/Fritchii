@@ -947,7 +947,6 @@ private:
         bool drop_custom_border;
         bool srgb_border;
         bool drop_compare;
-        bool drop_lod_bias; ///< the image was written by the GPU: no Ocarina FSR LOD bias
         std::array<VkComponentSwizzle, 4> swizzle;
 
         bool operator==(const VariantKey&) const noexcept = default;

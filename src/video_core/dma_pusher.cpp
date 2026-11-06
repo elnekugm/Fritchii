@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <string_view>
+#include <span>
 #include <vector>
 
 #include "common/scope_exit.h"
@@ -753,22 +754,7 @@ bool DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {
     const GPUVAddr end_page = (address + size + 0xfff) & ~GPUVAddr{0xfff};
     const bool dirty = memory_manager.IsMemoryDirty(first_page, end_page - first_page,
                                                     VideoCommon::CacheType::BufferCache);
-    // The other pages draws wrote since their last flush go along in the same GPU round trip:
-    // their next lists then read guest memory instead of draining and flushing again.
-    // EDEN_NX2_CMDPAGE_BATCH=0 flushes this entry's pages only, as before.
-    static const bool batch = [] {
-        const char* value = std::getenv("EDEN_NX2_CMDPAGE_BATCH");
-        return value == nullptr || std::string_view{value} != "0";
-    }();
-    // Apply the guest's collected CPU writes before GPU data is downloaded over guest memory, as
-    // GPU::RequestFlush does: the CPU may have written new lists on these pages since the GPU
-    // last wrote them, and the download would put the old ones back (EDEN_NX2_LIST_CPU_SYNC=0:
-    // off).
-    static const bool list_cpu_sync = [] {
-        const char* value = std::getenv("EDEN_NX2_LIST_CPU_SYNC");
-        return value == nullptr || value[0] != '0';
-    }();
-    if (batch && rasterizer != nullptr) {
+    if (rasterizer != nullptr) {
         std::vector<DAddr> pages;
         for (GPUVAddr page = first_page; page < end_page; page += 0x1000) {
             if (const auto device = memory_manager.GpuToCpuAddress(page)) {
@@ -776,20 +762,13 @@ bool DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {
             }
         }
         VideoCommon::GpuSplit::Get().Run(
-            [rasterizer = rasterizer, pages = &pages] {
-                if (list_cpu_sync) {
-                    rasterizer->InvalidateGPUCache();
-                }
-                rasterizer->FlushGpuWrittenCommandListPages(*pages);
+            [rasterizer = rasterizer, pages = std::span<const DAddr>{pages}] {
+                rasterizer->FlushGpuWrittenCommandListPages(pages);
             },
             VideoCommon::DrainSite::ListFlush);
     } else if (dirty) {
         VideoCommon::GpuSplit::Get().Run(
-            [rasterizer = rasterizer, memory = &memory_manager, first_page,
-             size = end_page - first_page] {
-                if (list_cpu_sync && rasterizer != nullptr) {
-                    rasterizer->InvalidateGPUCache();
-                }
+            [memory = &memory_manager, first_page, size = end_page - first_page] {
                 memory->FlushRegion(first_page, size, VideoCommon::CacheType::BufferCache);
             },
             VideoCommon::DrainSite::ListFlush);

@@ -374,6 +374,22 @@ Id EmitStorageAtomicExchange32x2(EmitContext& ctx, const IR::Value& binding,
 
 Id EmitStorageAtomicAddF32(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset,
                            Id value) {
+    if (ctx.profile.support_float32_atomic_add && ctx.profile.support_descriptor_aliasing &&
+        binding.IsImmediate() && ctx.ssbos[binding.U32()].F32.value != 0) {
+        // OpAtomicFAddEXT. Sirit has no emitter for it, so OpAtomicFMinEXT (same operands) is
+        // emitted and RewriteOpcodes renumbers it after assembly.
+        if (!ctx.uses_native_float_add) {
+            ctx.uses_native_float_add = true;
+            ctx.AddExtension("SPV_EXT_shader_atomic_float_add");
+            ctx.AddCapability(static_cast<spv::Capability>(6033)); // AtomicFloat32AddEXT
+        }
+        const Id pointer{StoragePointer(ctx, ctx.storage_types.F32, &StorageDefinitions::F32,
+                                        binding, offset, sizeof(f32))};
+        const auto [scope, semantics]{AtomicArgs(ctx)};
+        const Id result{ctx.OpAtomicFMin(ctx.F32[1], pointer, scope, semantics, value)};
+        ctx.opcode_rewrites.emplace_back(result.value, static_cast<spv::Op>(6035));
+        return result;
+    }
     const Id ssbo{ctx.ssbos[binding.U32()].U32};
     const Id base_index{StorageIndex(ctx, offset, sizeof(u32))};
     return ctx.OpFunctionCall(ctx.F32[1], ctx.f32_add_cas, base_index, value, ssbo);
@@ -437,16 +453,34 @@ Id EmitGlobalAtomicIAdd32(EmitContext& ctx, const IR::Value& address, Id value) 
     return ctx.OpFunctionCall(ctx.U32[1], ctx.atomic_add_global_func_u32, ctx.Def(address), value);
 }
 
-Id EmitGlobalAtomicSMin32(EmitContext& ctx, Id address, Id value) {
-    return GlobalAtomicU32(ctx, 1, address, value);
+Id EmitGlobalAtomicSMin32(EmitContext& ctx, const IR::Value& address, Id value) {
+    if (!ctx.profile.support_int64) {
+        throw NotImplementedException("Global atomic addressing requires 64-bit integers");
+    }
+    if (!Sirit::ValidId(ctx.atomic_smin_global_func_u32)) {
+        throw NotImplementedException("Global atomic min with no routable storage buffer");
+    }
+    return ctx.OpFunctionCall(ctx.U32[1], ctx.atomic_smin_global_func_u32, ctx.Def(address), value);
 }
 
-Id EmitGlobalAtomicUMin32(EmitContext& ctx, Id address, Id value) {
-    return GlobalAtomicU32(ctx, 2, address, value);
+Id EmitGlobalAtomicUMin32(EmitContext& ctx, const IR::Value& address, Id value) {
+    if (!ctx.profile.support_int64) {
+        throw NotImplementedException("Global atomic addressing requires 64-bit integers");
+    }
+    if (!Sirit::ValidId(ctx.atomic_umin_global_func_u32)) {
+        throw NotImplementedException("Global atomic min with no routable storage buffer");
+    }
+    return ctx.OpFunctionCall(ctx.U32[1], ctx.atomic_umin_global_func_u32, ctx.Def(address), value);
 }
 
-Id EmitGlobalAtomicSMax32(EmitContext& ctx, Id address, Id value) {
-    return GlobalAtomicU32(ctx, 3, address, value);
+Id EmitGlobalAtomicSMax32(EmitContext& ctx, const IR::Value& address, Id value) {
+    if (!ctx.profile.support_int64) {
+        throw NotImplementedException("Global atomic addressing requires 64-bit integers");
+    }
+    if (!Sirit::ValidId(ctx.atomic_smax_global_func_u32)) {
+        throw NotImplementedException("Global atomic max with no routable storage buffer");
+    }
+    return ctx.OpFunctionCall(ctx.U32[1], ctx.atomic_smax_global_func_u32, ctx.Def(address), value);
 }
 
 Id EmitGlobalAtomicUMax32(EmitContext& ctx, const IR::Value& address, Id value) {

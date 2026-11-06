@@ -334,10 +334,7 @@ void BufferCache<P>::DownloadMemory(DAddr device_addr, u64 size) {
 
 template <class P>
 void BufferCache<P>::DownloadMemoryRanges(std::span<const std::pair<DAddr, u64>> ranges) {
-    constexpr bool has_mapped = requires(Buffer& buffer) {
-        buffer.Mapped();
-        buffer.LastUsageTick();
-    };
+    constexpr bool has_mapped = requires(Buffer& buffer) { buffer.Mapped(); };
     if constexpr (!USE_MEMORY_MAPS) {
         for (const auto& [device_addr, size] : ranges) {
             DownloadMemory(device_addr, size);
@@ -347,10 +344,9 @@ void BufferCache<P>::DownloadMemoryRanges(std::span<const std::pair<DAddr, u64>>
             BufferId buffer_id;
             BufferCopy copy;
         };
-        std::vector<Download> staged;
-        std::vector<Download> mapped;
+        boost::container::small_vector<Download, 16> staged;
+        boost::container::small_vector<Download, 16> mapped;
         u64 total_size_bytes = 0;
-        u64 mapped_tick = 0;
         for (const auto& [device_addr, size] : ranges) {
             ForEachBufferInRange(device_addr, size, [&](BufferId buffer_id, Buffer& buffer) {
                 const DAddr buffer_addr = buffer.CpuAddr();
@@ -362,9 +358,6 @@ void BufferCache<P>::DownloadMemoryRanges(std::span<const std::pair<DAddr, u64>>
                 bool is_mapped = false;
                 if constexpr (has_mapped) {
                     is_mapped = !buffer.Mapped().empty();
-                    if (is_mapped) {
-                        mapped_tick = (std::max)(mapped_tick, buffer.LastUsageTick());
-                    }
                 }
                 memory_tracker.ForEachDownloadRangeAndClear(
                     begin, end - begin, [&](u64 device_addr_out, u64 range_size) {
@@ -392,7 +385,7 @@ void BufferCache<P>::DownloadMemoryRanges(std::span<const std::pair<DAddr, u64>>
         }
         if (staged.empty()) {
             if constexpr (has_mapped) {
-                runtime.Wait(mapped_tick);
+                runtime.FinishForHostRead();
             }
         } else {
             auto staging = runtime.DownloadStagingBuffer(total_size_bytes);
@@ -402,7 +395,11 @@ void BufferCache<P>::DownloadMemoryRanges(std::span<const std::pair<DAddr, u64>>
                 buffer.MarkUsage(download.copy.src_offset, download.copy.size);
                 runtime.CopyBuffer(staging.buffer, buffer, std::span{&download.copy, 1}, true);
             }
-            runtime.Finish();
+            if constexpr (has_mapped) {
+                runtime.FinishForHostRead();
+            } else {
+                runtime.Finish();
+            }
             for (const Download& download : staged) {
                 device_memory.WriteBlockUnsafe(
                     slot_buffers[download.buffer_id].CpuAddr() + download.copy.src_offset,
@@ -2372,11 +2369,11 @@ void BufferCache<P>::Nx2NoteListSynced(DAddr page) {
 template <class P>
 void BufferCache<P>::Nx2FlushListPages(std::span<const DAddr> pages) {
     constexpr u64 page_size = u64{1} << Tegra::Nx2WrittenPageBits;
-    std::vector<std::pair<DAddr, u64>> ranges;
+    boost::container::small_vector<std::pair<DAddr, u64>, 16> ranges;
     for (const DAddr page : pages) {
         ranges.emplace_back(page, page_size);
     }
-    std::vector<std::pair<DAddr, u64>> drawn;
+    boost::container::small_vector<std::pair<DAddr, u64>, 16> drawn;
     if constexpr (!IS_OPENGL) {
         std::scoped_lock lock{nx2_list_mutex};
         for (const auto& [page, entry] : nx2_list_pages) {
@@ -2390,9 +2387,9 @@ void BufferCache<P>::Nx2FlushListPages(std::span<const DAddr> pages) {
     if constexpr (!IS_OPENGL) {
         std::scoped_lock lock{nx2_list_mutex};
         for (const auto& [page, writes] : drawn) {
-            Nx2ListPage& entry = nx2_list_pages[page];
-            if (entry.writes == writes) {
-                entry.synced_writes = writes;
+            const auto it = nx2_list_pages.find(page);
+            if (it != nx2_list_pages.end() && it->second.writes == writes) {
+                it->second.synced_writes = writes;
             }
         }
     }
@@ -2897,7 +2894,7 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
 
     if constexpr (requires { buffer.Mapped(); }) {
         if (const auto mapped = buffer.Mapped(); !mapped.empty()) {
-            runtime.Wait(buffer.LastUsageTick());
+            runtime.FinishForHostRead();
             for (const BufferCopy& copy : copies) {
                 device_memory.WriteBlockUnsafe(buffer.CpuAddr() + copy.src_offset,
                                                mapped.data() + copy.src_offset, copy.size);
@@ -3018,64 +3015,95 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
         return NULL_BINDING;
     }
 
-    u32 size = [&]() {
-        const u32 memory_layout_size =
-            static_cast<u32>(gpu_memory->GetMemoryLayoutSize(gpu_addr));
-        // A pointer read from a table in memory is the base of an object pool, read anywhere in
-        // it (Ocarina of Time's grass instances lie 12-18 MiB past theirs): bound to the end of
-        // its mapping, up to 64 MiB. The 8 MiB cap made those reads return 0 and culled every
-        // blade. Written pools keep the cap: a write marks the whole binding GPU-modified.
-        if (table_pointer && !is_written) {
-            return (std::min)(memory_layout_size, static_cast<u32>(64_MiB));
-        }
-        // A native (Switch 2) compute program's pointer is bare: the word after it is another
-        // parameter (a dimension, stride or texture handle), not an NVN buffer size. Taking it as
-        // one bound Fortune's Weave's DLSS input features to 266 bytes and dropped the rest.
-        if (native_pointer) {
-            return (std::min)(memory_layout_size, static_cast<u32>(8_MiB));
-        }
-        const u64 next_qword = gpu_memory->Read<u64>(ssbo_addr + 8);
-        const u32 packed_size = static_cast<u32>(next_qword);
-        const bool next_qword_is_size = static_cast<u32>(next_qword >> 32) == 0 &&
-                                        packed_size != 0 &&
-                                        packed_size <= memory_layout_size;
-        if (next_qword_is_size) {
-            return packed_size;
-        }
-        return (std::min)(memory_layout_size, static_cast<u32>(8_MiB));
-    }();
-    if ((native_pointer || table_pointer) && size != 0) {
-        // Stop where the mapping or its device range does: the binding is one device range, and
-        // a written one isn't split into separate ranges without sparse sources.
-        size = static_cast<u32>(gpu_memory->MaxContinuousRange(gpu_addr, size));
-    }
-
-    // Alignment only applies to the offset of the buffer
+    const bool reads_size_word = !(table_pointer && !is_written) && !native_pointer;
+    const u64 next_qword = reads_size_word ? gpu_memory->Read<u64>(ssbo_addr + 8) : 0;
     const u32 alignment = runtime.GetStorageBufferAlignment();
-    const GPUVAddr aligned_gpu_addr = Common::AlignDown(gpu_addr, alignment);
-    const u32 aligned_size = static_cast<u32>(gpu_addr - aligned_gpu_addr) + size;
-
-    const std::optional<DAddr> aligned_device_addr = gpu_memory->GpuToCpuAddress(aligned_gpu_addr);
-    if (!aligned_device_addr || size == 0) {
-        LOG_DEBUG(HW_GPU, "Failed to find storage buffer for cbuf index {}", cbuf_index);
-        return NULL_BINDING;
-    }
-    const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
-    ASSERT_MSG(device_addr, "Unaligned storage buffer address not found for cbuf index {}",
-               cbuf_index);
-    // The end address used for size calculation does not need to be aligned
-    const DAddr cpu_end = Common::AlignUp(*device_addr + size, Core::DEVICE_PAGESIZE);
-
-    u32 binding_size = static_cast<u32>(cpu_end - *aligned_device_addr);
-    if (is_written) {
-        binding_size = aligned_size;
-    }
-    const Binding binding{
-        .device_addr = *aligned_device_addr,
-        .gpu_addr = aligned_gpu_addr,
-        .size = binding_size,
-        .buffer_id = BufferId{},
+    struct CachedBinding {
+        size_t owner;
+        GPUVAddr gpu_addr;
+        u64 next_qword;
+        u64 serial;
+        u32 alignment;
+        u32 flags;
+        Binding binding;
     };
+    constexpr size_t ways = 4;
+    thread_local std::array<std::array<CachedBinding, ways>, 512> binding_cache{};
+    const u32 flags =
+        (is_written ? 1U : 0U) | (native_pointer ? 2U : 0U) | (table_pointer ? 4U : 0U);
+    const size_t owner = gpu_memory->GetID() + 1;
+    const u64 serial = gpu_memory->MapSerial();
+    auto& set = binding_cache[((gpu_addr ^ next_qword ^ flags) * 0x9E3779B97F4A7C15ULL) >> 55];
+    for (size_t way = 0; way < ways; ++way) {
+        const CachedBinding& cached = set[way];
+        if (cached.owner == owner && cached.gpu_addr == gpu_addr &&
+            cached.next_qword == next_qword && cached.serial == serial &&
+            cached.alignment == alignment && cached.flags == flags) {
+            const Binding hit = cached.binding;
+            std::rotate(set.begin(), set.begin() + way, set.begin() + way + 1);
+            return hit;
+        }
+    }
+    const Binding binding = [&]() -> Binding {
+        u32 size = [&]() {
+            const u32 memory_layout_size =
+                static_cast<u32>(gpu_memory->GetMemoryLayoutSize(gpu_addr));
+            // A pointer read from a table in memory is the base of an object pool, read anywhere in
+            // it (Ocarina of Time's grass instances lie 12-18 MiB past theirs): bound to the end of
+            // its mapping, up to 64 MiB. The 8 MiB cap made those reads return 0 and culled every
+            // blade. Written pools keep the cap: a write marks the whole binding GPU-modified.
+            if (table_pointer && !is_written) {
+                return (std::min)(memory_layout_size, static_cast<u32>(64_MiB));
+            }
+            // A native (Switch 2) compute program's pointer is bare: the word after it is another
+            // parameter (a dimension, stride or texture handle), not an NVN buffer size. Taking it
+            // as one bound Fortune's Weave's DLSS input features to 266 bytes and dropped the rest.
+            if (native_pointer) {
+                return (std::min)(memory_layout_size, static_cast<u32>(8_MiB));
+            }
+            const u32 packed_size = static_cast<u32>(next_qword);
+            const bool next_qword_is_size = static_cast<u32>(next_qword >> 32) == 0 &&
+                                            packed_size != 0 && packed_size <= memory_layout_size;
+            if (next_qword_is_size) {
+                return packed_size;
+            }
+            return (std::min)(memory_layout_size, static_cast<u32>(8_MiB));
+        }();
+        if ((native_pointer || table_pointer) && size != 0) {
+            // Stop where the mapping or its device range does: the binding is one device range, and
+            // a written one isn't split into separate ranges without sparse sources.
+            size = static_cast<u32>(gpu_memory->MaxContinuousRange(gpu_addr, size));
+        }
+
+        // Alignment only applies to the offset of the buffer
+        const GPUVAddr aligned_gpu_addr = Common::AlignDown(gpu_addr, alignment);
+        const u32 aligned_size = static_cast<u32>(gpu_addr - aligned_gpu_addr) + size;
+
+        const std::optional<DAddr> aligned_device_addr =
+            gpu_memory->GpuToCpuAddress(aligned_gpu_addr);
+        if (!aligned_device_addr || size == 0) {
+            LOG_DEBUG(HW_GPU, "Failed to find storage buffer for cbuf index {}", cbuf_index);
+            return NULL_BINDING;
+        }
+        const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
+        ASSERT_MSG(device_addr, "Unaligned storage buffer address not found for cbuf index {}",
+                   cbuf_index);
+        // The end address used for size calculation does not need to be aligned
+        const DAddr cpu_end = Common::AlignUp(*device_addr + size, Core::DEVICE_PAGESIZE);
+
+        u32 binding_size = static_cast<u32>(cpu_end - *aligned_device_addr);
+        if (is_written) {
+            binding_size = aligned_size;
+        }
+        return Binding{
+            .device_addr = *aligned_device_addr,
+            .gpu_addr = aligned_gpu_addr,
+            .size = binding_size,
+            .buffer_id = BufferId{},
+        };
+    }();
+    std::rotate(set.begin(), set.end() - 1, set.end());
+    set[0] = {owner, gpu_addr, next_qword, serial, alignment, flags, binding};
     return binding;
 }
 

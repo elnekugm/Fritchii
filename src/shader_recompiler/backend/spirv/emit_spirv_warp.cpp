@@ -96,8 +96,12 @@ bool UseShuffleFallback(EmitContext& ctx) {
 }
 
 Id ShuffleAbsolute(EmitContext& ctx, Id value, Id src_thread_id) {
+    // The loop below is what AMD's compiler can't finish in compute (it ran for minutes there),
+    // so only the graphics stages, where its Shuffle crashes, take it.
+    const bool graphics_stage =
+        ctx.stage != Stage::Compute && ctx.stage != Stage::Task && ctx.stage != Stage::Mesh;
     const bool replace_dynamic_shuffle =
-        ctx.profile.has_broken_spirv_dynamic_subgroup_shuffle && ctx.stage != Stage::Compute;
+        ctx.profile.has_broken_spirv_dynamic_subgroup_shuffle && graphics_stage;
     if (!ctx.profile.has_broken_spirv_subgroup_shuffle && !replace_dynamic_shuffle) {
         return ctx.OpGroupNonUniformShuffle(ctx.U32[1], SubgroupScope(ctx), value, src_thread_id);
     }
@@ -115,7 +119,7 @@ Id ShuffleAbsolute(EmitContext& ctx, Id value, Id src_thread_id) {
 }
 
 Id ShuffleRelative(EmitContext& ctx, Id value, Id delta, Id src_thread_id, spv::Op op) {
-    if (!ctx.profile.support_shuffle_relative || UseShuffleFallback(ctx)) {
+    if (!ctx.profile.support_shuffle_relative || ctx.profile.has_broken_spirv_subgroup_shuffle) {
         return ShuffleAbsolute(ctx, value, HostThreadId(ctx, src_thread_id));
     }
     const Id result{ctx.OpGroupNonUniformShuffleXor(ctx.U32[1], SubgroupScope(ctx), value, delta)};

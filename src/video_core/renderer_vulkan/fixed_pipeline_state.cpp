@@ -265,7 +265,21 @@ void FixedPipelineState::Refresh(Tegra::Engines::Maxwell3D& maxwell3d, DynamicFe
         // Always rebuilt: a blend register written without raising Dirty::Blending (native
         // Switch 2 command paths) left a stale state in the key (Ocarina forest fog drawn
         // without blending = black screen on GPUs without dynamic blend state, e.g. AMD).
-        RefreshBlending(maxwell3d);
+        {
+            maxwell3d.dirty.flags[Dirty::Blending] = false;
+            for (size_t index = 0; index < attachments.size(); ++index) {
+                attachments[index].Refresh(regs, index);
+                auto& attachment = attachments[index];
+                if (color_write_enable_dynamic && attachment.mask_r == 0 &&
+                    attachment.mask_g == 0 && attachment.mask_b == 0 &&
+                    attachment.mask_a == 0) {
+                    attachment.mask_r.Assign(1);
+                    attachment.mask_g.Assign(1);
+                    attachment.mask_b.Assign(1);
+                    attachment.mask_a.Assign(1);
+                }
+            }
+        }
     }
     dynamic_state.Refresh3(regs, features);
     if (xfb_enabled) {

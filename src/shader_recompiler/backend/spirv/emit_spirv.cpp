@@ -309,9 +309,10 @@ void DefineEntryPoint(const IR::Program& program, EmitContext& ctx, Id main) {
         ctx.AddExecutionMode(main, spv::ExecutionMode::OutputVertices, program.mesh.max_vertices);
         ctx.AddExecutionMode(main, spv::ExecutionMode::OutputPrimitivesEXT,
                              program.mesh.max_primitives);
-        ctx.AddExecutionMode(main, program.mesh.topology == 0   ? spv::ExecutionMode::OutputPoints
-                                   : program.mesh.topology == 1 ? spv::ExecutionMode::OutputLinesEXT
-                                                                : spv::ExecutionMode::OutputTrianglesEXT);
+        // SET_MESH_SHADER_A topology 0: points (Ocarina, after nxnative 6517f8b976); 4: triangles.
+        ctx.AddExecutionMode(main, program.mesh.topology == 0
+                                       ? spv::ExecutionMode::OutputPoints
+                                       : spv::ExecutionMode::OutputTrianglesEXT);
         break;
     case Stage::TessellationControl:
         execution_model = spv::ExecutionModel::TessellationControl;
@@ -597,7 +598,8 @@ void RewriteOpcodes(std::vector<u32>& code, std::span<const std::pair<u32, spv::
             return;
         }
         if (opcode == spv::Op::OpGroupNonUniformShuffleXor ||
-            opcode == spv::Op::OpGroupNonUniformQuadBroadcast) {
+            opcode == spv::Op::OpGroupNonUniformQuadBroadcast ||
+            opcode == static_cast<spv::Op>(5614) /* OpAtomicFMinEXT -> OpAtomicFAddEXT */) {
             const auto it{std::ranges::find(rewrites, code[offset + 2],
                                             &std::pair<u32, spv::Op>::first)};
             if (it != rewrites.end()) {

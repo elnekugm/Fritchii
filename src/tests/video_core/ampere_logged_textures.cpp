@@ -5,7 +5,6 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <optional>
 #include <span>
 #include <string>
 #include <unordered_map>

@@ -13,6 +13,8 @@
 #undef VMA_IMPLEMENTATION
 #endif
 
+#include <filesystem>
+#include <fstream>
 #include <boost/algorithm/string/split.hpp>
 #include "common/fs/path_util.h"
 #include "common/game_presets.h"
@@ -5425,9 +5427,29 @@ void MainWindow::OnApplicationChanged(u64 program_id) {
 void MainWindow::UpdateWindowTitle(std::string_view title_name, std::string_view title_version,
                                    std::string_view gpu_vendor) {
     static const std::string build_id = std::string{Common::g_build_id};
-    static const std::string yuzu_title =
-        fmt::format("{} | {} | {}", std::string{Common::g_build_name},
-                    std::string{Common::g_build_version}, std::string{Common::g_compiler_id});
+    static const std::string yuzu_title = [] {
+        // The first line of VERSION.txt next to the executable names the build (each release
+        // folder carries its own, e.g. "Selevet build 67 zelda fix 26 (AMD)").
+        const std::filesystem::path version_file =
+            std::filesystem::path{QCoreApplication::applicationDirPath().toStdWString()} /
+            "VERSION.txt";
+        std::ifstream file{version_file};
+        std::string name;
+        if (file && std::getline(file, name)) {
+            if (name.starts_with("\xEF\xBB\xBF")) {
+                name.erase(0, 3);
+            }
+            while (!name.empty() && (name.back() == '\r' || name.back() == ' ')) {
+                name.pop_back();
+            }
+        }
+        if (!name.empty()) {
+            return fmt::format("{} | {}", name, std::string{Common::g_compiler_id});
+        }
+        return fmt::format("{} | {} | {}", std::string{Common::g_build_name},
+                           std::string{Common::g_build_version},
+                           std::string{Common::g_compiler_id});
+    }();
 
     const auto override_title =
         fmt::format(fmt::runtime(std::string(Common::g_title_bar_format_idle)), build_id);
