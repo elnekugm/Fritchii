@@ -130,7 +130,7 @@ TEST_CASE("Yoshi LEA low-add carry reaches Maxwell IR", "[video_core][yoshi_lea]
                             Maxwell::TranslatorVisitor v{env, block};
                             if (op == 0x5c18)
                                 v.ISCADD_reg(insn);
-                            else if (op == 0x5b60)
+                            else if (op == 0x5b62)
                                 v.ISETP_reg(insn);
                             else if (op == 0x5c98)
                                 v.MOV_reg(insn);
