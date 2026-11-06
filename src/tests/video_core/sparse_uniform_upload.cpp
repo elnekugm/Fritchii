@@ -226,7 +226,7 @@ struct LegacyGpuMapping {
 };
 } // namespace
 
-TEST_CASE("Legacy sparse uniforms require an exact descriptor and current continuous GPU mapping",
+TEST_CASE("Legacy uniform linear-bank guard requires an exact descriptor and current GPU mapping",
           "[video_core][sparse_uniform]") {
     LegacyGpuMapping gpu;
     const auto eligible = [&](u32 descriptor = 0x10000, u32 shader = 0x10000) {
@@ -246,91 +246,6 @@ TEST_CASE("Legacy sparse uniforms require an exact descriptor and current contin
     CHECK_FALSE(eligible()); // Binding's retained device address no longer matches the GPU mapping.
     CHECK_FALSE(VideoCommon::IsLegacySparseUniformBank(gpu, 0, gpu.device, 0x10000, 0x10000));
     CHECK_FALSE(VideoCommon::IsLegacySparseUniformBank(gpu, gpu.gpu, 0, 0x10000, 0x10000));
-}
-
-TEST_CASE("Legacy full-bank uploads retain holes and mapped suffixes through mapping changes",
-          "[video_core][sparse_uniform]") {
-    // Wonder's upload geometry: unaligned 64 KiB bank, 69632-byte cached upload, four tail holes.
-    SparseMemoryImpl<17> memory;
-    for (size_t page = 1; page < 14; ++page) {
-        memory.Map(page, static_cast<int>(page));
-    }
-    LegacyGpuMapping gpu;
-    REQUIRE(VideoCommon::IsLegacySparseUniformBank(gpu, gpu.gpu, gpu.device, 0x10000, 0x10000));
-    VideoCommon::LegacyUniformUploadTracker tracker;
-    std::vector<u8> retained(69632, 0xa5);
-    size_t uploads{};
-    const auto bind = [&](bool gpu_modified = false) {
-        auto& bank = tracker.Inspect(memory, gpu.device, memory.generation);
-        if (!gpu_modified && bank.NeedsRefresh(memory.generation)) {
-            VideoCommon::ReadSparseUniformMemory(memory, 0x1000, retained);
-            bank.refreshed_generation = memory.generation;
-            ++uploads;
-        }
-    };
-    bind();
-    REQUIRE(uploads == 1);
-    CheckBytes(memory, 0x1000, retained);
-    auto& bank = tracker.Inspect(memory, gpu.device, memory.generation);
-    CHECK(bank.mapped_pages == 13);
-    CHECK(bank.hole_pages == 4);
-    const size_t reads = memory.pointer_reads;
-    bind();
-    bind(); // Another draw/frame without mapping changes needs neither a scan nor forced upload.
-    CHECK(memory.pointer_reads == reads);
-    CHECK(uploads == 1);
-    memory.Map(17, 23); // An island beyond holes must be copied, including the unaligned edge page.
-    bind();
-    REQUIRE(uploads == 2);
-    CheckBytes(memory, 0x1000, retained);
-    CHECK(retained.back() == memory.bytes[24 * memory.PageSize - 1]);
-    memory.Map(8, -1);
-    bind();
-    REQUIRE(uploads == 3);
-    CheckBytes(memory, 0x1000, retained);
-    memory.Map(8, 27); // Same frame, no CPU write: replace stale zeros after a remap.
-    bind(true);        // GPU-owned bytes must not be replaced; refresh must remain pending.
-    REQUIRE(uploads == 3);
-    CHECK(bank.NeedsRefresh(memory.generation));
-    bind();
-    REQUIRE(uploads == 4);
-    CheckBytes(memory, 0x1000, retained);
-    for (size_t page = 14; page <= 16; ++page) {
-        memory.Map(page, static_cast<int>(page));
-    }
-    bind(); // All holes filled: previously zero-filled descriptors still need this last refresh.
-    REQUIRE(uploads == 5);
-    CHECK(bank.hole_pages == 0);
-    CheckBytes(memory, 0x1000, retained);
-    CHECK(retained.size() == 69632);
-    CHECK(gpu.device == 0x1a00); // Descriptor start and full size were never clamped to a prefix.
-    // A subsequent unrelated device-map epoch still refreshes this previously sparse bank.
-    memory.Map(0, 31);
-    bind();
-    CHECK(uploads == 6);
-    CheckBytes(memory, 0x1000, retained);
-}
-
-TEST_CASE("Fully backed legacy banks keep normal dirty tracking and cache page inspections",
-          "[video_core][sparse_uniform]") {
-    SparseMemoryImpl<17> memory;
-    for (size_t page = 1; page <= 17; ++page) {
-        memory.Map(page, static_cast<int>(page));
-    }
-    VideoCommon::LegacyUniformUploadTracker tracker;
-    auto& bank = tracker.Inspect(memory, 0x1a00, memory.generation);
-    CHECK(bank.hole_pages == 0);
-    CHECK_FALSE(bank.NeedsRefresh(memory.generation));
-    const size_t reads = memory.pointer_reads;
-    for (size_t draw = 0; draw < 100; ++draw) {
-        CHECK_FALSE(
-            tracker.Inspect(memory, 0x1a00, memory.generation).NeedsRefresh(memory.generation));
-    }
-    CHECK(memory.pointer_reads == reads);
-    memory.Map(2, 26); // Fully backed remaps keep the normal dirty path, without forced uploads.
-    CHECK_FALSE(tracker.Inspect(memory, 0x1a00, memory.generation).NeedsRefresh(memory.generation));
-    memory.Map(17, -1);
-    CHECK(tracker.Inspect(memory, 0x1a00, memory.generation).NeedsRefresh(memory.generation));
 }
 
 TEST_CASE(
