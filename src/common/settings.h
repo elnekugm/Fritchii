@@ -767,8 +767,8 @@ struct Values {
     /// Built-in code patch for titles whose frame-rate controller can be held at 30 fps
     /// (FileSys::PatchManager, FPS30_PATCHES). Ignored for other titles and builds.
     SwitchableSetting<bool> fps30_patch{linkage, false, "fps30_patch", Category::System};
-    SwitchableSetting<WonderFps, true> wonder_fps{linkage, WonderFps::Fps60, "wonder_fps",
-                                          Category::System};
+    SwitchableSetting<u32, true> wonder_fps{linkage, 60, 1, 1000, "wonder_fps_target",
+                                          Category::System, Specialization::Countable};
 
     SwitchableSetting<bool> skip_cpu_inner_invalidation{linkage,
                                                         false,

@@ -24,10 +24,9 @@ u32 ReadWord(const std::vector<u8>& module, size_t index) {
 } // namespace
 
 TEST_CASE("Wonder FPS patch keeps simulation and presentation together", "[wonder_fps]") {
-    constexpr std::array targets{Settings::WonderFps::Fps30,  Settings::WonderFps::Fps60,
-                                 Settings::WonderFps::Fps90,  Settings::WonderFps::Fps120,
-                                 Settings::WonderFps::Fps180, Settings::WonderFps::Fps240};
-    constexpr std::array<u32, 6> fps_values{30, 60, 90, 120, 180, 240};
+    constexpr std::array targets{30U, 60U, 90U, 120U, 180U, 240U,
+                                 75U, 144U, 165U, 360U, 1U, 1000U};
+    constexpr std::array<u32, 12> fps_values{30, 60, 90, 120, 180, 240, 75, 144, 165, 360, 1, 1000};
     for (size_t i = 0; i < targets.size(); ++i) {
         auto module = MakeModule();
         REQUIRE(FileSys::ApplyWonderFpsPatch(module, Settings::WonderSwitch2ProgramId,
@@ -48,31 +47,31 @@ TEST_CASE("Wonder FPS patch rejects unknown games builds and altered or truncate
     const auto original = module;
     CHECK_FALSE(FileSys::ApplyWonderFpsPatch(module, Settings::BananzaFpsProgramId,
                                              FileSys::WonderFpsBuildId,
-                                             Settings::WonderFps::Fps60));
+                                             60U));
     CHECK_FALSE(FileSys::ApplyWonderFpsPatch(module, Settings::WonderSwitch2ProgramId,
-                                             "other build", Settings::WonderFps::Fps60));
+                                             "other build", 60U));
     CHECK(module == original);
     module.back() ^= 1;
     const auto altered = module;
     CHECK_FALSE(FileSys::ApplyWonderFpsPatch(module, Settings::WonderSwitch2ProgramId,
                                              FileSys::WonderFpsBuildId,
-                                             Settings::WonderFps::Fps60));
+                                             60U));
     CHECK(module == altered);
     module = original;
     module.pop_back();
     const auto truncated = module;
     CHECK_FALSE(FileSys::ApplyWonderFpsPatch(module, Settings::WonderSwitch2ProgramId,
                                              FileSys::WonderFpsBuildId,
-                                             Settings::WonderFps::Fps60));
+                                             60U));
     CHECK(module == truncated);
 }
 
 TEST_CASE("Wonder FPS selector supersedes standalone 60 FPS mod", "[wonder_fps]") {
     auto module = MakeModule();
     REQUIRE(FileSys::ApplyWonderFpsPatch(module, Settings::WonderSwitch2ProgramId,
-                                         FileSys::WonderFpsBuildId, Settings::WonderFps::Fps60));
+                                         FileSys::WonderFpsBuildId, 60U));
     REQUIRE(FileSys::ApplyWonderFpsPatch(module, Settings::WonderSwitch2ProgramId,
-                                         FileSys::WonderFpsBuildId, Settings::WonderFps::Fps240));
+                                         FileSys::WonderFpsBuildId, 240U));
     CHECK(((ReadWord(module, 0) >> 5) & 0xffff) == 240);
 }
 
@@ -83,5 +82,15 @@ TEST_CASE("Game FPS controls are visible only in their own game's properties", "
         CHECK_FALSE(Settings::ShowBananzaFps(id, true));
         CHECK(Settings::ShowWonderFps(id, false) == (id == Settings::WonderSwitch2ProgramId));
         CHECK(Settings::ShowBananzaFps(id, false) == (id == Settings::BananzaFpsProgramId));
+    }
+}
+
+TEST_CASE("Wonder custom FPS rejects out-of-range targets without modifying code", "[wonder_fps]") {
+    for (const u32 fps : {0U, 1001U, 65536U, 0xffffffffU}) {
+        auto module = MakeModule();
+        const auto original = module;
+        CHECK_FALSE(FileSys::ApplyWonderFpsPatch(module, Settings::WonderSwitch2ProgramId,
+                                               FileSys::WonderFpsBuildId, fps));
+        CHECK(module == original);
     }
 }

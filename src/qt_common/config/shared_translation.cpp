@@ -285,7 +285,7 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, gpu_clock, tr("GPU Clocks"),
            tr("Makes the game believe GPU work finishes faster than it does, so it stops lowering "
               "resolution and render distance to fit the Switch's clocks."));
-    INSERT(Settings, wonder_fps, tr("Frame rate (game patch)"),
+    INSERT(Settings, wonder_fps, tr("Frame rate (FPS, game patch)"),
            tr("Sets Wonder's frame rate and simulation rate together. Requires a supported game "
               "version and a restart. This target controls frame pacing; above 60 FPS, presentation "
               "is allowed to run ahead of the display. Higher rates require sufficient performance."));
@@ -496,15 +496,6 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
              PAIR(AstcRecompression, Bc1, tr("BC1 (Low quality)")),
              PAIR(AstcRecompression, Bc3, tr("BC3 (Medium quality)")),
          }});
-    translations->insert({Settings::EnumMetadata<Settings::WonderFps>::Index(),
-                          {
-                              PAIR(WonderFps, Fps30, tr("30 FPS")),
-                              PAIR(WonderFps, Fps60, tr("60 FPS")),
-                              PAIR(WonderFps, Fps90, tr("90 FPS")),
-                              PAIR(WonderFps, Fps120, tr("120 FPS")),
-                              PAIR(WonderFps, Fps180, tr("180 FPS")),
-                              PAIR(WonderFps, Fps240, tr("240 FPS")),
-                          }});
     translations->insert({Settings::EnumMetadata<Settings::FramePacingMode>::Index(),
                           {
                               PAIR(FramePacingMode, Target_Auto, tr("Auto")),

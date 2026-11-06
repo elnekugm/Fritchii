@@ -808,7 +808,7 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
         if (title_id == Settings::WonderSwitch2ProgramId && name == "main") {
             const auto target = Settings::values.wonder_fps.GetValue();
             if (ApplyWonderFpsPatch(out, title_id, build_id, target)) {
-                const u32 fps = Settings::WonderFpsValue(target);
+                const u32 fps = target;
                 Settings::wonder_fps_active.store(fps, std::memory_order_relaxed);
                 LOG_INFO(Loader, "    - Applying built-in Wonder {} FPS patch", fps);
             } else {

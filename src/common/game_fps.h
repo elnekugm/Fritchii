@@ -10,6 +10,7 @@ namespace Settings {
 inline constexpr u64 WonderSwitch2ProgramId = 0x040015100B514001ULL;
 inline constexpr u64 BananzaFpsProgramId = 0x040074A01BF12000ULL;
 
+// Convert the preset index stored by older configs to the numeric FPS target.
 inline constexpr u32 WonderFpsValue(WonderFps target) {
     switch (target) {
     case WonderFps::Fps30:

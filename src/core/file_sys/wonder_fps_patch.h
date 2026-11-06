@@ -16,8 +16,9 @@ inline constexpr std::string_view WonderFpsBuildId = "EC47E6F8846D2A7B6892E26828
 // Keep simulation FPS and NVN's present interval together: changing only presentation makes
 // the game run at twice its intended speed. The fallback is used before timing samples exist.
 inline bool ApplyWonderFpsPatch(std::span<u8> nso, u64 program_id, std::string_view build_id,
-                                Settings::WonderFps target) {
-    if (program_id != Settings::WonderSwitch2ProgramId || build_id != WonderFpsBuildId) {
+                                u32 fps) {
+    if (program_id != Settings::WonderSwitch2ProgramId || build_id != WonderFpsBuildId ||
+        fps < 1 || fps > 1000) {
         return false;
     }
     constexpr std::array<u32, 3> offsets{0x1bbfb0, 0x1bbfcc, 0x1bc04c};
@@ -33,7 +34,6 @@ inline bool ApplyWonderFpsPatch(std::span<u8> nso, u64 program_id, std::string_v
         if (instruction != original[i] && instruction != legacy[i])
             return false;
     }
-    const u32 fps = Settings::WonderFpsValue(target);
     const u32 interval = fps == 30 ? 2 : 1;
     const std::array<u32, 3> replacements{0x52800001U | (fps << 5), 0x52800001U | (interval << 5),
                                           0x52800001U | (fps << 5)};
