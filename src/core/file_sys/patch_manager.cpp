@@ -749,6 +749,7 @@ std::vector<VirtualFile> PatchManager::CollectPatches(const std::vector<VirtualD
 std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::string& name) const {
     if (title_id == Settings::WonderSwitch2ProgramId && name == "main") {
         Settings::wonder_fps_active.store(0, std::memory_order_relaxed);
+        Settings::wonder_dynamic_fps_active.store(false, std::memory_order_relaxed);
     }
     if (nso.size() < sizeof(Loader::NSOHeader)) {
         return nso;
@@ -807,9 +808,14 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
         // selector to 60 FPS. Validate every instruction before changing any of them.
         if (title_id == Settings::WonderSwitch2ProgramId && name == "main") {
             const auto target = Settings::values.wonder_fps.GetValue();
-            if (ApplyWonderFpsPatch(out, title_id, build_id, target)) {
+            const char* dynamic_env = std::getenv("EDEN_WONDER_DYNAMIC_FPS");
+            const bool dynamic = dynamic_env && std::string_view{dynamic_env} == "1";
+            if (ApplyWonderFpsPatch(out, title_id, build_id, target, dynamic)) {
                 const u32 fps = target;
                 Settings::wonder_fps_active.store(fps, std::memory_order_relaxed);
+                Settings::wonder_dynamic_fps_generation.fetch_add(1, std::memory_order_relaxed);
+                Settings::wonder_dynamic_fps_active.store(dynamic, std::memory_order_release);
+                LOG_INFO(Loader, "Wonder experimental dynamic simulation: {}", dynamic);
                 LOG_INFO(Loader, "    - Applying built-in Wonder {} FPS patch", fps);
             } else {
                 LOG_WARNING(Loader, "Wonder FPS patch skipped: unsupported build or instructions ({})",

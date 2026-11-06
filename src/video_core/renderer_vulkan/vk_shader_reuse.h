@@ -95,6 +95,7 @@ class TranslationReads {
 public:
     enum class Query : u32 {
         CbufValue,
+        CbufStorageBufferPointer,
         TextureType,
         TexturePixelFormat,
         TexturePixelFormatInteger,
@@ -133,9 +134,12 @@ private:
         Shader::Stage stage;
         u32 start_address;
         u32 texture_bound_buffer;
+        u32 surface_bound_buffer;
         u32 local_memory_size;
         u32 shared_memory_size;
         bool is_proprietary_driver;
+        bool has_native_instructions;
+        bool is_native_program;
 
         bool operator==(const Properties&) const = default;
     };
@@ -162,6 +166,8 @@ public:
     u64 ReadInstruction(u32 address) override;
     u32 TranslateProgramAddress(u32 address) const override;
     bool HasNativeInstructions() const override;
+    bool IsNativeProgram() const override;
+    bool IsCbufStorageBufferPointer(u32 index, u32 offset) override;
     u32 ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) override;
     Shader::TextureType ReadTextureType(u32 raw_handle) override;
     Shader::TexturePixelFormat ReadTexturePixelFormat(u32 raw_handle) override;

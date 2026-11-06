@@ -130,11 +130,11 @@ TEST_CASE("Uniform gathers preserve private UR mappings and component selectors"
 
 TEST_CASE("Uniform gathers reject unverified modes and register ranges",
           "[video_core][yoshi_gather]") {
-    // Offset, PTP, DC, F16, sparse predicate, array dimensions, reserved texture operands,
+    // PTP, DC, F16, sparse predicate, array dimensions, reserved texture operands,
     // extended instruction modifiers: none is enabled by this narrow port.
     for (const auto [word, bit] : std::array{
              std::pair{1U, 14U}, std::pair{1U, 27U}, std::pair{1U, 28U},
-             std::pair{1U, 29U}, std::pair{1U, 30U}, std::pair{2U, 12U}, std::pair{2U, 13U},
+             std::pair{1U, 29U}, std::pair{1U, 30U}, std::pair{2U, 13U},
              std::pair{2U, 14U}, std::pair{2U, 15U}, std::pair{2U, 17U},
              std::pair{2U, 25U}, std::pair{2U, 27U}, std::pair{3U, 0U},
              std::pair{3U, 8U}, std::pair{3U, 30U}, std::pair{3U, 31U}}) {
@@ -237,5 +237,55 @@ TEST_CASE("Uniform array gather retains coordinate pair and mode bounds",
                                   (215U << (bit % 32));
         CHECK_FALSE(Ampere::LowerToMaxwell(std::array{invalid, Exit}));
     }
+}
+TEST_CASE("Captured uniform AOFFI gather decodes signed offsets after the handle",
+          "[video_core][yoshi_gather]") {
+    // Runtime fragment shader at0x1b0edec000+0x7c0, previously rejected at native bit76.
+    const Instruction captured{{0x00247f63, 0x3000040e, 0x0c1e1f0e, 0x000f4200}};
+    const auto lowered = Ampere::LowerToMaxwell(std::array{captured, Exit});
+    REQUIRE(lowered);
+    CHECK(lowered.required_texture_buffer == ~0U);
+    REQUIRE(lowered.instructions.size() == 10);
+    CHECK(((lowered.instructions[0] >> 20) & 255) == 0); // x = Ra
+    CHECK(((lowered.instructions[1] >> 20) & 255) == 1); // y = Ra+1, not Rb
+    CHECK(((lowered.instructions[2] >> 20) & 255) == 220); // UR4
+    CHECK((lowered.instructions[3] & 255) == 247);
+    CHECK(((lowered.instructions[3] >> 20) & 255) == 14); // packed offset = Rb
+    GatherEnvironment env;
+    ObjectPool<IR::Inst> pool;
+    IR::Block block{pool};
+    Maxwell::TranslatorVisitor visitor{env, block};
+    visitor.TLD4_b(lowered.instructions[4]);
+    unsigned gathers{};
+    for (const IR::Inst& instruction : block) {
+        if (instruction.GetOpcode() != IR::Opcode::BindlessImageGather) continue;
+        ++gathers;
+        CHECK(instruction.Arg(0).Inst()->Arg(0).Reg() == IR::Reg{246});
+        const auto* offset = instruction.Arg(2).Inst();
+        REQUIRE(offset->GetOpcode() == IR::Opcode::CompositeConstructU32x2);
+        for (u32 axis = 0; axis < 2; ++axis) {
+            const auto* extract = offset->Arg(axis).Inst();
+            CHECK(extract->GetOpcode() == IR::Opcode::BitFieldSExtract);
+            CHECK(extract->Arg(0).Inst()->Arg(0).Reg() == IR::Reg{247});
+            CHECK(extract->Arg(1).U32() == axis * 8);
+            CHECK(extract->Arg(2).U32() == 6);
+        }
+        CHECK(instruction.Arg(3).IsEmpty());
+    }
+    CHECK(gathers == 1);
+    for (const u32 ra : {215U, 216U, 254U}) {
+        auto invalid = captured;
+        invalid.words[0] = (invalid.words[0] & 0x00ffffffU) | (ra << 24);
+        CHECK_FALSE(Ampere::LowerToMaxwell(std::array{invalid, Exit}));
+    }
+    // PTP, invalid offset mode and array AOFFI remain outside the verified operand layout.
+    for (const u32 mode : {2U, 3U}) {
+        auto invalid = captured;
+        invalid.words[2] = (invalid.words[2] & ~0x3000U) | (mode << 12);
+        CHECK_FALSE(Ampere::LowerToMaxwell(std::array{invalid, Exit}));
+    }
+    auto array = captured;
+    array.words[1] |= 0x80000000U;
+    CHECK_FALSE(Ampere::LowerToMaxwell(std::array{array, Exit}));
 }
 } // namespace

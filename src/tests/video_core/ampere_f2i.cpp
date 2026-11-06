@@ -487,3 +487,294 @@ TEST_CASE("Ampere mixed texture bindings materialize only the secondary descript
     REQUIRE(((f2i >> 44) & 1) == 1);
 
 }
+
+TEST_CASE("Ampere register bindless textures preserve scalar and vector operand packing",
+          "[video_core][ampere]") {
+    const std::array<Instruction, 4> samples{{
+        {{0x16167361, 0x78000018, 0x041e0718, 0x108f4400}},
+        {{0x00007361, 0x38000027, 0x041e0726, 0x002f4400}},
+        {{0x0c0d7361, 0xa800001e, 0x041e41ff, 0x001f4400}},
+        {{0x0000794d, 0, 0x03800000, 0}},
+    }};
+    const std::array<std::array<u32, 5>, 3> sources{{
+        {22, 23, 24, 25, 255}, {0, 1, 39, 255, 255}, {12, 13, 14, 30, 31},
+    }};
+    for (u32 i = 0; i < 3; ++i) {
+        const std::array<Instruction, 2> code{samples[i], samples[3]};
+        const auto lowered = LowerToMaxwell(code);
+        REQUIRE(static_cast<bool>(lowered));
+        REQUIRE(lowered.required_texture_buffer == ~0U);
+        const u32 coordinates = i == 1 ? 2 : 3;
+        const u32 inputs = coordinates + 1 + (i == 2 ? 1 : 0);
+        for (u32 j = 0; j < inputs; ++j) {
+            const u32 target = j < coordinates ? 250 + j : 246 + j - coordinates;
+            REQUIRE(lowered.instructions[j] ==
+                    (0x5c98000000070000ULL | target | (15ULL << 39) | (u64{sources[i][j]} << 20)));
+        }
+        const u64 texture = lowered.instructions[inputs];
+        REQUIRE(((texture >> 20) & 255) == 246);
+        REQUIRE(((texture >> 28) & 7) == (i == 0 ? 6U : i == 1 ? 2U : 3U));
+        REQUIRE(((texture >> 50) & 1) == (i == 2 ? 1U : 0U));
+        REQUIRE((texture >> 56) == 0xde);
+    }
+}
+
+TEST_CASE("Ampere register bindless textures reject unsupported modifiers and scratch spans",
+          "[video_core][ampere]") {
+    const std::array<Instruction, 2> code{{
+        {{0x16167361, 0x78000018, 0x041e0718, 0x108f4400}},
+        {{0x0000794d, 0, 0x03800000, 0}},
+    }};
+    for (const u32 bit : {40U, 58U, 59U, 77U, 80U, 81U, 91U}) {
+        auto invalid = code;
+        invalid[0].words[bit / 32] ^= 1U << (bit % 32);
+        REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
+    }
+    for (const u32 word : {0xf5167361U, 0x16f57361U}) {
+        auto invalid = code;
+        invalid[0].words[0] = word;
+        REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
+    }
+    auto invalid = code;
+    invalid[0].words[1] = 0x780000f5;
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
+}
+
+TEST_CASE("Ampere half explicit texel fetches retain LOD and pack RGB into split registers",
+          "[video_core][ampere]") {
+    for (const u32 guard : {1U, 7U, 9U}) {
+        const std::array<Instruction, 2> code{{
+            {{0x04040b66U | (guard << 12), 0x33c0440e, 0x059e8705, 0x002f4200}},
+            {{0x0000794d, 0, 0x03800000, 0}},
+        }};
+        const auto lowered = LowerToMaxwell(code);
+        REQUIRE(static_cast<bool>(lowered));
+        REQUIRE(lowered.required_texture_buffer == 15);
+        REQUIRE(lowered.instructions.size() == 11);
+        const u64 pred = u64{guard} << 16;
+        REQUIRE(lowered.instructions[3] ==
+                (0xdc00000000000000ULL | pred | 250 | (250ULL << 8) | (246ULL << 20) |
+                 (2ULL << 28) | (7ULL << 31) | (0x44ULL << 36) | (1ULL << 49) |
+                 (7ULL << 51) | (1ULL << 55)));
+        for (u32 pair = 0; pair < 2; ++pair) {
+            const u32 low = pair == 0 ? 250 : 252, high = pair == 0 ? 251 : 255;
+            const u32 offset = 4 + pair * 3;
+            REQUIRE(lowered.instructions[offset] ==
+                    (0x5ca8000000000000ULL | pred | 246 | (1ULL << 8) | (2ULL << 10) |
+                     (u64{low} << 20)));
+            REQUIRE(lowered.instructions[offset + 1] ==
+                    (0x5ca8000000000000ULL | pred | 247 | (1ULL << 8) | (2ULL << 10) |
+                     (u64{high} << 20)));
+            REQUIRE(lowered.instructions[offset + 2] ==
+                    (0x5c18000000000000ULL | pred | (4 + pair) | (247ULL << 8) |
+                     (246ULL << 20) | (16ULL << 39)));
+        }
+    }
+}
+
+TEST_CASE("Ampere half texture results keep the first component in the low lane",
+          "[video_core][ampere][half_texture]") {
+    const std::array<Instruction, 2> samples{{
+        {{0x04047b66, 0x33c0440e, 0x059e8705, 0x002f4200}},
+        {{0x06007b60, 0x33c0440f, 0x059e8702, 0x101fc200}},
+    }};
+    for (const auto& sample : samples) {
+        for (const bool split : {false, true}) {
+            for (const bool rgba : {false, true}) {
+                const bool texel_fetch = sample.Bits(0, 12) == 0xb66;
+                if (texel_fetch && (!split || rgba)) {
+                    continue;
+                }
+                auto instruction = sample;
+                if (!texel_fetch) {
+                    instruction.words[2] = (instruction.words[2] & ~0xfffU) |
+                                           (split ? 2U : 255U) | (rgba ? 0xf00U : 0x700U);
+                }
+                const std::array<Instruction, 2> code{{
+                    instruction,
+                    {{0x0000794d, 0, 0x03800000, 0}},
+                }};
+                const auto lowered = LowerToMaxwell(code);
+                REQUIRE(static_cast<bool>(lowered));
+                std::array<u32, 256> converted_components{};
+                converted_components[250] = 0x3c00;
+                converted_components[251] = 0x3800;
+                converted_components[252] = 0x3400;
+                converted_components[253] = 0x3a00;
+                std::array<u32, 256> registers{};
+                u32 packed_registers{};
+                for (const u64 word : lowered.instructions) {
+                    const u32 dest = word & 255;
+                    if ((word >> 48) == 0x5ca8) {
+                        registers[dest] = converted_components[(word >> 20) & 255];
+                    } else if ((word >> 48) == 0x5c18) {
+                        registers[dest] = (registers[(word >> 8) & 255] << ((word >> 39) & 31)) +
+                                          registers[(word >> 20) & 255];
+                        ++packed_registers;
+                    }
+                }
+                REQUIRE(packed_registers == 2);
+                REQUIRE(registers[instruction.Bits(16, 8)] == 0x38003c00);
+                const u32 second = split ? instruction.Bits(64, 8) : instruction.Bits(16, 8) + 1;
+                REQUIRE(registers[second] == (rgba ? 0x3a003400U : 0x00003400U));
+            }
+        }
+    }
+}
+
+TEST_CASE("Ampere half explicit texel fetches keep unsupported formats and register spans rejected",
+          "[video_core][ampere]") {
+    const std::array<Instruction, 2> code{{
+        {{0x04047b66, 0x33c0440e, 0x059e8705, 0x002f4200}},
+        {{0x0000794d, 0, 0x03800000, 0}},
+    }};
+    for (const u32 bit : {59U, 60U, 62U, 76U, 77U, 78U, 80U, 81U, 91U}) {
+        auto invalid = code;
+        invalid[0].words[bit / 32] ^= 1U << (bit % 32);
+        REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
+    }
+    auto invalid = code;
+    invalid[0].words[0] = 0xf5047b66;
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
+    invalid = code;
+    invalid[0].words[1] = 0x33c044f6;
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
+}
+
+TEST_CASE("Ampere F2I lowers truncated 16-bit destinations", "[video_core][ampere]") {
+    // F2I.TRUNC.U16 R5, R4 and F2I.TRUNC.S16 R5, R4 (Donkey Kong Bananza): bits 75-76 = 1 is the
+    // 16-bit destination of the byte form's mode. Maxwell F2I.U16/S16 saturates itself.
+    const Instruction exit{{0x0000794d, 0, 0x03800000, 0}};
+    const std::array<Instruction, 2> unsigned_code{{{{0x00057305, 4, 0x0020e800, 0}}, exit}};
+    const auto lowered = LowerToMaxwell(unsigned_code);
+    REQUIRE(static_cast<bool>(lowered));
+    // NaNs cleared into R250 first, then F2I.U16.F32.TRUNC R5, R250.
+    REQUIRE(lowered.instructions.size() == 4);
+    REQUIRE(lowered.instructions[2] == 0x5cb001800fa70905ULL);
+    std::array<Instruction, 2> signed_code{{{{0x00057305, 4, 0x0020e900, 0}}, exit}};
+    const auto signed_lowered = LowerToMaxwell(signed_code);
+    REQUIRE(static_cast<bool>(signed_lowered));
+    REQUIRE(signed_lowered.instructions.front() == 0x5cb0018000471905ULL);
+    signed_code[0].words[3] = 1; // unknown bits stay rejected
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(signed_code)));
+}
+
+TEST_CASE("Ampere FRND lowers a constant-buffer source", "[video_core][ampere]") {
+    // FRND.F32.FLOOR R5, c[3][0x10] (Donkey Kong Bananza) -> Maxwell F2F_cbuf with ROUND mode.
+    const Instruction exit{{0x0000794d, 0, 0x03800000, 0}};
+    std::array<Instruction, 2> code{{
+        {{0x00057b07, (0x10U << 6) | (3U << 22), (2U << 11) | (1U << 14) | (2U << 20), 0}},
+        exit,
+    }};
+    const auto lowered = LowerToMaxwell(code);
+    REQUIRE(static_cast<bool>(lowered));
+    REQUIRE(lowered.instructions.front() == 0x4ca8048c00470a05ULL);
+    code[0].words[1] = (0x11U << 6) | (3U << 22); // unaligned offset
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(code)));
+}
+
+TEST_CASE("Ampere Yoshi half FRND preserves rounding and half formats",
+          "[video_core][ampere][yoshi_frnd]") {
+    // Captured in the texture-history program after its handle constructor and I2F.F16.
+    const Instruction exit{{0x0000794d, 0, 0x03800000, 0}};
+    for (const u32 round : {0U, 1U, 2U, 3U}) {
+        for (const u32 predicate : {1U, 7U, 9U}) {
+            std::array<Instruction, 2> code{{
+                {{0x002a0307U | (predicate << 12), 0x13, 0x00100800U | (round << 14),
+                  0x000e2200}},
+                exit,
+            }};
+            const auto lowered = LowerToMaxwell(code);
+            REQUIRE(lowered);
+            REQUIRE(lowered.instructions.size() == 2);
+            const u64 word = lowered.instructions.front();
+            REQUIRE(((word >> 8) & 3) == 1); // F16 destination
+            REQUIRE(((word >> 10) & 3) == 1); // F16 source
+            REQUIRE(((word >> 20) & 255) == 0x13);
+            REQUIRE(((word >> 39) & 15) == 8 + round);
+            REQUIRE(((word >> 16) & 15) == predicate);
+            code[0].words[2] ^= 3U << 20; // F32 source cannot use integral F16 rounding
+            REQUIRE_FALSE(LowerToMaxwell(code));
+            code[0].words[2] = 0x00100800U | (1U << 17); // unproved half selector
+            REQUIRE_FALSE(LowerToMaxwell(code));
+            code[0].words[2] = 0x00100800U;
+            for (const u32 half_selector : {1U, 2U, 3U}) {
+                code[0].words[1] = 0x13U | (half_selector << 28);
+                REQUIRE_FALSE(LowerToMaxwell(code));
+            }
+        }
+    }
+}
+
+TEST_CASE("Ampere Yoshi half F2I preserves all integral rounding modes",
+          "[video_core][ampere][yoshi_frnd]") {
+    const Instruction exit{{0x0000794d, 0, 0x03800000, 0}};
+    for (const u32 round : {0U, 1U, 2U, 3U}) {
+        for (const bool high : {false, true}) {
+            std::array<Instruction, 2> code{{
+                {{0x00197305, 0x13U | (u32{high} << 28),
+                  0x00103100U | (round << 14), 0x0000a200}},
+                exit,
+            }};
+            const auto lowered = LowerToMaxwell(code);
+            REQUIRE(lowered);
+            const auto conversion = std::ranges::find_if(lowered.instructions, [](u64 word) {
+                return word >> 52 == 0x5cb && ((word >> 10) & 3) == 2;
+            });
+            REQUIRE(conversion != lowered.instructions.end());
+            REQUIRE(((*conversion >> 39) & 3) == round);
+            REQUIRE(((*conversion >> 12) & 1) == 1); // signed result
+            REQUIRE(((*conversion >> 8) & 3) == 2); // 32-bit result
+            // Half expansion is exact before F32 integral conversion and selects the named half.
+            const auto unpack = std::ranges::find_if(lowered.instructions, [](u64 word) {
+                return word >> 52 == 0x5ca && ((word >> 10) & 3) == 1;
+            });
+            REQUIRE(unpack != lowered.instructions.end());
+            REQUIRE(((*unpack >> 41) & 1) == u32{high});
+        }
+    }
+}
+
+TEST_CASE("Ampere Yoshi F2FP packs a uniform floating source",
+          "[video_core][ampere][yoshi_frnd]") {
+    const Instruction exit{{0x0000794d, 0, 0x03800000, 0}};
+    std::array<Instruction, 2> code{{
+        {{0xff187c3e, 8, 0x080000ff, 0x002fe400}}, exit,
+    }};
+    const auto lowered = LowerToMaxwell(code);
+    REQUIRE(lowered);
+    REQUIRE(lowered.instructions.size() == 4);
+    REQUIRE(((lowered.instructions[0] >> 20) & 255) == 255); // zero low half
+    REQUIRE(((lowered.instructions[1] >> 20) & 255) == 224); // UR8 is R224
+    REQUIRE(((lowered.instructions[2] >> 20) & 255) == 251); // high converted half
+    auto invalid = code;
+    invalid[0].words[2] ^= 1U << 27; // required uniform-source mode
+    REQUIRE_FALSE(LowerToMaxwell(invalid));
+    invalid = code;
+    invalid[0].words[1] = 64; // outside uniform bank
+    REQUIRE_FALSE(LowerToMaxwell(invalid));
+}
+
+TEST_CASE("Ampere Yoshi I2F preserves half result and integer source width",
+          "[video_core][ampere][yoshi_frnd]") {
+    const Instruction exit{{0x0000794d, 0, 0x03800000, 0}};
+    for (const u32 round : {0U, 1U, 2U, 3U}) {
+        for (const bool uniform : {false, true}) {
+            std::array<Instruction, 2> code{{
+                {{uniform ? 0x001e7d06U : 0x001e7306U, 0x1b,
+                  0x00200c00U | (round << 14) | (uniform ? 0x08000000U : 0), 0x000e2400}},
+                exit,
+            }};
+            const auto lowered = LowerToMaxwell(code);
+            REQUIRE(lowered);
+            REQUIRE(lowered.instructions.size() == 2);
+            const u64 word = lowered.instructions.front();
+            REQUIRE(((word >> 8) & 3) == 1);
+            REQUIRE(((word >> 10) & 3) == 2);
+            REQUIRE(((word >> 13) & 1) == 1);
+            REQUIRE(((word >> 39) & 3) == round);
+            REQUIRE(((word >> 20) & 255) == (uniform ? 245 : 0x1b));
+        }
+    }
+}
+} // namespace

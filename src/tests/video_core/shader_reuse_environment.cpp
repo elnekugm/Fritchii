@@ -14,6 +14,17 @@ public:
         mesh_registers = {0x00402404, 0x02000000, 0x00401001};
         std::memset(&mesh_primitive_header, 0xa5, sizeof(mesh_primitive_header));
     }
+    bool native = true;
+    bool mapped = false;
+    u32 pointer_queries = 0;
+    bool IsNativeProgram() const override { return native; }
+    bool HasNativeInstructions() const override { return native; }
+    bool IsCbufStorageBufferPointer(u32 index, u32 offset) override {
+        CHECK(index == 3);
+        CHECK(offset == 24);
+        ++pointer_queries;
+        return mapped;
+    }
     u64 ReadInstruction(u32) override { return 0; }
     u32 ReadCbufValue(u32, u32) override { return 0; }
     Shader::TextureType ReadTextureType(u32) override { return {}; }
@@ -44,4 +55,41 @@ TEST_CASE("RecordingEnvironment keeps the mesh state and surface bank", "[video_
     CHECK(std::memcmp(&recorder.MeshPrimitiveHeader(), &inner.MeshPrimitiveHeader(),
                       sizeof(Shader::ProgramHeader)) == 0);
     CHECK(recorder.SurfaceBoundBuffer() == 3);
+}
+
+TEST_CASE("RecordingEnvironment preserves native pointer semantics and revalidates mappings",
+          "[video_core][shader_reuse]") {
+    MeshEnvironment inner;
+    Vulkan::RecordingEnvironment recorder{inner};
+    CHECK(recorder.IsNativeProgram());
+    CHECK(recorder.HasNativeInstructions());
+    CHECK_FALSE(recorder.IsCbufStorageBufferPointer(3, 24));
+    CHECK(inner.pointer_queries == 1);
+    auto reads = recorder.TakeReads();
+    CHECK(reads.Matches(inner));
+    CHECK(inner.pointer_queries == 2);
+    // Cbuf bytes and program identity stay identical while backing changes. Reuse must fail.
+    inner.mapped = true;
+    CHECK_FALSE(reads.Matches(inner));
+    CHECK(inner.pointer_queries == 3);
+    Vulkan::RecordingEnvironment remapped{inner};
+    CHECK(remapped.IsCbufStorageBufferPointer(3, 24));
+    auto remapped_reads = remapped.TakeReads();
+    CHECK(remapped_reads.Matches(inner));
+    inner.mapped = false;
+    CHECK_FALSE(remapped_reads.Matches(inner));
+    inner.mapped = true;
+    inner.native = false;
+    CHECK_FALSE(remapped_reads.Matches(inner));
+}
+
+TEST_CASE("Shader reuse compares native identity even without pointer queries",
+          "[video_core][shader_reuse]") {
+    MeshEnvironment inner;
+    Vulkan::RecordingEnvironment recorder{inner};
+    auto reads = recorder.TakeReads();
+    CHECK(reads.Matches(inner));
+    inner.native = false;
+    CHECK_FALSE(reads.Matches(inner));
+    CHECK(inner.pointer_queries == 0);
 }

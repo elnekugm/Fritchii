@@ -413,6 +413,11 @@
     <string>Open &amp;Mods Page</string>
    </property>
   </action>
+  <action name="action_Report_Crash">
+   <property name="text">
+    <string>Report an &amp;Issue on GitHub...</string>
+   </property>
+  </action>
   <action name="action_Open_UserHandbook">
    <property name="text">
     <string>&amp;User Handbook</string>

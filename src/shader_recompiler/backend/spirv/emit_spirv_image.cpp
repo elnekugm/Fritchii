@@ -290,7 +290,7 @@ Id TextureImage(EmitContext& ctx, IR::TextureInstInfo info, const IR::Value& ind
     }
 }
 
-std::pair<Id, bool> Image(EmitContext& ctx, const IR::Value& index, IR::TextureInstInfo info) {
+std::pair<Id, Id> Image(EmitContext& ctx, const IR::Value& index, IR::TextureInstInfo info) {
     if (info.type == TextureType::Buffer) {
         const ImageBufferDefinition def{ctx.image_buffers.at(info.descriptor_index)};
         if (def.count > 1) {
@@ -303,9 +303,9 @@ std::pair<Id, bool> Image(EmitContext& ctx, const IR::Value& index, IR::TextureI
                 DecorateNonUniform(ctx, ptr);
                 DecorateNonUniform(ctx, image);
             }
-            return {image, def.is_integer};
+            return {image, def.texel_type};
         }
-        return {ctx.OpLoad(def.image_type, def.id), def.is_integer};
+        return {ctx.OpLoad(def.image_type, def.id), def.texel_type};
     } else {
         const ImageDefinition def{ctx.images.at(info.descriptor_index)};
         if (def.count > 1) {
@@ -317,9 +317,9 @@ std::pair<Id, bool> Image(EmitContext& ctx, const IR::Value& index, IR::TextureI
                 DecorateNonUniform(ctx, ptr);
                 DecorateNonUniform(ctx, image);
             }
-            return {image, def.is_integer};
+            return {image, def.texel_type};
         }
-        return {ctx.OpLoad(def.image_type, def.id), def.is_integer};
+        return {ctx.OpLoad(def.image_type, def.id), def.texel_type};
     }
 }
 
@@ -788,11 +788,10 @@ Id EmitImageRead(EmitContext& ctx, IR::Inst* inst, const IR::Value& index, Id co
         LOG_WARNING(Shader_SPIRV, "Typeless image read not supported by host");
         return ctx.ConstantNull(ctx.U32[4]);
     }
-    const auto [image, is_integer] = Image(ctx, index, info);
-    const Id result_type{is_integer ? ctx.U32[4] : ctx.F32[4]};
+    const auto [image, result_type] = Image(ctx, index, info);
     Id color{Emit(&EmitContext::OpImageSparseRead, &EmitContext::OpImageRead, ctx, inst,
                   result_type, image, coords, std::nullopt, std::span<const Id>{})};
-    if (!is_integer) {
+    if (result_type.value != ctx.U32[4].value) {
         color = ctx.OpBitcast(ctx.U32[4], color);
     }
     return color;
@@ -800,9 +799,9 @@ Id EmitImageRead(EmitContext& ctx, IR::Inst* inst, const IR::Value& index, Id co
 
 void EmitImageWrite(EmitContext& ctx, IR::Inst* inst, const IR::Value& index, Id coords, Id color) {
     const auto info{inst->Flags<IR::TextureInstInfo>()};
-    const auto [image, is_integer] = Image(ctx, index, info);
-    if (!is_integer) {
-        color = ctx.OpBitcast(ctx.F32[4], color);
+    const auto [image, result_type] = Image(ctx, index, info);
+    if (result_type.value != ctx.U32[4].value) {
+        color = ctx.OpBitcast(result_type, color);
     }
     ctx.OpImageWrite(image, coords, color);
 }

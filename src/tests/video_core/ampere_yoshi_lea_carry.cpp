@@ -181,18 +181,21 @@ TEST_CASE("Yoshi LEA low/high pair preserves 64-bit address and predicates",
     LeaEnvironment env;
     constexpr Instruction highs[] = {{{0xb8c37c11, 10, 0x080f0cb7, 0x000fe400}},
                                      {{0xb6bf7c11, 10, 0x088f0cb5, 0x000fe400}},
-                                     {{0xb4c17c11, 10, 0x080f0cb3, 0x000fe400}}};
-    for (u32 i = 0; i < 3; ++i) {
-        const auto low = Ampere::LowerToMaxwell(std::array{Cases[i], Exit});
+                                     {{0xb4c17c11, 10, 0x080f0cb3, 0x000fe400}},
+                                     {{0x6daf7c11, 9, 0x0a0f0c6c, 0x000fe400}}};
+    for (u32 i = 0; i < 4; ++i) {
+        const Instruction low_native = i < 3 ? Cases[i]
+            : Instruction{{0x6dae7c11, 8, 0x0f8808ff, 0x000fe200}};
+        const auto low = Ampere::LowerToMaxwell(std::array{low_native, Exit});
         const auto high = Ampere::LowerToMaxwell(std::array{highs[i], Exit});
         INFO(low.error);
         INFO(high.error);
         REQUIRE(low);
         REQUIRE(high);
-        const u32 lowreg = (Cases[i].words[0] >> 16) & 255,
+        const u32 lowreg = (low_native.words[0] >> 16) & 255,
                   highreg = (highs[i].words[0] >> 16) & 255;
-        const u32 areg = (Cases[i].words[0] >> 24) & 255, creg = highs[i].words[2] & 255,
-                  pout = (Cases[i].words[2] >> 17) & 7;
+        const u32 areg = (low_native.words[0] >> 24) & 255, creg = highs[i].words[2] & 255,
+                  pout = (low_native.words[2] >> 17) & 7;
         for (u32 a : {0U, 1U, 0x7fffffffU, 0x80000000U, 0xffffffffU})
             for (u32 b : {0U, 1U, 0x7fffffffU, 0x80000000U, 0xffffffffU})
                 for (u32 ah : {0U, 1U, 0xffffffffU})
@@ -200,8 +203,8 @@ TEST_CASE("Yoshi LEA low/high pair preserves 64-bit address and predicates",
                         std::array<u32, 256> regs{};
                         regs[areg] = a;
                         regs[creg] = ah;
-                        regs[227] = b;
-                        regs[226] = bh;
+                        regs[216 + low_native.words[1]] = b;
+                        regs[216 + highs[i].words[1]] = bh;
                         regs[239] = 0x5a;
                         std::array<bool, 7> preds{true, false, true, false, true, false, true};
                         const auto saved = preds;
@@ -255,8 +258,8 @@ TEST_CASE("Yoshi LEA low/high pair preserves 64-bit address and predicates",
                             if (p != pout)
                                 CHECK(preds[p] == saved[p]);
                         CHECK(preds[pout] == ((u64{static_cast<u32>(a << 1)} + b) > 0xffffffffULL));
-                        CHECK(regs[226] == bh);
-                        CHECK(regs[227] == b);
+                        CHECK(regs[216 + highs[i].words[1]] == bh);
+                        CHECK(regs[216 + low_native.words[1]] == b);
                         CHECK(regs[239] == 0x5a);
                     }
     }
@@ -313,7 +316,7 @@ TEST_CASE("Yoshi LEA high input aliases use original instruction values",
 TEST_CASE("Yoshi LEA high keeps unverified encodings rejected", "[video_core][yoshi_lea]") {
     const Instruction original{{0xb8c37c11, 10, 0x080f0cb7, 0x000fe400}};
     for (const auto [word, bit] : std::array{
-             std::pair{0U, 12U}, std::pair{1U, 0U}, std::pair{2U, 9U}, std::pair{2U, 10U},
+             std::pair{1U, 6U}, std::pair{2U, 9U}, std::pair{2U, 10U},
              std::pair{2U, 11U}, std::pair{2U, 12U}, std::pair{2U, 26U}, std::pair{3U, 0U}}) {
         auto x = original;
         x.words[word] ^= 1U << bit;
@@ -321,7 +324,7 @@ TEST_CASE("Yoshi LEA high keeps unverified encodings rejected", "[video_core][yo
     }
     auto p2 = original;
     p2.words[2] = (p2.words[2] & ~(7U << 23)) | (2U << 23);
-    CHECK_FALSE(Ampere::LowerToMaxwell(std::array{p2, Exit}));
+    CHECK(Ampere::LowerToMaxwell(std::array{p2, Exit}));
     auto rz = original;
     rz.words[2] = (rz.words[2] & ~255U) | 255U;
     CHECK(Ampere::LowerToMaxwell(std::array{rz, Exit}));
@@ -329,7 +332,7 @@ TEST_CASE("Yoshi LEA high keeps unverified encodings rejected", "[video_core][yo
 TEST_CASE("Yoshi LEA retains unverified-form guards", "[video_core][yoshi_lea]") {
     for (const auto original : Cases) {
         for (const auto [word, bit] : std::array{
-                 std::pair{0U, 12U}, std::pair{1U, 0U}, std::pair{2U, 0U}, std::pair{2U, 8U},
+                 std::pair{1U, 6U}, std::pair{2U, 0U}, std::pair{2U, 8U},
                  std::pair{2U, 10U}, std::pair{2U, 11U}, std::pair{2U, 12U}, std::pair{3U, 0U}}) {
             auto x = original;
             x.words[word] ^= 1U << bit;
@@ -340,7 +343,52 @@ TEST_CASE("Yoshi LEA retains unverified-form guards", "[video_core][yoshi_lea]")
         CHECK(Ampere::LowerToMaxwell(std::array{hi, Exit}));
         auto x = original;
         x.words[2] = (x.words[2] & ~(7U << 17)) | (2U << 17);
-        CHECK_FALSE(Ampere::LowerToMaxwell(std::array{x, Exit}));
+        CHECK(Ampere::LowerToMaxwell(std::array{x, Exit}));
+    }
+}
+TEST_CASE("Yoshi predicated uniform-base LEA preserves carry and execution predicates",
+          "[video_core][yoshi_lea]") {
+    LeaEnvironment env;
+    for (u32 guard : {1U, 4U, 9U, 12U}) {
+        Instruction native{{0x6dae1c11, 8, 0x0f8808ff, 0x000fe200}};
+        native.words[0] = (native.words[0] & ~0xf000U) | (guard << 12);
+        const auto lowered = Ampere::LowerToMaxwell(std::array{native, Exit});
+        INFO(lowered.error);
+        REQUIRE(lowered);
+        REQUIRE((lowered.instructions.front() >> 48) == 0xe240);
+        CHECK(((lowered.instructions.front() >> 16) & 15) == (guard ^ 8U));
+        for (u32 a : {0U, 0x7fffffffU, 0xffffffffU})
+            for (u32 b : {0U, 1U, 0xffffffffU})
+                for (bool initial : {false, true}) {
+                    std::array<u32, 256> regs{};
+                    regs[109] = a;
+                    regs[224] = b;
+                    regs[174] = 0x12345678;
+                    std::array<bool, 7> preds{true, false, true, false, true, false, true};
+                    preds[guard & 7] = initial;
+                    const auto before = preds;
+                    const bool active = initial != bool(guard & 8);
+                    if (active) {
+                        for (size_t i = 1; i < lowered.instructions.size(); ++i) {
+                            const u64 word = lowered.instructions[i];
+                            const u64 op = word >> 48;
+                            if (op == 0xe300) break;
+                            ObjectPool<IR::Inst> pool;
+                            IR::Block block{pool};
+                            Maxwell::TranslatorVisitor visitor{env, block};
+                            if (op == 0x5c18) visitor.ISCADD_reg(word);
+                            else if (op == 0x5b62) visitor.ISETP_reg(word);
+                            else if (op == 0x5c98) visitor.MOV_reg(word);
+                            else FAIL("unexpected LEA word");
+                            RunLeaIR(block, regs, preds);
+                        }
+                    }
+                    CHECK(regs[174] == (active ? u32((a << 1) + b) : 0x12345678));
+                    for (u32 p = 0; p < 7; ++p)
+                        CHECK(preds[p] == (active && p == 4
+                            ? u64{u32(a << 1)} + b > 0xffffffffULL : before[p]));
+                    CHECK(regs[224] == b);
+                }
     }
 }
 } // namespace

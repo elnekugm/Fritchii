@@ -2956,6 +2956,27 @@ void RasterizerVulkan::InvalidateGPUCache() {
     gpu.InvalidateGPUCache();
 }
 
+void RasterizerVulkan::InvalidateShaderCache() {
+    InvalidateGPUCache();
+    // GPU buffer writes bypass CPU write tracking. A shader lookup by address must
+    // not reuse metadata for the old bytes after an instruction-cache invalidate.
+    // Only download and retire code ranges with pending GPU writes; ordinary cache
+    // invalidations must not recompile every shader on every guest barrier.
+    const auto ranges = pipeline_cache.GetShaderCodeRanges();
+    for (const auto& [addr, size] : ranges) {
+        if (MustFlushRegion(addr, size, VideoCommon::CacheType::BufferCache)) {
+            FlushRegion(addr, size, VideoCommon::CacheType::BufferCache);
+            pipeline_cache.InvalidateRegion(addr, size);
+            static u32 reports{}; // renderer thread only
+            if (reports < 32) {
+                ++reports;
+                LOG_INFO(HW_GPU, "Instruction cache invalidated GPU-written shader at {:#x}, {} bytes",
+                         addr, size);
+            }
+        }
+    }
+}
+
 void RasterizerVulkan::UnmapMemory(DAddr addr, u64 size) {
     {
         std::scoped_lock lock{texture_cache.mutex};
@@ -4279,6 +4300,8 @@ void RasterizerVulkan::UpdateViewportsState(Tegra::Engines::Maxwell3D::Regs& reg
 
     maxwell3d->dirty.flags[Dirty::Scissors] = true;
 
+    const bool is_rescaling{texture_cache.IsRescaling()};
+    const float scale = is_rescaling ? Settings::values.resolution_info.up_factor : 1.0f;
     if (!regs.viewport_scale_offset_enabled) {
         float x = static_cast<float>(regs.surface_clip.x);
         float y = static_cast<float>(regs.surface_clip.y);
@@ -4288,11 +4311,13 @@ void RasterizerVulkan::UpdateViewportsState(Tegra::Engines::Maxwell3D::Regs& reg
             y += height;
             height = -height;
         }
+        // PositionPass maps guest screen coordinates to clip space using the guest
+        // surface dimensions. The host viewport still needs the render-target scale.
         VkViewport viewport{
-            .x = x + oot_jitter_applied[0],
-            .y = y + oot_jitter_applied[1],
-            .width = width,
-            .height = height,
+            .x = x * scale,
+            .y = y * scale,
+            .width = width * scale,
+            .height = height * scale,
             .minDepth = 0.0f,
             .maxDepth = 1.0f,
         };
@@ -4305,9 +4330,7 @@ void RasterizerVulkan::UpdateViewportsState(Tegra::Engines::Maxwell3D::Regs& reg
         });
         return;
     }
-    const bool is_rescaling{texture_cache.IsRescaling()};
-    const float scale = is_rescaling ? Settings::values.resolution_info.up_factor : 1.0f;
-    std::array viewport_list{
+    const std::array viewport_list{
         GetViewportState(device, regs, 0, scale),  GetViewportState(device, regs, 1, scale),
         GetViewportState(device, regs, 2, scale),  GetViewportState(device, regs, 3, scale),
         GetViewportState(device, regs, 4, scale),  GetViewportState(device, regs, 5, scale),
@@ -4342,11 +4365,16 @@ void RasterizerVulkan::UpdateScissorsState(Tegra::Engines::Maxwell3D::Regs& regs
         if (regs.window_origin.mode != Maxwell::WindowOrigin::Mode::UpperLeft) {
             y = regs.surface_clip.height - (y + height);
         }
+        const auto scale = [&](u32 value) {
+            return texture_cache.IsRescaling()
+                       ? Settings::values.resolution_info.ScaleUp(value)
+                       : value;
+        };
         VkRect2D scissor{};
-        scissor.offset.x = static_cast<int32_t>(x);
-        scissor.offset.y = static_cast<int32_t>(y);
-        scissor.extent.width  = width;
-        scissor.extent.height = height;
+        scissor.offset.x = static_cast<int32_t>(scale(x));
+        scissor.offset.y = static_cast<int32_t>(scale(y));
+        scissor.extent.width = (std::max)(1u, scale(width));
+        scissor.extent.height = (std::max)(1u, scale(height));
         scheduler.Record([this, scissor](vk::CommandBuffer cmdbuf) {
             const u32 num_scissors = std::min<u32>(device.GetMaxViewports(), Maxwell::NumViewports);
             std::array<VkRect2D, Maxwell::NumViewports> scissor_list{};

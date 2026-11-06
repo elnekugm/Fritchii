@@ -363,3 +363,10 @@ TEST_CASE("New native profiles do not invent clock, fence, frame-cap or presenta
         }
     }
 }
+
+TEST_CASE("Supported native Wonder does not require an unsupported-game warning", "[game_presets]") {
+    CHECK(Settings::IsSupportedGame(Settings::WonderSwitch2ProgramId));
+    CHECK(Settings::IsSupportedGame(Settings::SuperMarioBrosWonderProgramId));
+    CHECK(Settings::IsSupportedGame(0x01002B00111A2000ULL));
+    CHECK_FALSE(Settings::IsSupportedGame(0x0100000000001234ULL));
+}

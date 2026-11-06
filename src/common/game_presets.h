@@ -5,6 +5,7 @@
 #include <optional>
 #include <string_view>
 
+#include "common/game_fps.h"
 #include "common/settings.h"
 
 namespace Settings {
@@ -139,6 +140,14 @@ inline const GamePreset* FindGamePreset(u64 program_id) {
         }
     }
     return nullptr;
+}
+
+/// Support follows the README project scope, independently of available graphics presets.
+inline bool IsSupportedGame(u64 program_id) {
+    constexpr u64 HyruleWarriorsAgeOfCalamityProgramId = 0x01002B00111A2000ULL;
+    return program_id == HyruleWarriorsAgeOfCalamityProgramId ||
+           program_id == WonderSwitch2ProgramId ||
+           FindGamePreset(program_id) != nullptr;
 }
 
 /// Applies the title's compatibility settings and visual quality for this session. Global and

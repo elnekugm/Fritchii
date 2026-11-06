@@ -240,6 +240,8 @@ bool Maxwell3D::IsMethodExecutable(u32 method) {
     case MAXWELL3D_REG_INDEX(launch_dma):
     case MAXWELL3D_REG_INDEX(inline_data):
     case MAXWELL3D_REG_INDEX(fragment_barrier):
+    case MAXWELL3D_REG_INDEX(invalidate_shader_cache):
+    case MAXWELL3D_REG_INDEX(invalidate_shader_cache_no_wfi):
     case MAXWELL3D_REG_INDEX(invalidate_texture_data_cache):
     case MAXWELL3D_REG_INDEX(tiled_cache_barrier):
         return true;
@@ -495,6 +497,12 @@ void Maxwell3D::ProcessMethodCall(u32 method, u32 argument, u32 nonshadow_argume
         return;
     case MAXWELL3D_REG_INDEX(fragment_barrier):
         return rasterizer->FragmentBarrier();
+    case MAXWELL3D_REG_INDEX(invalidate_shader_cache):
+    case MAXWELL3D_REG_INDEX(invalidate_shader_cache_no_wfi):
+        if ((argument & 1U) != 0) {
+            rasterizer->InvalidateShaderCache();
+        }
+        return;
     case MAXWELL3D_REG_INDEX(invalidate_texture_data_cache):
         rasterizer->InvalidateGPUCache();
         return rasterizer->WaitForIdle();
@@ -1274,6 +1282,8 @@ bool FrontHandledOutsideDrawManager(u32 method) {
     case MAXWELL3D_REG_INDEX(launch_dma):
     case MAXWELL3D_REG_INDEX(inline_data):
     case MAXWELL3D_REG_INDEX(fragment_barrier):
+    case MAXWELL3D_REG_INDEX(invalidate_shader_cache):
+    case MAXWELL3D_REG_INDEX(invalidate_shader_cache_no_wfi):
     case MAXWELL3D_REG_INDEX(invalidate_texture_data_cache):
     case MAXWELL3D_REG_INDEX(tiled_cache_barrier):
         return true;

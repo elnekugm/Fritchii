@@ -866,6 +866,21 @@ FN_MAX_LIMIT_LIST
                IsSubgroupFeatureSupported(VK_SUBGROUP_FEATURE_BASIC_BIT);
     }
 
+    /// Software HMMA needs a complete 32-lane subgroup and indexed lane shuffles.
+    bool IsSoftwareTensorSupported() const {
+        return SupportedSpirvVersion() >= 0x00010400 &&
+               extensions.subgroup_size_control &&
+               features.subgroup_size_control.subgroupSizeControl &&
+               features.subgroup_size_control.computeFullSubgroups &&
+               IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT) &&
+               properties.subgroup_size_control.minSubgroupSize <= 32 &&
+               properties.subgroup_size_control.maxSubgroupSize >= 32 &&
+               (GetSubgroupSupportedStages() & VK_SHADER_STAGE_COMPUTE_BIT) &&
+               IsSubgroupFeatureSupported(VK_SUBGROUP_FEATURE_BASIC_BIT) &&
+               IsSubgroupFeatureSupported(VK_SUBGROUP_FEATURE_SHUFFLE_BIT) &&
+               IsSubgroupFeatureSupported(VK_SUBGROUP_FEATURE_BALLOT_BIT);
+    }
+
     u32 GetMaxTensorWorkgroupSize() const {
         return (std::min)({properties.properties.limits.maxComputeWorkGroupSize[0],
                           properties.properties.limits.maxComputeWorkGroupInvocations,

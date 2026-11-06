@@ -16,6 +16,7 @@
 #include <string>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <utility>
 
@@ -656,12 +657,87 @@ public:
             return false;
         }
         out = page[(address - page_begin) / sizeof(Instruction)];
+        if (trace_loaded_page) {
+            TraceConsumedInstruction(address, out);
+        }
         return true;
     }
 
 private:
     bool Holds(GPUVAddr address) const {
         return address >= page_begin && address + sizeof(Instruction) <= page_end;
+    }
+
+    struct CaptureTraceState {
+        const bool enabled = [] {
+            const char* value = std::getenv("EDEN_NX2_SHADER_CAPTURE_TRACE");
+            return value != nullptr && std::string_view{value} != "0";
+        }();
+        std::mutex mutex;
+        std::array<GPUVAddr, 32> reported_pages{};
+        size_t count{};
+    };
+
+    static CaptureTraceState& TraceState() {
+        static CaptureTraceState state;
+        return state;
+    }
+
+    // Only report differences in an instruction the capture actually consumes. The rest of a
+    // loaded page can contain unrelated data after the shader's EXIT; changes there are expected.
+    void TraceConsumedInstruction(GPUVAddr address, const Instruction& instruction) {
+        const size_t instruction_offset = static_cast<size_t>(address - page_begin);
+        const auto* after_words = reinterpret_cast<const u8*>(instruction.words.data());
+        const u8* before_words = before_page->data() + instruction_offset;
+        const auto difference = std::mismatch(before_words, before_words + sizeof(Instruction),
+                                              after_words);
+        if (difference.first == before_words + sizeof(Instruction)) {
+            return;
+        }
+        trace_loaded_page = false;
+        auto& state = TraceState();
+        const GPUVAddr trace_page = page_begin & ~(PageSize - 1);
+        const size_t report = [&] {
+            std::scoped_lock lock{state.mutex};
+            if (state.count == state.reported_pages.size() ||
+                std::find(state.reported_pages.begin(), state.reported_pages.begin() + state.count,
+                          trace_page) != state.reported_pages.begin() + state.count) {
+                return state.reported_pages.size();
+            }
+            state.reported_pages[state.count] = trace_page;
+            return state.count++;
+        }();
+        if (report == state.reported_pages.size()) {
+            return;
+        }
+        const size_t length = static_cast<size_t>(page_end - page_begin);
+        const auto* after = reinterpret_cast<const u8*>(page.data());
+        const size_t offset = instruction_offset +
+                              static_cast<size_t>(difference.first - before_words);
+        std::array<u32, 4> previous{};
+        std::memcpy(previous.data(), before_words, sizeof(Instruction));
+        LOG_WARNING(Shader,
+                    "Native shader capture readback changed page #{}, address={:#x} "
+                    "length={:#x}, hash {:016x}->{:016x}, consumed instruction={:#x}, "
+                    "first consumed difference +{:#x}, "
+                    "before [{:08x} {:08x} {:08x} {:08x}] after [{:08x} {:08x} {:08x} {:08x}]",
+                    report, page_begin, length,
+                    Common::CityHash64(reinterpret_cast<const char*>(before_page->data()), length),
+                    Common::CityHash64(reinterpret_cast<const char*>(after), length), address, offset,
+                    previous[0], previous[1], previous[2], previous[3], instruction.words[0],
+                    instruction.words[1], instruction.words[2], instruction.words[3]);
+        if (const char* directory = std::getenv("EDEN_NX2_SHADER_DUMP")) {
+            const auto folder = std::filesystem::path{directory};
+            std::error_code error;
+            std::filesystem::create_directories(folder, error);
+            if (!error) {
+                const auto prefix = fmt::format("capture-trace-{:02}-{:x}", report, page_begin);
+                std::ofstream old_page(folder / (prefix + "-before.bin"), std::ios::binary);
+                old_page.write(reinterpret_cast<const char*>(before_page->data()), length);
+                std::ofstream new_page(folder / (prefix + "-after.bin"), std::ios::binary);
+                new_page.write(reinterpret_cast<const char*>(after), length);
+            }
+        }
     }
 
     // Loads from `address` up to the next page boundary; loads nothing if that range is not
@@ -671,7 +747,22 @@ private:
         const GPUVAddr length = next_page - address;
         page_begin = address;
         page_end = address;
+        trace_loaded_page = false;
         if (length >= sizeof(Instruction) && gpu_memory.IsFullyMappedRange(address, length)) {
+            auto& state = TraceState();
+            if (state.enabled) {
+                const GPUVAddr trace_page = address & ~(PageSize - 1);
+                std::scoped_lock lock{state.mutex};
+                trace_loaded_page = state.count < state.reported_pages.size() &&
+                    std::find(state.reported_pages.begin(), state.reported_pages.begin() + state.count,
+                              trace_page) == state.reported_pages.begin() + state.count;
+            }
+            if (trace_loaded_page) {
+                if (!before_page) {
+                    before_page = std::make_unique<std::array<u8, PageSize>>();
+                }
+                gpu_memory.ReadBlockUnsafe(address, before_page->data(), length);
+            }
             gpu_memory.ReadBlock(address, page.data(), length);
             page_end = next_page;
         }
@@ -679,6 +770,8 @@ private:
 
     Tegra::MemoryManager& gpu_memory;
     std::array<Instruction, PageSize / sizeof(Instruction)> page;
+    std::unique_ptr<std::array<u8, PageSize>> before_page;
+    bool trace_loaded_page{};
     GPUVAddr page_begin{};
     GPUVAddr page_end{};
 };

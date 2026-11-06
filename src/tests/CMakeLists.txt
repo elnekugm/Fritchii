@@ -175,6 +175,23 @@ add_executable(tests
     video_core/query_copy.cpp
     video_core/shader_reuse_environment.cpp
     video_core/ampere_lowering.cpp
+    video_core/ampere_matrix.cpp
+    video_core/ampere_returns.cpp
+    video_core/ampere_f2i.cpp
+    video_core/ampere_i2f64.cpp
+    video_core/ampere_uniform_fset.cpp
+    video_core/compute_storage_buffers.cpp
+    video_core/compute_binding_diagnostic.cpp
+    video_core/cooperative_matrix.cpp
+    video_core/spirv_storage_images.cpp
+    video_core/texture_unswizzle.cpp
+    video_core/texture_row_upload.cpp
+    video_core/texture_depth_float.cpp
+    video_core/texture_descriptor_bounds.cpp
+    video_core/shader_snapshot.cpp
+    video_core/texture_r2ur_handle.cpp
+    video_core/texture_handles.cpp
+    video_core/ampere_kirby.cpp
     video_core/ampere_geometry.cpp
     video_core/ampere_geometry_lowering.cpp
     video_core/ampere_geometry_exit.cpp

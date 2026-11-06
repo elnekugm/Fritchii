@@ -16,9 +16,9 @@ inline constexpr std::string_view WonderFpsBuildId = "EC47E6F8846D2A7B6892E26828
 // Keep simulation FPS and NVN's present interval together: changing only presentation makes
 // the game run at twice its intended speed. The fallback is used before timing samples exist.
 inline bool ApplyWonderFpsPatch(std::span<u8> nso, u64 program_id, std::string_view build_id,
-                                u32 fps) {
-    if (program_id != Settings::WonderSwitch2ProgramId || build_id != WonderFpsBuildId ||
-        fps < 1 || fps > 1000) {
+                                u32 fps, bool dynamic = false) {
+    if (program_id != Settings::WonderSwitch2ProgramId || build_id != WonderFpsBuildId || fps < 1 ||
+        fps > 1000) {
         return false;
     }
     constexpr std::array<u32, 3> offsets{0x1bbfb0, 0x1bbfcc, 0x1bc04c};
@@ -35,8 +35,13 @@ inline bool ApplyWonderFpsPatch(std::span<u8> nso, u64 program_id, std::string_v
             return false;
     }
     const u32 interval = fps == 30 ? 2 : 1;
-    const std::array<u32, 3> replacements{0x52800001U | (fps << 5), 0x52800001U | (interval << 5),
-                                          0x52800001U | (fps << 5)};
+    // Private emulator hook; installed only in the validated executable, never written live.
+    constexpr u32 timing_svc = 0xd4000001U | (0xf001U << 5);
+    const u32 simulation = dynamic ? timing_svc : 0x52800001U | (fps << 5);
+    // The fallback hook also stores its new rate in controller+0x50, matching the
+    // primary path's following STR. Returning W1 alone would not update game time.
+    const u32 fallback = dynamic ? 0xd4000001U | (0xf002U << 5) : simulation;
+    const std::array<u32, 3> replacements{simulation, 0x52800001U | (interval << 5), fallback};
     for (size_t i = 0; i < offsets.size(); ++i) {
         std::memcpy(nso.data() + 0x100 + offsets[i], &replacements[i], sizeof(u32));
     }

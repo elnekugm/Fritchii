@@ -32,6 +32,8 @@ inline constexpr u32 WonderFpsValue(WonderFps target) {
 // Set only after the matching main module was successfully patched. A GUI change during a
 // session must not change presentation cadence until the game is restarted and patched again.
 inline std::atomic<u32> wonder_fps_active{0};
+inline std::atomic<bool> wonder_dynamic_fps_active{false};
+inline std::atomic<u64> wonder_dynamic_fps_generation{0};
 
 inline constexpr bool ShowWonderFps(u64 program_id, bool global) {
     return !global && program_id == WonderSwitch2ProgramId;

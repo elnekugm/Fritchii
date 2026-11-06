@@ -116,7 +116,7 @@ std::optional<OutAttr> OutputAttrPointer(EmitContext& ctx, IR::Attribute attr) {
     }
 }
 
-Id GetCbuf(EmitContext& ctx, Id result_type, Id UniformDefinitions::*member_ptr, u32 element_size,
+Id GetCbuf(EmitContext& ctx, Id result_type, Id UniformDefinitions::* member_ptr, u32 element_size,
            const IR::Value& binding, const IR::Value& offset, const Id indirect_func) {
     Id buffer_offset;
     const Id uniform_type{ctx.uniform_types.*member_ptr};
@@ -425,6 +425,13 @@ void EmitSetAttribute(EmitContext& ctx, IR::Attribute attr, Id value, [[maybe_un
         value = ctx.OpBitcast(output->type, value);
     }
 
+    static constexpr IR::Attribute cd0 = IR::Attribute::ClipDistance0;
+    static constexpr IR::Attribute cd7 = IR::Attribute::ClipDistance7;
+
+    if (attr >= cd0 && attr <= cd7) {
+        const u32 idx = (u32)attr - (u32)cd0;
+        clip_distance_written.set(idx);
+    }
     ctx.OpStore(output->pointer, value);
 }
 
@@ -561,6 +568,13 @@ Id EmitWorkgroupId(EmitContext& ctx) {
 }
 
 Id EmitLocalInvocationId(EmitContext& ctx) {
+    if (ctx.uses_software_tensor) {
+        // Vulkan does not tie native local IDs to subgroup lanes. Preserve guest warp grouping.
+        const Id warp{ctx.OpLoad(ctx.U32[1], ctx.subgroup_id)};
+        const Id lane{ctx.OpLoad(ctx.U32[1], ctx.subgroup_local_invocation_id)};
+        const Id x{ctx.OpIAdd(ctx.U32[1], ctx.OpIMul(ctx.U32[1], warp, ctx.Const(32U)), lane)};
+        return ctx.OpCompositeConstruct(ctx.U32[3], x, ctx.Const(0U), ctx.Const(0U));
+    }
     return ctx.OpLoad(ctx.U32[3], ctx.local_invocation_id);
 }
 
@@ -572,9 +586,12 @@ Id EmitInvocationInfo(EmitContext& ctx) {
     switch (ctx.stage) {
     case Stage::TessellationControl:
     case Stage::TessellationEval:
-        return ctx.OpShiftLeftLogical(ctx.U32[1], ctx.OpLoad(ctx.U32[1], ctx.patch_vertices_in), ctx.Const(16u));
+        return ctx.OpShiftLeftLogical(ctx.U32[1], ctx.OpLoad(ctx.U32[1], ctx.patch_vertices_in),
+                                      ctx.Const(16u));
     case Stage::Geometry:
-        return ctx.OpShiftLeftLogical(ctx.U32[1], ctx.Const(InputTopologyVertices::vertices(ctx.runtime_info.input_topology)), ctx.Const(16u));
+        return ctx.OpShiftLeftLogical(
+            ctx.U32[1], ctx.Const(InputTopologyVertices::vertices(ctx.runtime_info.input_topology)),
+            ctx.Const(16u));
     default:
         LOG_WARNING(Shader, "(STUBBED) called");
         return ctx.Const(0x00ff0000u);

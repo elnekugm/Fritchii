@@ -20,8 +20,9 @@ constexpr Instruction exit_instruction{{0x0000794d, 0, 0x03800000, 0}};
 
 class SurfaceEnvironment final : public Shader::Environment {
 public:
-    SurfaceEnvironment(std::span<const u64> instructions_, u32 binding_, u32 offset_)
-        : instructions{instructions_}, binding{binding_}, offset{offset_} {}
+    SurfaceEnvironment(std::span<const u64> instructions_, u32 binding_, u32 offset_,
+                       Shader::TextureType type_ = Shader::TextureType::Color2D)
+        : instructions{instructions_}, binding{binding_}, offset{offset_}, type{type_} {}
 
     u64 ReadInstruction(u32 address) override {
         for (u32 i = 0; i < instructions.size(); ++i) {
@@ -37,7 +38,7 @@ public:
     }
     Shader::TextureType ReadTextureType(u32 handle) override {
         REQUIRE(handle == 0x123);
-        return Shader::TextureType::Color2D;
+        return type;
     }
     Shader::TexturePixelFormat ReadTexturePixelFormat(u32 handle) override {
         REQUIRE(handle == 0x123);
@@ -62,6 +63,7 @@ private:
     std::span<const u64> instructions;
     u32 binding;
     u32 offset;
+    Shader::TextureType type;
 };
 
 TEST_CASE("Ampere captured SURED lowers to a bound U32 image atomic add",
@@ -159,19 +161,53 @@ TEST_CASE("Ampere SURED rejects unsupported formats and descriptor conflicts",
     conflicting[1].words[1] |= 1U << 22;
     REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(conflicting)));
 }
-
-TEST_CASE("Ampere SURED keeps its operation for Maxwell", "[video_core][ampere][sured]") {
-    // Ocarina of Time's FSR pass ORs into a 2D surface (operation 6 at bits 87-90).
-    std::array<Instruction, 2> code{{captured, exit_instruction}};
-    code[0].words[2] = 0x0310e000;
+TEST_CASE("Ampere captured Yoshi SURED OR preserves 3D coordinates and image operation",
+          "[video_core][ampere][sured]") {
+    const std::array<Instruction, 6> code{{
+        {{0x00017802, 0x10, 0x00000f00, 0}},
+        {{0x00087802, 7, 0x00000f00, 0}},
+        {{0x00097802, 9, 0x00000f00, 0}},
+        {{0x000a7802, 11, 0x00000f00, 0}},
+        {{0x0800759f, 0xa0c00201, 0x0310e000, 0x000fe200}},
+        exit_instruction,
+    }};
     const auto lowered = LowerToMaxwell(code);
     REQUIRE(static_cast<bool>(lowered));
-    REQUIRE(std::any_of(lowered.instructions.begin(), lowered.instructions.end(), [](u64 insn) {
-        return (insn >> 52) == 0xeb4 && ((insn >> 24) & 7) == 6;
-    }));
-    code[0].words[2] = 0x0410e000; // EXCH has no Maxwell SURED form
-    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(code)));
-    code[0].words[2] = 0x0090e000; // MIN: signedness not known here
-    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(code)));
+    REQUIRE(((lowered.instructions[4] >> 24) & 7) == 6);
+    REQUIRE(((lowered.instructions[4] >> 33) & 7) == 5);
+    SurfaceEnvironment env{lowered.instructions, 3, 2, Shader::TextureType::Color3D};
+    Shader::ObjectPool<Shader::IR::Inst> pool;
+    Shader::IR::Block block{pool};
+    Shader::IR::Program program;
+    program.blocks = {&block};
+    program.post_order_blocks = {&block};
+    const u32 last = static_cast<u32>(lowered.instructions.size() - 1);
+    Shader::Maxwell::Translate(env, &block, 0x50, 0x50 + last * 8 + ((last + 1) / 3) * 8);
+    Shader::Optimization::SsaRewritePass(program);
+    Shader::Optimization::ConstantPropagationPass(env, program);
+    Shader::HostTranslateInfo host_info;
+    host_info.ApplyDescriptorLimitPolicy();
+    Shader::Optimization::TexturePass(env, program, host_info);
+    const auto atomic = std::find_if(block.begin(), block.end(), [](const Shader::IR::Inst& inst) {
+        return inst.GetOpcode() == Shader::IR::Opcode::ImageAtomicOr32;
+    });
+    REQUIRE(atomic != block.end());
+    REQUIRE(atomic->MayHaveSideEffects());
+    REQUIRE(atomic->Arg(2).U32() == 0x10);
+    const auto* coordinates = atomic->Arg(1).InstRecursive();
+    REQUIRE(coordinates->GetOpcode() == Shader::IR::Opcode::CompositeConstructU32x3);
+    REQUIRE(coordinates->Arg(0).U32() == 7);
+    REQUIRE(coordinates->Arg(1).U32() == 9);
+    REQUIRE(coordinates->Arg(2).U32() == 11);
+    REQUIRE(program.info.image_descriptors.size() == 1);
+    REQUIRE(program.info.image_descriptors.front().type == Shader::TextureType::Color3D);
+    for (u32 op : {1U, 2U, 3U, 4U, 5U, 7U, 8U}) {
+        auto invalid = code;
+        invalid[4].words[2] = 0x0010e000 | (op << 23);
+        REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
+    }
+    auto boundary = code;
+    boundary[4].words[0] = 0xf400759f; // R244..246 reaches reserved scratch.
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(boundary)));
 }
 } // namespace

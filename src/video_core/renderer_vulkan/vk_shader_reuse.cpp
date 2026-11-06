@@ -22,6 +22,8 @@ size_t ShaderTranslationKeyHash::operator()(const ShaderTranslationKey& key) con
 
 u32 TranslationReads::Ask(Shader::Environment& env, Query query, u32 arg0, u32 arg1) {
     switch (query) {
+    case Query::CbufStorageBufferPointer:
+        return env.IsCbufStorageBufferPointer(arg0, arg1) ? 1 : 0;
     case Query::CbufValue:
         return env.ReadCbufValue(arg0, arg1);
     case Query::TextureType:
@@ -54,6 +56,9 @@ TranslationReads::Properties TranslationReads::PropertiesOf(const Shader::Enviro
     result.stage = env.ShaderStage();
     result.start_address = env.StartAddress();
     result.texture_bound_buffer = env.TextureBoundBuffer();
+    result.surface_bound_buffer = env.SurfaceBoundBuffer();
+    result.has_native_instructions = env.HasNativeInstructions();
+    result.is_native_program = env.IsNativeProgram();
     result.local_memory_size = env.LocalMemorySize();
     result.shared_memory_size = env.SharedMemorySize();
     result.is_proprietary_driver = env.IsProprietaryDriver();
@@ -113,6 +118,14 @@ u32 RecordingEnvironment::TranslateProgramAddress(u32 address) const {
 
 bool RecordingEnvironment::HasNativeInstructions() const {
     return inner->HasNativeInstructions();
+}
+
+bool RecordingEnvironment::IsNativeProgram() const {
+    return inner->IsNativeProgram();
+}
+
+bool RecordingEnvironment::IsCbufStorageBufferPointer(u32 index, u32 offset) {
+    return AskAndRecord(TranslationReads::Query::CbufStorageBufferPointer, index, offset) != 0;
 }
 
 u32 RecordingEnvironment::ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) {

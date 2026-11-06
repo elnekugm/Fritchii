@@ -55,7 +55,7 @@ struct ImageBufferDefinition {
     Id image_type;
     Id pointer_type;
     u32 count;
-    bool is_integer;
+    Id texel_type;
 };
 
 struct ImageDefinition {
@@ -63,7 +63,7 @@ struct ImageDefinition {
     Id image_type;
     Id pointer_type;
     u32 count;
-    bool is_integer;
+    Id texel_type;
 };
 
 struct UniformDefinitions {
@@ -297,6 +297,7 @@ public:
 
     Id workgroup_id{};
     Id local_invocation_id{};
+    bool uses_software_tensor{};
     Id invocation_id{};
     Id patch_vertices_in{};
     Id sample_id{};

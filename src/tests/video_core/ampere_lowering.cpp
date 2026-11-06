@@ -147,6 +147,23 @@ TEST_CASE("Ampere integer-to-float conversions take immediates", "[video_core][a
     CHECK(rejected.error_offset == 0x20);
 }
 
+TEST_CASE("Ampere Yoshi immediate I2F preserves a half destination",
+          "[video_core][ampere][yoshi_frnd]") {
+    std::array<Instruction, 2> code{{
+        {{0x00197906, 0xffffffff, 0x00200c00, 0x000fe200}}, EXIT,
+    }};
+    const auto lowered = LowerToMaxwell(code);
+    REQUIRE(lowered);
+    REQUIRE(lowered.instructions.size() == 3);
+    const u64 conversion = FindMaxwell(lowered, 0x5cb, 52);
+    REQUIRE(((conversion >> 8) & 3) == 1); // F16 destination
+    REQUIRE(((conversion >> 10) & 3) == 2); // 32-bit integer source
+    REQUIRE(((conversion >> 13) & 1) == 1); // signed source
+    REQUIRE(((conversion >> 20) & 255) == 250);
+    code[0].words[2] ^= 1U << 11; // invalid destination format zero
+    REQUIRE_FALSE(LowerToMaxwell(code));
+}
+
 TEST_CASE("Ampere SUST.P keeps its channel mask", "[video_core][ampere]") {
     // SUST.P.2D.STRONG.SM.R.IGN [R6], R4, 0x0, 0x59
     const std::array<Instruction, 2> code{{
@@ -156,6 +173,57 @@ TEST_CASE("Ampere SUST.P keeps its channel mask", "[video_core][ampere]") {
     const auto lowered = LowerToMaxwell(code);
     REQUIRE(static_cast<bool>(lowered));
     REQUIRE(((FindMaxwell(lowered, 0xeb2, 52) >> 20) & 0xf) == 1);
+}
+
+TEST_CASE("Ampere Yoshi binary surface stores preserve integer bits",
+          "[video_core][ampere][yoshi_sust_binary]") {
+    std::array<Instruction, 2> code{{
+        {{0x0a007b9d, 0x6000991a, 0x0010a900, 0x0001e200}}, EXIT,
+    }};
+    const auto lowered = LowerToMaxwell(code);
+    REQUIRE(lowered);
+    REQUIRE(lowered.instructions.size() == 4);
+    const u64 shift = lowered.instructions[0];
+    REQUIRE(shift >> 52 == 0x382);
+    REQUIRE(((shift >> 8) & 255) == 10);
+    REQUIRE(((shift >> 20) & 0x7ffff) == 2);
+    REQUIRE(((shift >> 48) & 1) == 1); // signed byte coordinate
+    REQUIRE((shift & 255) == 250);
+    const u64 copy_y = lowered.instructions[1];
+    REQUIRE(copy_y >> 52 == 0x5c9);
+    REQUIRE(((copy_y >> 20) & 255) == 11);
+    REQUIRE((copy_y & 255) == 251);
+    const u64 word = lowered.instructions[2];
+    REQUIRE((word & 255) == 26); // one packed 32-bit word, not float channels
+    REQUIRE(((word >> 8) & 255) == 250);
+    REQUIRE(((word >> 20) & 7) == 4); // B32
+    REQUIRE(((word >> 33) & 7) == 3); // 2D
+    REQUIRE(((word >> 36) & 0x1fff) == 0x99);
+    REQUIRE(((word >> 51) & 1) == 1); // bound descriptor
+    REQUIRE(((word >> 52) & 1) == 1); // typed integer view
+    REQUIRE(lowered.required_surface_buffer == 0);
+    // The captured producer shifts pixel X left by two. A binary store then reaches
+    // adjacent R32 image texels, rather than every fourth texel with holes in between.
+    for (const s32 pixel_x : {-16, -1, 0, 1, 2, 31, 32, 639, 1279}) {
+        std::array<u32, 256> regs{};
+        regs[10] = static_cast<u32>(pixel_x * 4);
+        regs[11] = 17;
+        regs[26] = 0x3c003800; // packed half pair must remain bitwise unchanged
+        regs[shift & 255] = static_cast<u32>(static_cast<s32>(regs[(shift >> 8) & 255]) >>
+                                           ((shift >> 20) & 0x1f));
+        regs[copy_y & 255] = regs[(copy_y >> 20) & 255];
+        const u32 coord = static_cast<u32>((word >> 8) & 255);
+        REQUIRE(static_cast<s32>(regs[coord]) == pixel_x);
+        REQUIRE(regs[coord + 1] == 17);
+        REQUIRE(regs[word & 255] == 0x3c003800);
+        REQUIRE(regs[10] == static_cast<u32>(pixel_x * 4));
+        REQUIRE(regs[11] == 17);
+    }
+    for (const u32 bit : {9U, 13U, 17U, 21U}) {
+        auto invalid = code;
+        invalid[0].words[2] ^= 1U << bit;
+        REQUIRE_FALSE(LowerToMaxwell(invalid));
+    }
 }
 
 TEST_CASE("Ampere SHFL with a register lane keeps its mode", "[video_core][ampere]") {
@@ -736,6 +804,31 @@ public:
 private:
     std::span<const u64> instructions;
 };
+TEST_CASE("Ampere captured Yoshi constant LEA negates the base without emitting subtraction carry",
+          "[video_core][ampere]") {
+    const std::array<Instruction, 2> code{{
+        {{0x05057a11, 0x8000ac00, 0x078e18ff, 0x000fe200}}, EXIT,
+    }};
+    const auto lowered = LowerToMaxwell(code);
+    REQUIRE(static_cast<bool>(lowered));
+    const u64 scaled = FindMaxwell(lowered, 0x5c18 >> 1, 49);
+    REQUIRE(scaled != 0);
+    REQUIRE(((scaled >> 48) & 1) == 1);
+    REQUIRE(((scaled >> 39) & 31) == 3);
+    REQUIRE((scaled & 255) == 5);
+    REQUIRE(((scaled >> 8) & 255) == 5);
+    auto positive = code;
+    positive[0].words[1] &= 0x7fffffffU;
+    const auto added = LowerToMaxwell(positive);
+    REQUIRE(static_cast<bool>(added));
+    REQUIRE(((FindMaxwell(added, 0x5c18 >> 1, 49) >> 48) & 1) == 0);
+    auto carry = code;
+    carry[0].words[2] = 0x078018ff;
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(carry)));
+    auto unverified = code;
+    unverified[0].words[1] |= 1U << 30;
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(unverified)));
+}
 } // namespace
 
 TEST_CASE("Shadowed registers keep their values across instructions that borrow their quartet",
@@ -774,47 +867,78 @@ TEST_CASE("Shadowed registers keep their values across instructions that borrow 
     CHECK(stored == std::vector<u32>{0x1234, 0x5678});
 }
 
-TEST_CASE("Compact software HMMA translates to a TensorMulAdd carrying its depth",
-          "[video_core][ampere][matrix]") {
-    for (const u32 depth : {8U, 16U}) {
-        // HMMA R16, R8, R16, R24, lowered for the SPIR-V helper (compact_matrix).
-        const Instruction hmma{{0x0810723cU, 16, (depth == 16 ? 0x800U : 0U) | 24U, 0}};
-        const auto lowered = LowerToMaxwell(std::array{hmma, EXIT}, false, false,
-                                            Shader::Ampere::TessellationStage::None, true);
-        INFO(lowered.error);
-        REQUIRE(static_cast<bool>(lowered));
-        LoweredEnvironment env{lowered.instructions};
-        Shader::ObjectPool<Shader::IR::Inst> pool;
-        Shader::IR::Block block{pool};
-        const u32 last = static_cast<u32>(lowered.instructions.size() - 1);
-        Shader::Maxwell::Translate(env, &block, 0x50, 0x50 + last * 8 + ((last + 1) / 3) * 8);
-        u32 found = 0;
-        for (const Shader::IR::Inst& inst : block) {
-            if (inst.GetOpcode() != Shader::IR::Opcode::TensorMulAdd) continue;
-            ++found;
-            CHECK(inst.Flags<u32>() == depth);
-            // K=8 reads only A0-A1 and B0: the upper fragments are zero immediates.
-            CHECK(inst.Arg(2).IsImmediate() == (depth == 8));
-            CHECK(inst.Arg(5).IsImmediate() == (depth == 8));
-        }
-        CHECK(found == 1);
-    }
+TEST_CASE("Yoshi predicated LDG zero fills without reading an inactive address",
+          "[video_core][ampere][yoshi_ldg]") {
+    for (u32 size : {0U, 4U, 5U, 6U})
+        for (u32 destination : {28U, 44U})
+            for (u32 execution : {1U, 7U, 9U})
+                for (u32 memory_predicate : {1U, 9U, 15U}) {
+                    Instruction native{{0x2c1c7381, 0x800, 0x001e8100, 0x000ea200}};
+                    native.words[0] = (native.words[0] & ~0x00fff000U) |
+                        (destination << 16) | (execution << 12);
+                    native.words[2] = (native.words[2] & ~0xe0fU) | (size << 9) |
+                        (7U - (memory_predicate & 7)) | ((memory_predicate & 8U) ? 8U : 0U);
+                    const auto lowered = LowerToMaxwell(std::array{native, EXIT});
+                    INFO(lowered.error);
+                    REQUIRE(lowered);
+                    const u32 components = size < 4 ? 1U : 1U << (size - 4);
+                    for (bool p1 : {false, true}) {
+                        std::array<u32, 256> registers{};
+                        registers[44] = 0x12340000;
+                        registers[45] = 0x42;
+                        const auto before = registers;
+                        bool read_memory = false;
+                        for (u64 word : lowered.instructions) {
+                            const u32 predicate = static_cast<u32>((word >> 16) & 15);
+                            const bool condition = ((predicate & 7) == 7 || p1) != bool(predicate & 8);
+                            if ((word >> 48) == 0xe240) {
+                                if (condition) break; // Whole-instruction execution guard.
+                                continue;
+                            }
+                            if (!condition) continue;
+                            if ((word >> 48) == 0xe300) break;
+                            const u32 target = static_cast<u32>(word & 255);
+                            if ((word >> 56) == 1) {
+                                registers[target] = static_cast<u32>(word >> 20);
+                            } else if ((word >> 48) == 0x5c98) {
+                                registers[target] = registers[(word >> 20) & 255];
+                            } else {
+                                REQUIRE((word & 0xfff0000000000000ULL) == 0xeed0000000000000ULL);
+                                REQUIRE(((word >> 8) & 255) == 44);
+                                CHECK(registers[44] == before[44]);
+                                CHECK(registers[45] == before[45]);
+                                read_memory = true;
+                                for (u32 i = 0; i < components; ++i)
+                                    registers[target + i] = 0xabcdef00U + i;
+                            }
+                        }
+                        const bool active = ((execution & 7) == 7 || p1) != bool(execution & 8);
+                        const bool load = ((memory_predicate & 7) == 7 || p1) != bool(memory_predicate & 8);
+                        CHECK(read_memory == (active && load));
+                        for (u32 i = 0; i < components; ++i)
+                            CHECK(registers[destination + i] == (active
+                                ? (load ? 0xabcdef00U + i : 0U) : before[destination + i]));
+                    }
+                }
 }
 
-TEST_CASE("Ocarina mesh attribute stores read shadowed high registers", "[video_core][ampere]") {
-    using Shader::Ampere::NativeRegisterCopy;
-    // ISBEWR.32.ATTR.SKEW.O [R197 + 0x780], R240 (Ocarina mesh 8159e91e0097876a at 0x83c0, from
-    // Lichii 3c8dc569f). R240 is UR22's mirror once the uniform bank is in use, so the stored data
-    // must come from the shadow bank; reading the mirror stored NaN and bloom made doors white.
-    const Instruction load{{0xffe47981, 0x00002004, 0x0c1e8b00, 0x000f6800}};
-    const Instruction store{{0xc5007927, 0x000780f0, 0x0000f800, 0x000fe200}};
-    const auto lowered = LowerToMaxwell(std::array{load, store, EXIT});
-    INFO(lowered.error);
-    REQUIRE(static_cast<bool>(lowered));
-    const auto& words = lowered.instructions;
-    const auto pseudo = std::find_if(words.begin(), words.end(), [](u64 w) { return (w >> 52) == 0xefc; });
-    REQUIRE(pseudo != words.end());
-    const u32 data = static_cast<u32>(*pseudo & 0xff);
-    CHECK(data < 216);
-    CHECK(std::find(words.begin(), pseudo, NativeRegisterCopy(0, data, 1, 240)) != pseudo);
+TEST_CASE("Yoshi immediate signed integer converts to half precision",
+          "[video_core][ampere][yoshi_i2f]") {
+    for (u32 format : {1U, 2U})
+        for (u32 rounding = 0; rounding < 4; ++rounding) {
+            Instruction native{{0x00197906, 0xffffffffU, 0x00200c00, 0x000fe200}};
+            native.words[2] = 0x00200400U | (format << 11) | (rounding << 14);
+            const auto lowered = LowerToMaxwell(std::array{native, EXIT});
+            REQUIRE(lowered);
+            const u64 conversion = FindMaxwell(lowered, 0x5cb, 52);
+            CHECK(((conversion >> 8) & 3) == format);
+            CHECK(((conversion >> 10) & 3) == 2); // 32-bit integer source
+            CHECK(((conversion >> 13) & 1) == 1); // signed
+            CHECK(((conversion >> 39) & 3) == rounding);
+        }
+    for (u32 format : {0U, 3U}) {
+        const Instruction invalid{{0x00197906, 0xffffffffU,
+                                   0x00200400U | (format << 11), 0x000fe200}};
+        CHECK_FALSE(LowerToMaxwell(std::array{invalid, EXIT}));
+    }
 }

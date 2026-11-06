@@ -14,6 +14,36 @@ cmake --build build
 
 On Linux, macOS, and MinGW/MSYS2, make sure to read the [dependencies guide](Deps.md). On Android, read its [dedicated page](build/Android.md).
 
+## Faster local Linux test builds
+
+After installing the normal build dependencies plus `ccache`, use:
+
+```sh
+./tools/build-local.sh
+./build-local/bin/orchid
+```
+
+Run the same command after each edit. Keep `build-local` so Ninja only rebuilds affected
+files. Existing builds skip explicit configuration unless extra CMake options or
+`--configure-only` are supplied; Ninja automatically detects changes to CMake inputs.
+This separate development build uses `-O2`, minimal debug information (`-g1`),
+ccache and the available faster linker, with LTO disabled. It builds the GUI target
+and its dependencies, without tests, CLI or the standalone room server. Graphics and
+emulation features keep their normal defaults. Full variable inspection needs a
+separate build with `-g`; performance comparisons should use the release configuration.
+
+The compiler cache lives in `${XDG_CACHE_HOME:-$HOME/.cache}/orchid/ccache`, shared
+across worktrees. The first build populates it; subsequent compatible compilations
+can reuse it. Inspect it with
+`CCACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/orchid/ccache" ccache --show-stats`.
+Parallel jobs are limited by available RAM (roughly 2 GiB per job, reserving 2 GiB)
+and CPU count. Override with `CMAKE_BUILD_PARALLEL_LEVEL=6 ./tools/build-local.sh`.
+
+Set `ORCHID_BUILD_DIR` to choose another build directory. Extra arguments go to
+CMake; `./tools/build-local.sh --configure-only` skips compilation. For example,
+worktrees can share downloaded dependency sources with
+`./tools/build-local.sh -DCPM_SOURCE_CACHE="$HOME/.cache/orchid/cpm"`.
+
 ## Dependencies
 
 First, you must [install some dependencies](Deps.md).
@@ -186,9 +216,40 @@ cmake --build build
 
 Your compiled executable will be in:
 
-- `build/bin/eglantine.exe` for Windows,
-- `build/bin/Eglantine.app/Contents/MacOS/eglantine` for macOS,
-- and `build/bin/eglantine` for others.
+- `build/bin/orchid.exe` for Windows,
+- `build/bin/orchid.app/Contents/MacOS/orchid` for macOS,
+- and `build/bin/orchid` for others.
+
+## GitHub-hosted builds
+
+Release jobs already use Ninja, persistent compiler caches and explicit GUI/CLI
+targets without unit tests or room servers. They retain Release and PGO compiler
+settings; the local development script's `-O2 -g1` configuration is not used here.
+Normal Linux releases use mold for linking; Linux and MinGW PGO builds retain LLD.
+The ccache jobs hash compiler contents instead of installation timestamps and use
+the checkout as their base directory. The next run may need to repopulate cache
+entries after this configuration change.
+
+Each platform's build step reports elapsed build seconds and fresh compiler-cache
+statistics in the Actions job summary. Those times exclude dependency installation,
+cache transfer and packaging. Measure on the hosted runners before claiming a CI
+speedup; the local benchmark does not predict their total release time.
+
+The `release-binaries` workflow uses standard GitHub-hosted runners:
+
+- `ubuntu-24.04` produces Linux x86-64 AppImages, with and without PGO. These require glibc 2.39 or newer.
+- `macos-15` produces an Apple Silicon app for macOS 15 or newer. The zip contains `orchid.app`, including the CLI at `Contents/MacOS/eden-cli`.
+- `windows-2022` produces Windows x86-64 builds, with and without PGO.
+
+Pull requests targeting `nx2` or `nx2-experimental` trigger builds without publishing a release. Build-input changes pushed to either branch trigger builds and a prerelease. To build another branch, select **Actions > release-binaries > Run workflow** and choose the branch. Clear **Publish the binaries as a GitHub release** to upload artifacts without publishing a release. Manual runs require the workflow to exist on the repository's default branch. Workflow artifacts expire after seven days.
+
+The macOS package bundles Qt, its plugins, MoltenVK, and linked non-system libraries. Packaging checks the extracted archive for ARM64 binaries, bundled dependencies, valid signatures, JIT entitlements, frontend startup, and MoltenVK loading. To package a local macOS build with the same checks:
+
+```sh
+QT_ROOT_DIR=/path/to/Qt/6.8.3/macos sh tools/macos/package.sh build orchid-macos-arm64.zip
+```
+
+macOS builds are ad-hoc signed, not Developer ID signed or notarized. Gatekeeper may require approval in **System Settings > Privacy & Security**. They use Dynarmic's ARM64 JIT. NCE is only available on Linux and Android ARM64. These build and startup checks do not verify game compatibility or Vulkan rendering. See the [macOS caveat](Caveats.md#macos).
 
 ## Scripts
 

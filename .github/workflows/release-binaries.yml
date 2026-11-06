@@ -74,7 +74,10 @@ jobs:
       ASSET_NAME: eglantine-${{ needs.name.outputs.tag }}-${{ matrix.platform }}
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 3000M
+      # Compiler install timestamps can differ between fresh runners. Hash the compiler
+      # contents instead, and normalize checkout paths without weakening validation.
       CCACHE_COMPILERCHECK: content
+      CCACHE_BASEDIR: ${{ github.workspace }}
       SCCACHE_DIR: ${{ github.workspace }}/.sccache
       SCCACHE_CACHE_SIZE: 3G
     strategy:
@@ -113,17 +116,22 @@ jobs:
         if: startsWith(matrix.platform, 'linux')
         shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            autoconf cmake g++ gcc git glslang-tools libglu1-mesa-dev \
-            libpulse-dev libtool libudev-dev libxkbcommon-x11-0 \
-            mesa-common-dev nasm ninja-build qt6-base-private-dev \
-            qt6-charts-dev qt6-tools-dev libavfilter-dev libavcodec-dev \
-            libswscale-dev pkg-config zlib1g-dev libva-dev libvdpau-dev \
-            spirv-tools spirv-headers libusb-1.0-0-dev \
-            libboost-dev libboost-fiber-dev libboost-context-dev \
-            libopus-dev libasound2-dev ccache \
-            libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+          set -euo pipefail
+          debs="$RUNNER_TEMP/apt-debs"
+          mkdir -p "$debs"
+          if compgen -G "$debs/*.deb" > /dev/null; then
+            sudo cp "$debs"/*.deb /var/cache/apt/archives/
+          fi
+          apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          packages=(
+            autoconf cmake g++ gcc git glslang-tools libglu1-mesa-dev mold
+            libpulse-dev libtool libudev-dev libxkbcommon-x11-0
+            mesa-common-dev nasm ninja-build libavfilter-dev libavcodec-dev
+            libswscale-dev pkg-config zlib1g-dev libva-dev libvdpau-dev
+            spirv-tools spirv-headers libusb-1.0-0-dev
+            libboost-dev libboost-fiber-dev libboost-context-dev
+            libopus-dev libasound2-dev ccache
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0
             libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1
 
       # The packages docs/Deps.md lists for macOS, plus ccache.
@@ -298,6 +306,10 @@ jobs:
               "-DCMAKE_C_FLAGS=$profile"
               "-DCMAKE_CXX_FLAGS=$profile"
             )
+          else
+            # Keep Release optimization, but avoid the slower default BFD link.
+            # PGO retains the matching LLVM toolchain's lld above.
+            flags+=("-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=mold")
           fi
           cmake -S . -B build/release -G Ninja "${flags[@]}"
 
@@ -388,16 +400,42 @@ jobs:
         shell: bash
         run: |
           if command -v ccache > /dev/null; then ccache --zero-stats; else sccache --zero-stats; fi
+          SECONDS=0
           cmake --build build/release --target yuzu yuzu-cmd --parallel
-          if command -v ccache > /dev/null; then ccache --show-stats; else sccache --show-stats; fi
+          echo "Build (${{ matrix.platform }}): ${SECONDS}s" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          if command -v ccache > /dev/null; then ccache --show-stats; else sccache --show-stats; fi | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build macOS ARM
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          ccache --zero-stats
+          SECONDS=0
+          cmake --build build/release --target yuzu yuzu-cmd --parallel 2 -- -k 0
+          echo "Build (${{ matrix.platform }}): ${SECONDS}s" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          ccache --show-stats | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package and verify macOS app
+        if: runner.os == 'macOS'
+        shell: bash
+        run: >-
+          sh tools/macos/package.sh build/release "$ASSET_NAME.zip"
 
       - name: Build MinGW PGO
         if: matrix.mingw
         shell: msys2 {0}
         run: |
           ccache --zero-stats
+          SECONDS=0
           cmake --build build/release --target yuzu yuzu-cmd --parallel
-          ccache --show-stats
+          echo "Build (${{ matrix.platform }}): ${SECONDS}s" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          ccache --show-stats | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Stop sccache on Windows
         if: always() && matrix.platform == 'windows-x86_64' && steps.compiler-cache.outcome == 'success'

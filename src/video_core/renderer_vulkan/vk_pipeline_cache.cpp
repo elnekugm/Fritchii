@@ -122,7 +122,7 @@ using VideoCommon::GuessMissing;
 using VideoCommon::GraphicsEnvironment;
 using VideoCommon::ShaderSnapshotFailure;
 
-constexpr u32 CACHE_VERSION = 21;
+constexpr u32 CACHE_VERSION = 0x4e4f0007; // Integrated Ampere, storage image and dynamic texture fixes.
 constexpr size_t VULKAN_CACHE_FLUSH_PIPELINES = 128;
 constexpr size_t VULKAN_CACHE_FLUSH_MIN_SECONDS = 30;
 constexpr std::array<char, 8> VULKAN_CACHE_MAGIC_NUMBER{'y', 'u', 'z', 'u', 'v', 'k', 'c', 'h'};
@@ -795,7 +795,12 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
     const char* tensor_mode = std::getenv("EDEN_NX2_TENSOR");
     const bool tensor_enabled = tensor_mode && std::string_view{tensor_mode} == "fast" &&
                                 device.IsExtCooperativeMatrixSupported();
-    SetCooperativeMatrixSupported(tensor_enabled);
+    const bool software_tensor_enabled = tensor_mode &&
+        std::string_view{tensor_mode} == "software" && device.IsSoftwareTensorSupported();
+    SetCooperativeMatrixSupported(tensor_enabled || software_tensor_enabled);
+    if (software_tensor_enabled) {
+        LOG_INFO(Render_Vulkan, "Native HMMA uses 32-lane software matrix arithmetic");
+    }
     if (use_async_translation) {
         LOG_INFO(Render_Vulkan, "Native graphics pipelines are translated on {} worker threads",
                  num_translation_threads);
@@ -913,6 +918,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .has_broken_spirv_fragment_shuffle = driver_id == VK_DRIVER_ID_AMD_PROPRIETARY,
         .max_subgroup_size = device.GetMaxSubgroupSize(),
         .support_cooperative_matrix = tensor_enabled,
+        .support_software_tensor = software_tensor_enabled,
         .max_compute_shared_memory_size = device.GetMaxComputeSharedMemorySize(),
         .max_tensor_workgroup_size = device.GetMaxTensorWorkgroupSize(),
         .has_broken_robust =
@@ -7239,97 +7245,15 @@ void PipelineCache::StoreRuntimeGraphicsPipeline(
     QueueVulkanPipelineCacheFlush();
 }
 
-namespace {
-// EDEN_NX2_ASYNC_TRANSLATE=2: translations compared and how many differed, logged every 10 s by
-// TickTranslations; the first 8 differences are logged by the translation thread that found them.
-std::atomic<u64> verify_compared{};
-std::atomic<u64> verify_differing{};
-std::atomic<u32> verify_logged{};
-
-/// The worker's translation against the GPU thread's: the SPIR-V of each stage word for word,
-/// then the reads each environment recorded. Empty when they match.
-std::string CompareTranslations(const TranslationJob& job) {
-    const TranslationRecord& reference = *job.reference;
-    const TranslationRecord& record = *job.record;
-    if (reference.complete != record.complete) {
-        return fmt::format("the translation {} on the GPU thread and {} on its thread",
-                           reference.complete ? "completed" : "failed",
-                           record.complete ? "completed" : "failed");
-    }
-    for (size_t stage = 0; stage < record.spirv.size(); ++stage) {
-        const auto& expected = reference.spirv[stage];
-        const auto& got = record.spirv[stage];
-        if (expected == got) {
-            continue;
-        }
-        const auto [mismatch, unused] = std::ranges::mismatch(expected, got);
-        return fmt::format("stage {} SPIR-V: {} words on the GPU thread, {} on its thread, first "
-                           "difference at word {}",
-                           stage, expected.size(), got.size(),
-                           std::distance(expected.begin(), mismatch));
-    }
-    for (size_t index = 0; index < job.envs.size(); ++index) {
-        if (job.key.unique_hashes[index] == 0) {
-            continue;
-        }
-        if (std::string difference = job.envs[index].FirstReadDifference(job.reference_envs[index]);
-            !difference.empty()) {
-            return fmt::format("program {} reads: {}", index, difference);
-        }
-    }
-    return {};
-}
-} // Anonymous namespace
-
-bool PipelineCache::EnqueueTranslation(
-    const VideoCommon::EvictedPointerSlots::Slots* keep_pointers) {
-    if (!DrawMayBeSkipped() || translate_sync_only.contains(graphics_key)) {
-        return false;
-    }
-    if (translate_queue->InFlight() >= MaxTranslationsInFlight) {
-        ++translate_stats.full;
-        return false;
-    }
-    const auto begin = std::chrono::steady_clock::now();
-    auto job = std::make_unique<TranslationJob>();
-    job->key = graphics_key;
-    job->native = maxwell3d->GetNativeMacroEngine().native_turing;
-    job->enqueued = begin;
-    GraphicsEnvironments environments;
-    translate_stats.snapshot_bytes +=
-        GetGraphicsEnvironments(environments, graphics_key.unique_hashes, true);
-    KeepPointers(environments.envs, graphics_key, keep_pointers);
-    // A copy (environments declare a destructor, so they have no moves); the snapshot is shared.
-    job->envs = environments.envs;
-    if (VideoCommon::AsyncTranslateMode() == 2) {
-        // Verify mode: the same draw translated here from the live state too, as the GPU thread
-        // would have, for the translation thread to compare with its own (SPIR-V and reads).
-        GraphicsEnvironments live;
-        GetGraphicsEnvironments(live, graphics_key.unique_hashes);
-        KeepPointers(live.envs, graphics_key, keep_pointers);
-        job->reference = std::make_unique<TranslationRecord>();
-        job->reference->translate_only = true;
-        // Pools of its own: nothing else on the GPU thread holds IR in them.
-        if (!verify_pools) {
-            verify_pools = std::make_unique<ShaderPools>();
-        }
-        verify_pools->ReleaseContents();
-        [[maybe_unused]] const auto none =
-            CreateGraphicsPipeline(*verify_pools, graphics_key, live.Span(), nullptr, true,
-                                   nullptr, nullptr, false, job->reference.get());
-        job->reference_envs = live.envs;
-        job->record = std::make_unique<TranslationRecord>();
-    }
-    const auto elapsed = std::chrono::steady_clock::now() - begin;
-    translate_stats.enqueue_time += elapsed;
-    frame_tally.queued_time += elapsed;
-    ++frame_tally.queued;
-    if (!translate_queue->Enqueue(std::move(job))) {
-        ++translate_stats.full;
-        return false;
-    }
-    ++translate_stats.queued;
-    return true;
+// Native graphics translation workers are retained for a future complete environment snapshot.
+// Driver pipeline compilation remains asynchronous independently of this translation gate.
+bool PipelineCache::CanTranslateAsynchronously() const {
+    // This path only supports native programs. Their storage-pointer classification reads live
+    // GPU mappings, which GraphicsEnvironment::Detach does not snapshot. The reuse recorder must
+    // forward and record that classification too; it cannot make the live read worker-safe.
+    // Keep translation on the GPU thread until mapping answers have an immutable snapshot.
+    // Driver pipeline compilation can still use its asynchronous workers.
+    return false;
 }
 
 std::unique_ptr<GraphicsPipeline> PipelineCache::AdoptTranslation(bool& pending) {
@@ -7600,7 +7524,8 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(const ComputePipe
             diag::Emit(*trace);
     };
     ComputeEnvironment env{*kepler_compute, *gpu_memory, program_base, qmd.program_start,
-                           shader->lowered_native, profile.support_cooperative_matrix};
+                           shader->lowered_native,
+                           profile.support_cooperative_matrix || profile.support_software_tensor};
     env.SetCachedSize(shader->size_bytes);
     env.KeepStoragePointers(keep_pointers);
 

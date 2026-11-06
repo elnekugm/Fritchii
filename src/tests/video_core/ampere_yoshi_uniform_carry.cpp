@@ -252,4 +252,30 @@ TEST_CASE("uniform carry consumer keeps other modes rejected", "[yoshi_uniform_c
     high_register.words[1] = 22;
     CHECK_FALSE(Ampere::LowerToMaxwell(std::array{high_register, end}));
 }
+TEST_CASE("Yoshi UIADD3 carries use every uniform predicate slot",
+          "[video_core][yoshi_uniform_carry_ir]") {
+    constexpr Instruction end{{0x794d, 0, 0x03800000, 0}};
+    for (u32 output = 0; output < 7; ++output) {
+        Instruction native{{0x09097290, 6, 0x0ff5e03f, 0x000fe200}};
+        native.words[2] = (native.words[2] & ~(7U << 17)) | (output << 17);
+        const auto lowered = Ampere::LowerToMaxwell(std::array{native, end});
+        INFO(lowered.error);
+        REQUIRE(lowered);
+        for (u32 a : {0U, 1U, 0xffffffffU})
+            for (u32 b : {0U, 1U, 0xffffffffU}) {
+                std::array<u32, 256> regs{};
+                regs[225] = a;
+                regs[222] = b;
+                regs[239] = 0x12345655;
+                std::array<bool, 7> preds{true, false, true, false, true, false, true};
+                const auto before = preds;
+                const u32 mask = 1U << (6 - output);
+                Execute(lowered.instructions, regs, preds);
+                CHECK(regs[225] == a + b);
+                CHECK(regs[239] == ((0x12345655U & ~mask) |
+                      (u64{a} + b > 0xffffffffULL ? mask : 0U)));
+                CHECK(preds == before);
+            }
+    }
+}
 } // namespace

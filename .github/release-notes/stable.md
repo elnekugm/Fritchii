@@ -1,6 +1,6 @@
 > [!IMPORTANT]
-> ## Report crashes from inside Orchid
-> If a game crashes, start Orchid again and pick **Help > Report a Crash on GitHub**. It opens a bug report with your build, system, GPU and driver and the end of the crash log already filled in, and opens the log folder so you can attach the full log of the crashed run.
+> ## Report issues from inside Orchid
+> If a game crashes, start Orchid again and pick **Help > Report an Issue on GitHub**. It opens a bug report with your build, system, GPU and driver and the end of the crash log already filled in, and opens the log folder so you can attach the full log of the crashed run.
 
 ## 0.8.3 — Custom Wonder FPS and per-game logs
 

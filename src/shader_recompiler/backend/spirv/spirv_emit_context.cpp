@@ -7,8 +7,9 @@
 #include <algorithm>
 #include <cstdlib>
 #include <array>
-#include <bit>
 #include <climits>
+#include <optional>
+#include <utility>
 
 #include <boost/container/static_vector.hpp>
 
@@ -78,6 +79,28 @@ spv::ImageFormat GetImageFormat(ImageFormat format) {
         return spv::ImageFormat::Rgba32ui;
     }
     throw InvalidArgument("Invalid image format {}", format);
+}
+
+// Explicit storage formats determine the SPIR-V scalar type even when the guest
+// texture descriptor is floating point (for example a raw SUST.B32 integer view).
+Id StorageImageScalarType(EmitContext& ctx, ImageFormat format, bool is_integer) {
+    if (format != ImageFormat::Typeless && format != ImageFormat::R32_UINT &&
+        format != ImageFormat::R32G32B32A32_UINT) {
+        ctx.AddCapability(spv::Capability::StorageImageExtendedFormats);
+    }
+    switch (format) {
+    case ImageFormat::Typeless:
+        return is_integer ? ctx.U32[1] : ctx.F32[1];
+    case ImageFormat::R8_SINT:
+    case ImageFormat::R16_SINT:
+        return ctx.S32[1];
+    default:
+        return ctx.U32[1];
+    }
+}
+
+Id StorageImageTexelType(EmitContext& ctx, Id scalar) {
+    return scalar.value == ctx.F32[1].value ? ctx.F32[4] : scalar.value == ctx.S32[1].value ? ctx.S32[4] : ctx.U32[4];
 }
 
 Id ImageType(EmitContext& ctx, const ImageDescriptor& desc, Id sampled_type) {
@@ -457,11 +480,13 @@ Id DescType(EmitContext& ctx, Id sampled_type, Id pointer_type, u32 count) {
         return pointer_type;
     }
 }
+
 void ValidateCooperativeMatrix(const Profile& profile, const IR::Program& program) {
     if (!program.info.uses_tensor_mul_add) {
         return;
     }
-    if (!profile.support_cooperative_matrix || profile.supported_spirv < 0x00010400 ||
+    if ((!profile.support_cooperative_matrix && !profile.support_software_tensor) ||
+        profile.supported_spirv < 0x00010400 ||
         program.stage != Stage::Compute) {
         throw TensorRejected{"host features or shader stage"};
     }
@@ -471,9 +496,13 @@ void ValidateCooperativeMatrix(const Profile& profile, const IR::Program& progra
         throw TensorRejected{"requires full 32-lane subgroups in a one-dimensional workgroup"};
     }
     const u64 guest_bytes = (u64{program.shared_memory_size} + 15U) & ~u64{15};
-    const u64 scratch_bytes = u64{size[0] / 32U} * 1280U;
+    const u64 scratch_bytes = profile.support_software_tensor ? 0U : u64{size[0] / 32U} * 1280U;
     if (guest_bytes + scratch_bytes > profile.max_compute_shared_memory_size) {
         throw TensorRejected{"shared memory limit"};
+    }
+    if (profile.support_software_tensor) {
+        // Each software collective checks active participation at runtime.
+        return;
     }
     size_t remaining{};
     for (const auto* block : program.blocks) {
@@ -525,8 +554,9 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     u32& texture_binding{is_unified ? bindings.unified : bindings.texture};
     u32& image_binding{is_unified ? bindings.unified : bindings.image};
     ValidateCooperativeMatrix(profile, program);
+    uses_software_tensor = program.info.uses_tensor_mul_add && profile.support_software_tensor;
     AddCapability(spv::Capability::Shader);
-    if (program.info.uses_tensor_mul_add) {
+    if (program.info.uses_tensor_mul_add && !profile.support_software_tensor) {
         AddExtension("SPV_NV_cooperative_matrix");
         AddExtension("SPV_KHR_vulkan_memory_model");
         AddCapability(static_cast<spv::Capability>(5357u));  // CooperativeMatrixNV
@@ -538,7 +568,7 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineLocalMemory(program);
     DefineSharedMemory(program);
     DefineSharedMemoryFunctions(program);
-    if (program.info.uses_tensor_mul_add) {
+    if (program.info.uses_tensor_mul_add && !profile.support_software_tensor) {
         DefineCooperativeMatrixScratch(program);
     }
     DefineConstantBuffers(program.info, uniform_binding);
@@ -697,7 +727,7 @@ void EmitContext::DefineSharedMemory(const IR::Program& program) {
         profile.support_explicit_workgroup_layout &&
         (!program.info.uses_int8 || profile.support_workgroup_layout_8bit_access) &&
         (!program.info.uses_int16 || profile.support_workgroup_layout_16bit_access) &&
-        (!program.info.uses_tensor_mul_add ||
+        (!program.info.uses_tensor_mul_add || profile.support_software_tensor ||
          (program.shared_memory_size != 0 && profile.support_workgroup_layout_16bit_access &&
           profile.supported_spirv >= 0x00010400));
     if (program.shared_memory_size == 0) {
@@ -1712,7 +1742,7 @@ void EmitContext::DefineImageBuffers(const Info& info, u32& binding) {
     image_buffers.reserve(info.image_buffer_descriptors.size());
     for (const ImageBufferDescriptor& desc : info.image_buffer_descriptors) {
         const spv::ImageFormat format{GetImageFormat(desc.format)};
-        const Id sampled_type{desc.is_integer ? U32[1] : F32[1]};
+        const Id sampled_type{StorageImageScalarType(*this, desc.format, desc.is_integer)};
         const Id image_type{
             TypeImage(sampled_type, spv::Dim::Buffer, false, false, false, 2, format)};
         const Id pointer_type{TypePointer(spv::StorageClass::UniformConstant, image_type)};
@@ -1728,7 +1758,7 @@ void EmitContext::DefineImageBuffers(const Info& info, u32& binding) {
             .image_type = image_type,
             .pointer_type = pointer_type,
             .count = desc.count,
-            .is_integer = desc.is_integer,
+            .texel_type = StorageImageTexelType(*this, sampled_type),
         });
         if (profile.supported_spirv >= 0x00010400) {
             interfaces.push_back(id);
@@ -1771,7 +1801,7 @@ void EmitContext::DefineTextures(const Info& info, u32& binding, u32& scaling_in
 void EmitContext::DefineImages(const Info& info, u32& binding, u32& scaling_index) {
     images.reserve(info.image_descriptors.size());
     for (const ImageDescriptor& desc : info.image_descriptors) {
-        const Id sampled_type{desc.is_integer ? U32[1] : F32[1]};
+        const Id sampled_type{StorageImageScalarType(*this, desc.format, desc.is_integer)};
         const Id image_type{ImageType(*this, desc, sampled_type)};
         const Id pointer_type{TypePointer(spv::StorageClass::UniformConstant, image_type)};
         const Id id{AddGlobalVariable(pointer_type, spv::StorageClass::UniformConstant)};
@@ -1786,7 +1816,7 @@ void EmitContext::DefineImages(const Info& info, u32& binding, u32& scaling_inde
             .image_type = image_type,
             .pointer_type = pointer_type,
             .count = desc.count,
-            .is_integer = desc.is_integer,
+            .texel_type = StorageImageTexelType(*this, sampled_type),
         });
         if (profile.supported_spirv >= 0x00010400) {
             interfaces.push_back(id);
@@ -1803,7 +1833,7 @@ void EmitContext::DefineInputs(const IR::Program& program) {
     if (info.uses_workgroup_id) {
         workgroup_id = DefineInput(*this, U32[3], false, spv::BuiltIn::WorkgroupId);
     }
-    if (info.uses_local_invocation_id) {
+    if (info.uses_local_invocation_id && !uses_software_tensor) {
         local_invocation_id = DefineInput(*this, U32[3], false, spv::BuiltIn::LocalInvocationId);
     }
     if (info.uses_invocation_id) {
@@ -1836,7 +1866,7 @@ void EmitContext::DefineInputs(const IR::Program& program) {
             Decorate(subgroup_mask_ge, spv::Decoration::Flat);
         }
     }
-    if ((info.uses_fswzadd || info.uses_subgroup_invocation_id || info.uses_subgroup_shuffles ||
+    if ((info.uses_tensor_mul_add || info.uses_fswzadd || info.uses_subgroup_invocation_id || info.uses_subgroup_shuffles ||
          (profile.warp_size_potentially_larger_than_guest &&
           (info.uses_subgroup_vote || info.uses_subgroup_mask))) &&
         SupportsSubgroups()) {

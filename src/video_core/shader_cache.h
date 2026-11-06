@@ -87,6 +87,10 @@ public:
 
     void InvalidateRegions(std::span<const std::pair<DAddr, size_t>> sequences);
 
+    /// Regions whose GPU writes can invalidate compiled code or a remembered rejection.
+    /// Returns a snapshot so callers can perform readbacks without holding cache locks.
+    std::vector<std::pair<DAddr, size_t>> GetShaderCodeRanges();
+
     /// @brief Unmarks a memory region as cached and marks it for removal
     /// @param addr Start address of the CPU write operation
     /// @param size Number of bytes of the CPU write operation
@@ -213,6 +217,7 @@ private:
     std::vector<std::unique_ptr<ShaderInfo>> retired_shaders;
     std::atomic<u64> invalidation_generation{};
     u64 observed_invalidation_generation{}; // renderer thread only
+    std::chrono::steady_clock::time_point next_failed_stage_retry{};
 
     /// Native programs the lowering rejected, by address, so each draw or dispatch rethrows the
     /// first error instead of lowering again; dropped when guest memory there is written.
