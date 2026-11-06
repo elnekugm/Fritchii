@@ -63,7 +63,8 @@ public:
     void Dump(u64, u64) override {}
 };
 void RunCarryIR(const IR::Block& block, std::array<u32, 256>& regs,
-                const std::array<bool, 7>& preds, u32 cbuf) {
+                const std::array<bool, 7>& preds, u32 cbuf, u32 expected_bank = 0,
+                u32 expected_offset = 0x214) {
     std::unordered_map<const IR::Inst*, u32> values;
     auto arg = [&](IR::Value v) -> u32 {
         if (v.IsImmediate())
@@ -84,8 +85,8 @@ void RunCarryIR(const IR::Block& block, std::array<u32, 256>& regs,
             result = preds[static_cast<size_t>(inst.Arg(0).Pred())];
             break;
         case O::GetCbufU32:
-            REQUIRE(arg(inst.Arg(0)) == 0);
-            REQUIRE(arg(inst.Arg(1)) == 0x214);
+            REQUIRE(arg(inst.Arg(0)) == expected_bank);
+            REQUIRE(arg(inst.Arg(1)) == expected_offset);
             result = cbuf;
             break;
         case O::IAdd32:
@@ -166,6 +167,59 @@ TEST_CASE("Yoshi CBuf two-carry words execute through Maxwell IR", "[video_core]
             }
         }
 }
+TEST_CASE("Yoshi CBuf carry supports predicate inversion and true predicate",
+          "[video_core][yoshi_cbuf_ir]") {
+    CarryEnvironment env;
+    for (const u32 first : {3U, 4U, 7U})
+        for (const u32 second : {3U, 4U, 7U})
+            for (const bool neg1 : {false, true})
+                for (const bool neg2 : {false, true})
+                    for (const bool p4 : {false, true})
+                        for (const bool p3 : {false, true})
+                            for (const u32 cb : {0U, 1U, 0xffffffffU}) {
+                                auto x = Cases[0];
+                                x.words[1] = (x.words[1] & ~((31U << 22) | (0xffffU << 6))) |
+                                             (3U << 22) | (0x1f0U << 6);
+                                x.words[2] = (x.words[2] & ~((7U << 23) | (1U << 26) | (7U << 13) |
+                                                             (1U << 16))) |
+                                             (first << 23) | (u32{neg1} << 26) | (second << 13) |
+                                             (u32{neg2} << 16);
+                                const auto lowered = LowerToMaxwell(std::array{x, Exit});
+                                INFO(lowered.error);
+                                REQUIRE(lowered);
+                                std::array<u32, 256> regs{};
+                                regs[137] = 0xffffffffU;
+                                regs[128] = 2;
+                                std::array<bool, 7> preds{};
+                                preds[4] = p4;
+                                preds[3] = p3;
+                                const auto saved = preds;
+                                for (u64 insn : lowered.instructions) {
+                                    const u64 op = insn >> 48;
+                                    if (op == 0xe300)
+                                        break;
+                                    ObjectPool<IR::Inst> pool;
+                                    IR::Block block{pool};
+                                    Maxwell::TranslatorVisitor v{env, block};
+                                    if (op == 0x4c98)
+                                        v.MOV_cbuf(insn);
+                                    else if (op == 0x5c10)
+                                        v.IADD_reg(insn);
+                                    else if (op == 0x0100)
+                                        v.MOV32I(insn);
+                                    else if (op == 0x5ca0)
+                                        v.SEL_reg(insn);
+                                    else
+                                        FAIL("unexpected word");
+                                    RunCarryIR(block, regs, preds, cb, 3, 0x1f0);
+                                }
+                                const bool c1 = (first == 7 ? true : preds[first]) != neg1;
+                                const bool c2 = (second == 7 ? true : preds[second]) != neg2;
+                                CHECK(regs[147] == static_cast<u32>(u64{0xffffffffU} + cb + 2 +
+                                                                    u32{c1} + u32{c2}));
+                                CHECK(preds == saved);
+                            }
+}
 TEST_CASE("Yoshi CBuf two-carry rejects unsupported address and modifiers",
           "[video_core][yoshi_cbuf_ir]") {
     for (const auto original : Cases) {
@@ -176,6 +230,14 @@ TEST_CASE("Yoshi CBuf two-carry rejects unsupported address and modifiers",
             x.words[word] ^= 1U << bit;
             CHECK_FALSE(LowerToMaxwell(std::array{x, Exit}));
         }
+        for (const u32 bit : {17U, 20U}) {
+            auto output = original;
+            output.words[2] ^= 1U << bit;
+            CHECK_FALSE(LowerToMaxwell(std::array{output, Exit}));
+        }
+        auto uniform = original;
+        uniform.words[0] = (uniform.words[0] & ~0xfffU) | 0x290U;
+        CHECK_FALSE(LowerToMaxwell(std::array{uniform, Exit}));
         auto x = original;
         x.words[1] = (x.words[1] & ~(31U << 22)) | (18U << 22);
         CHECK_FALSE(LowerToMaxwell(std::array{x, Exit}));
