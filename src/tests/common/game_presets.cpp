@@ -32,7 +32,8 @@ void CheckPreset(const Settings::Values& settings) {
     CHECK(settings.vram_usage_mode.GetValue() == Settings::VramUsageMode::Conservative);
     CHECK_FALSE(settings.use_reactive_flushing.GetValue());
     CHECK(settings.vsync_mode.GetValue() == Settings::VSyncMode::FifoRelaxed);
-    CHECK(settings.use_docked_mode.GetValue() == Settings::ConsoleMode::Handheld);
+    CHECK(settings.gpu_fence_behavior.GetValue() == Settings::GpuFenceBehavior::Balanced);
+    CHECK(settings.async_presentation.GetValue());
     CHECK(settings.scaling_filter.GetValue() == Settings::ScalingFilter::ScaleForce);
     CHECK(settings.anti_aliasing.GetValue() == Settings::AntiAliasing::Fxaa);
 }
@@ -58,10 +59,10 @@ TEST_CASE("Display filter defaults use ScaleForce and no extra AA", "[game_prese
     CHECK(settings->anti_aliasing.GetDefault() == Settings::AntiAliasing::None);
 }
 
-TEST_CASE("Accepted MKW settings replace visible global preferences", "[game_presets]") {
+TEST_CASE("Accepted MTF settings replace visible global preferences", "[game_presets]") {
     auto settings = std::make_unique<Settings::Values>();
     SetConflictingPreferences(*settings, false);
-    Settings::SetMarioKartWorldRecommendedSettings(*settings, true);
+    Settings::SetMarioTennisFeverRecommendedSettings(*settings, true);
     CheckPreset(*settings);
     CHECK(settings->renderer_backend.UsingGlobal());
     CHECK(settings->gpu_accuracy.UsingGlobal());
@@ -69,11 +70,11 @@ TEST_CASE("Accepted MKW settings replace visible global preferences", "[game_pre
     CHECK(settings->gpu_accuracy.GetValue(true) == Settings::GpuAccuracy::Low);
 }
 
-TEST_CASE("MKW preset overrides saved settings for the session", "[game_presets]") {
+TEST_CASE("MTF preset overrides saved settings for the session", "[game_presets]") {
     auto settings = std::make_unique<Settings::Values>();
     SetConflictingPreferences(*settings, false);
     SetConflictingPreferences(*settings, true);
-    REQUIRE(Settings::ApplyGamePreset(*settings, Settings::MarioKartWorldProgramId, true));
+    REQUIRE(Settings::ApplyGamePreset(*settings, Settings::MarioTennisFeverProgramId, true));
     CheckPreset(*settings);
     CheckPreferences(*settings, true);
     for (const auto& restore : settings->linkage.restore_functions) {
@@ -82,32 +83,34 @@ TEST_CASE("MKW preset overrides saved settings for the session", "[game_presets]
     CheckPreferences(*settings);
     CHECK(settings->renderer_backend.UsingGlobal());
     CHECK(settings->resolution_setup.UsingGlobal());
-    REQUIRE(Settings::ApplyGamePreset(*settings, Settings::MarioKartWorldProgramId, true));
+    REQUIRE(Settings::ApplyGamePreset(*settings, Settings::MarioTennisFeverProgramId, true));
     CheckPreset(*settings);
 }
 
-TEST_CASE("MKW preset does not change unrelated games", "[game_presets]") {
+TEST_CASE("MTF preset does not change unrelated games", "[game_presets]") {
     auto settings = std::make_unique<Settings::Values>();
     SetConflictingPreferences(*settings, false);
     CHECK_FALSE(Settings::ApplyGamePreset(*settings, 0, true));
-    CHECK_FALSE(Settings::ApplyGamePreset(*settings, Settings::MarioKartWorldProgramId + 1, true));
+    CHECK_FALSE(
+        Settings::ApplyGamePreset(*settings, Settings::MarioTennisFeverProgramId + 1, true));
     CheckPreferences(*settings);
     CHECK(settings->renderer_backend.UsingGlobal());
     CHECK(settings->resolution_setup.UsingGlobal());
 }
 
-TEST_CASE("Declining the MKW preset preserves global and per-game preferences", "[game_presets]") {
+TEST_CASE("Declining the MTF preset preserves global and per-game preferences", "[game_presets]") {
     auto settings = std::make_unique<Settings::Values>();
     for (bool per_game : {false, true}) {
         SetConflictingPreferences(*settings, per_game);
-        CHECK_FALSE(Settings::ApplyGamePreset(*settings, Settings::MarioKartWorldProgramId, false));
+        CHECK_FALSE(
+            Settings::ApplyGamePreset(*settings, Settings::MarioTennisFeverProgramId, false));
         CheckPreferences(*settings);
         CHECK(settings->renderer_backend.UsingGlobal() == !per_game);
         CHECK(settings->resolution_setup.UsingGlobal() == !per_game);
     }
 }
 
-TEST_CASE("Every Switch 2 preset applies to its own title only", "[game_presets]") {
+TEST_CASE("Every registered preset applies to its own title only", "[game_presets]") {
     for (const auto& preset : Settings::GamePresets) {
         auto settings = std::make_unique<Settings::Values>();
         SetConflictingPreferences(*settings, false);
@@ -189,16 +192,15 @@ TEST_CASE("Every visual quality retains each title's compatibility settings and 
                    : quality == Quality::High ? Settings::AnisotropyMode::X16
                                               : Settings::AnisotropyMode::X4));
             CHECK(settings->renderer_backend.GetValue() == Settings::RendererBackend::Vulkan);
-            CHECK(settings->gpu_accuracy.GetValue() == Settings::GpuAccuracy::Low);
+            const bool legacy = preset.program_id == Settings::SuperMarioBrosWonderProgramId;
+            CHECK(settings->gpu_accuracy.GetValue() ==
+                  (legacy ? Settings::GpuAccuracy::High : Settings::GpuAccuracy::Low));
             CHECK(settings->use_asynchronous_shaders.GetValue());
             CHECK(settings->vram_usage_mode.GetValue() == Settings::VramUsageMode::Conservative);
-            CHECK_FALSE(settings->use_reactive_flushing.GetValue());
+            CHECK(settings->use_reactive_flushing.GetValue() == legacy);
             CHECK(settings->vsync_mode.GetValue() == Settings::VSyncMode::FifoRelaxed);
             CHECK(settings->scaling_filter.GetValue() == Settings::ScalingFilter::ScaleForce);
             switch (preset.program_id) {
-            case Settings::MarioKartWorldProgramId:
-                CHECK(settings->use_docked_mode.GetValue() == Settings::ConsoleMode::Handheld);
-                break;
             case Settings::DonkeyKongBananzaProgramId:
                 CHECK(settings->gpu_clock.GetValue() == Settings::GpuClock::Boost);
                 CHECK(settings->fps30_patch.GetValue());
@@ -240,7 +242,118 @@ TEST_CASE("Changing quality replaces every visual override and ignores unsupport
     CHECK(settings->resolution_setup.GetValue() == Settings::ResolutionSetup::Res1X);
     CHECK(settings->max_anisotropy.GetValue() == Settings::AnisotropyMode::X4);
     CHECK_FALSE(Settings::ApplyGamePreset(*settings, 0, Quality::High));
-    CHECK_FALSE(
-        Settings::ApplyGamePreset(*settings, Settings::MarioKartWorldProgramId + 1, Quality::Low));
+    CHECK_FALSE(Settings::ApplyGamePreset(*settings, Settings::MarioTennisFeverProgramId + 1,
+                                          Quality::Low));
     CHECK(settings->resolution_setup.GetValue() == Settings::ResolutionSetup::Res1X);
+}
+
+TEST_CASE("The profile registry includes exactly the eight identified supported games",
+          "[game_presets]") {
+    constexpr std::array expected{
+        Settings::MarioTennisFeverProgramId,    Settings::HyruleWarriorsAgeOfImprisonmentProgramId,
+        Settings::DonkeyKongBananzaProgramId,   Settings::KirbyAirRidersProgramId,
+        Settings::PokemonPokopiaProgramId,      Settings::StarFoxProgramId,
+        Settings::YoshiMysteriousBookProgramId, Settings::SuperMarioBrosWonderProgramId};
+    REQUIRE(std::size(Settings::GamePresets) == expected.size());
+    for (const u64 id : expected) {
+        const auto* preset = Settings::FindGamePreset(id);
+        REQUIRE(preset != nullptr);
+        CHECK(preset->program_id == id);
+    }
+}
+
+TEST_CASE("Out-of-scope and different-edition game IDs do not receive graphics profiles",
+          "[game_presets]") {
+    constexpr std::array excluded{Settings::MarioKartWorldProgramId,
+                                  u64{0x0400486024DEC000},          // Ocarina of Time
+                                  u64{0x04007C6028AA8000},          // Other Yoshi dump, not Full
+                                  u64{0}, u64{0x040074A01BF13001}}; // Dummy ID and Bananza add-on
+    for (const u64 id : excluded) {
+        CAPTURE(id);
+        auto settings = std::make_unique<Settings::Values>();
+        SetConflictingPreferences(*settings, false);
+        SetConflictingPreferences(*settings, true);
+        CHECK(Settings::FindGamePreset(id) == nullptr);
+        for (const auto quality :
+             {Settings::GamePresetQuality::Low, Settings::GamePresetQuality::Standard,
+              Settings::GamePresetQuality::High}) {
+            CHECK_FALSE(Settings::ApplyGamePreset(*settings, id, quality));
+            CheckPreferences(*settings);
+            CheckPreferences(*settings, true);
+            CHECK_FALSE(settings->renderer_backend.UsingGlobal());
+        }
+    }
+}
+
+TEST_CASE("Wonder quality presets preserve legacy GPU synchronization and clock choices",
+          "[game_presets]") {
+    for (const bool per_game : {false, true}) {
+        auto settings = std::make_unique<Settings::Values>();
+        SetConflictingPreferences(*settings, per_game);
+        const auto set = [per_game](auto& setting, auto value) {
+            setting.SetGlobal(!per_game);
+            setting.SetValue(value);
+        };
+        set(settings->gpu_fence_behavior, Settings::GpuFenceBehavior::Accurate);
+        set(settings->cpu_clock, Settings::CpuClock::Overclock);
+        set(settings->gpu_clock, Settings::GpuClock::Overclock);
+        set(settings->async_presentation, false);
+        set(settings->fps30_patch, false);
+        set(settings->use_docked_mode, Settings::ConsoleMode::Docked);
+        for (const auto quality :
+             {Settings::GamePresetQuality::Low, Settings::GamePresetQuality::Standard,
+              Settings::GamePresetQuality::High}) {
+            REQUIRE(Settings::ApplyGamePreset(*settings, Settings::SuperMarioBrosWonderProgramId,
+                                              quality));
+            CHECK(settings->gpu_accuracy.GetValue() == Settings::GpuAccuracy::High);
+            CHECK(settings->use_reactive_flushing.GetValue());
+            CHECK(settings->gpu_fence_behavior.GetValue() == Settings::GpuFenceBehavior::Accurate);
+            CHECK(settings->cpu_clock.GetValue() == Settings::CpuClock::Overclock);
+            CHECK(settings->gpu_clock.GetValue() == Settings::GpuClock::Overclock);
+            CHECK_FALSE(settings->async_presentation.GetValue());
+            CHECK_FALSE(settings->fps30_patch.GetValue());
+            CHECK(settings->use_docked_mode.GetValue() == Settings::ConsoleMode::Docked);
+            CHECK(settings->gpu_accuracy.UsingGlobal() == !per_game);
+            CHECK(settings->use_reactive_flushing.UsingGlobal() == !per_game);
+            CHECK(settings->gpu_fence_behavior.UsingGlobal() == !per_game);
+            CHECK(settings->cpu_clock.UsingGlobal() == !per_game);
+            CHECK(settings->gpu_clock.UsingGlobal() == !per_game);
+            CHECK(settings->async_presentation.UsingGlobal() == !per_game);
+            CHECK(settings->fps30_patch.UsingGlobal() == !per_game);
+            CHECK(settings->use_docked_mode.UsingGlobal() == !per_game);
+        }
+    }
+}
+
+TEST_CASE("New native profiles do not invent clock, fence, frame-cap or presentation overrides",
+          "[game_presets]") {
+    constexpr std::array ids{Settings::KirbyAirRidersProgramId, Settings::PokemonPokopiaProgramId,
+                             Settings::StarFoxProgramId, Settings::YoshiMysteriousBookProgramId};
+    for (const u64 id : ids) {
+        auto settings = std::make_unique<Settings::Values>();
+        const auto set = [&](auto& setting, auto value) {
+            setting.SetGlobal(false);
+            setting.SetValue(value);
+        };
+        set(settings->gpu_fence_behavior, Settings::GpuFenceBehavior::Accurate);
+        set(settings->cpu_clock, Settings::CpuClock::Overclock);
+        set(settings->gpu_clock, Settings::GpuClock::Overclock);
+        set(settings->async_presentation, false);
+        set(settings->fps30_patch, false);
+        set(settings->use_docked_mode, Settings::ConsoleMode::Docked);
+        for (const auto quality :
+             {Settings::GamePresetQuality::Low, Settings::GamePresetQuality::Standard,
+              Settings::GamePresetQuality::High}) {
+            REQUIRE(Settings::ApplyGamePreset(*settings, id, quality));
+            CHECK(settings->gpu_fence_behavior.GetValue() == Settings::GpuFenceBehavior::Accurate);
+            CHECK(settings->cpu_clock.GetValue() == Settings::CpuClock::Overclock);
+            CHECK(settings->gpu_clock.GetValue() == Settings::GpuClock::Overclock);
+            CHECK_FALSE(settings->async_presentation.GetValue());
+            CHECK_FALSE(settings->fps30_patch.GetValue());
+            CHECK(settings->use_docked_mode.GetValue() == Settings::ConsoleMode::Docked);
+            CHECK_FALSE(settings->gpu_fence_behavior.UsingGlobal());
+            CHECK_FALSE(settings->cpu_clock.UsingGlobal());
+            CHECK_FALSE(settings->gpu_clock.UsingGlobal());
+        }
+    }
 }

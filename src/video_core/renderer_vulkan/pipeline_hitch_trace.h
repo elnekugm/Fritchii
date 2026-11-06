@@ -14,12 +14,12 @@ namespace Vulkan::PipelineHitchTrace {
 
 // All timestamps use the same steady-clock nanoseconds as present-service hitch traces.
 // Reserve a budget for each phase so boot-cache builds cannot consume all first-use wait
-// records. Three phases times 42 records bounds the combined graphics/compute trace at 126.
+// records. Three phases times 512 records bounds the combined graphics/compute trace at 1536.
 enum class Phase { DriverCreate, BuildQueue, FirstUseWait, Count };
 
 inline void Report(Phase phase, const char* kind, u64 hash, s64 start_ns, s64 end_ns) {
     constexpr s64 ThresholdNs = 20'000'000;
-    constexpr u32 MaxRecords = 42;
+    constexpr u32 MaxRecords = 512;
     if (start_ns == 0 || end_ns <= start_ns || end_ns - start_ns <= ThresholdNs) {
         return;
     }
