@@ -1245,6 +1245,9 @@ void TextureCache<P>::ReplaceColorFeedbackViews(std::span<ImageViewInOut> views)
     // loop: RADV reads compressed tiles back as garbage (DK Bananza's video panel came out in
     // tiles). Maxwell reads the texel before the draw's write lands, so sample a copy instead.
     const auto& regs = maxwell3d->regs;
+    // Every replacement remains live until this draw executes. Reusing a same-shaped shadow
+    // within this call would overwrite an earlier binding's snapshot before it is sampled.
+    boost::container::small_vector<ImageId, 8> used_shadows;
     for (ImageViewInOut& view : views) {
         if (view.id == NULL_IMAGE_VIEW_ID || view.blacklist) {
             continue;
@@ -1266,6 +1269,9 @@ void TextureCache<P>::ReplaceColorFeedbackViews(std::span<ImageViewInOut> views)
             continue;
         }
         const auto same_shape = [&](ImageId shadow_id) {
+            if (std::ranges::find(used_shadows, shadow_id) != used_shadows.end()) {
+                return false;
+            }
             const ImageInfo& a = slot_images[shadow_id].info;
             const ImageInfo& b = slot_images[image_id].info;
             return a.type == b.type && a.format == b.format && a.size == b.size &&
@@ -1282,6 +1288,7 @@ void TextureCache<P>::ReplaceColorFeedbackViews(std::span<ImageViewInOut> views)
             it = std::prev(feedback_shadows.end());
         }
         const ImageId shadow_id = *it;
+        used_shadows.push_back(shadow_id);
         Image& image = slot_images[image_id];
         Image& shadow = slot_images[shadow_id];
         const auto copies = MakeShrinkImageCopies(shadow.info, image.info, SubresourceBase{});
