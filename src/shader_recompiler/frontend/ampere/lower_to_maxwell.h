@@ -347,6 +347,15 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             if (reg < 63) result.high_uniform_registers = (std::max)(result.high_uniform_registers, (reg - 26) & ~1U);
             return ~0U;
         };
+        // Captured UIADD3 carry pair: restrict the new handling to PT, UR0-UR21,
+        // unmodified operands and UP1/UP0. Other forms retain their existing guards.
+        const bool uniform_carry_registers = opcode == 0x290 && insn.Bits(12, 4) == 7 &&
+            insn.Bits(16, 8) < 22 && insn.Bits(24, 8) < 22 && insn.words[1] < 22 &&
+            insn.Bits(64, 8) < 22 && !(insn.words[3] & 0xc00001ffU);
+        const bool uniform_carry_producer = uniform_carry_registers &&
+            (insn.words[2] & ~0xffU) == 0x0f83e000U;
+        const bool uniform_carry_consumer = uniform_carry_registers &&
+            (insn.words[2] & ~0xffU) == 0x08fe0400U;
         bool rewritten_uniform = false;
         bool uniform_guard = false;
         bool checked_guard = false;
