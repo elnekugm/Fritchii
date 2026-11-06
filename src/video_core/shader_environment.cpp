@@ -716,6 +716,8 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
     const u32 native_header_size = source_header_size;
     constexpr u32 maximum_instructions = Shader::Ampere::ProgramCaptureState::MaximumInstructions;
     std::vector<Instruction> native;
+    NativeShaderHitchTrace::Lowering hitch{program_base, stage, native, source_header_size};
+    hitch.Begin(NativeShaderHitchTrace::Phase::Capture);
     Shader::Ampere::ProgramCaptureState capture;
     NativeInstructionReader reader{*gpu_memory};
     {
@@ -953,6 +955,8 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
     }
     LOG_DEBUG(Shader, "Lowered native shader at {:#x}: {} source bytes, {} instructions",
               program_base, result->source_size, lowered.instructions.size());
+    hitch.Finish("ok", static_cast<s64>(result->source_size),
+                 static_cast<s64>(lowered.instructions.size()));
     return result;
 }
 
@@ -964,6 +968,9 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
                                          bool support_cooperative_matrix_)
     : GenericEnvironment{gpu_memory_, program_base_, start_address_, support_cooperative_matrix_},
       maxwell3d{&maxwell3d_} {
+    NativeShaderHitchTrace::SlowScope hitch{
+        "graphics-environment", program_base + start_address, ~0U,
+        Common::HitchDiagnostic::Enabled() && maxwell3d->GetNativeMacroEngine().native_turing};
     gpu_memory->ReadBlock(program_base + start_address, &sph, sizeof(sph));
     initial_offset = sizeof(sph);
     texture_bound = maxwell3d->regs.bindless_texture_const_buffer_slot;
@@ -1098,6 +1105,7 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
             gpu_memory->ReadBlock(address, &mesh_primitive_header, sizeof(mesh_primitive_header));
         }
     }
+    hitch.Stage(stage);
     if (native) {
         if (!lowered_native_ && std::getenv("EDEN_NX2_SHADER_DUMP") &&
             (stage == Shader::Stage::TessellationControl || stage == Shader::Stage::TessellationEval)) {
@@ -1117,6 +1125,8 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
     is_proprietary_driver = maxwell3d->GetNativeMacroEngine().native_turing || texture_bound == 2;
     has_hle_engine_state =
         maxwell3d->engine_state == Tegra::Engines::Maxwell3D::EngineHint::OnHLEMacro;
+    hitch.SourceBytes(native_source_size);
+    hitch.Finish("ok");
 }
 
 u32 GraphicsEnvironment::ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) {
@@ -1427,6 +1437,9 @@ ComputeEnvironment::ComputeEnvironment(Tegra::Engines::KeplerCompute& kepler_com
     : GenericEnvironment{gpu_memory_, program_base_, start_address_, support_cooperative_matrix_},
       kepler_compute{
                                                                       &kepler_compute_} {
+    NativeShaderHitchTrace::SlowScope hitch{
+        "compute-environment", program_base, static_cast<u32>(Shader::Stage::Compute),
+        Common::HitchDiagnostic::Enabled() && kepler_compute->IsNativeMode()};
     const auto& qmd{kepler_compute->launch_description};
     stage = Shader::Stage::Compute;
     local_memory_size = qmd.local_pos_alloc + qmd.local_crs_alloc;
@@ -1440,6 +1453,8 @@ ComputeEnvironment::ComputeEnvironment(Tegra::Engines::KeplerCompute& kepler_com
         InitializeNativeCode(std::move(lowered_native_), 0);
         start_address = sizeof(sph);
     }
+    hitch.SourceBytes(native_source_size);
+    hitch.Finish("ok");
 }
 
 std::optional<u32> ReadNativeGuardConstant(Tegra::Engines::KeplerCompute& compute,

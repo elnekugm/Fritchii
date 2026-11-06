@@ -17,6 +17,7 @@
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/vk_hitch_diagnostic.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 #include "video_core/vulkan_common/vk_enum_string_helper.h"
 #include "video_core/vulkan_common/vulkan_device.h"
@@ -169,9 +170,13 @@ void Swapchain::Create(
 }
 
 bool Swapchain::AcquireNextImage(bool may_flush) {
-    const VkResult result = device.GetLogical().AcquireNextImageKHR(
-        *swapchain, (std::numeric_limits<u64>::max)(), *present_semaphores[frame_index],
-        VK_NULL_HANDLE, &image_index);
+    VkResult result;
+    {
+        HitchTrace::Scope trace{HitchTrace::Event::AcquireImage, frame_index};
+        result = device.GetLogical().AcquireNextImageKHR(
+            *swapchain, (std::numeric_limits<u64>::max)(), *present_semaphores[frame_index],
+            VK_NULL_HANDLE, &image_index);
+    }
     switch (result) {
     case VK_SUCCESS:
         break;

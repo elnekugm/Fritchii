@@ -162,6 +162,9 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
     if (!dirty[VideoCommon::Dirty::Shaders]) {
         return last_shaders_valid;
     }
+    NativeShaderHitchTrace::SlowScope refresh_hitch{
+        "refresh-stages", 0, ~0U,
+        Common::HitchDiagnostic::Enabled() && maxwell3d->GetNativeMacroEngine().native_turing};
     dirty[VideoCommon::Dirty::Shaders] = false;
 
     const GPUVAddr base_addr{maxwell3d->regs.program_region.Address()};
@@ -210,7 +213,12 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
                 RethrowIfRejected(*cpu_shader_addr);
                 GraphicsEnvironment env{*maxwell3d, *gpu_memory, program, native ? shader_addr : base_addr,
                                        start_address, {}, support_cooperative_matrix};
+                NativeShaderHitchTrace::SlowScope info_hitch{
+                    "shader-info", shader_addr, static_cast<u32>(env.ShaderStage()),
+                    Common::HitchDiagnostic::Enabled() && native};
+                info_hitch.SourceBytes(env.SourceSizeBytes());
                 shader_info = MakeShaderInfo(env, *cpu_shader_addr);
+                info_hitch.Finish("ok");
             } catch (const Shader::Exception&) {
                 RememberRejection(*cpu_shader_addr, shader_addr);
                 // Once per program: which stage slot it is bound to, its header and the slot's
