@@ -233,11 +233,20 @@ TEST_CASE("Yoshi LEA low/high pair preserves 64-bit address and predicates",
                                 else
                                     FAIL("Unexpected pair instruction " << std::hex << insn);
                                 RunLeaIR(block, regs, preds);
+                                if (program == &high) {
+                                    CHECK(preds[pout] ==
+                                          ((u64{static_cast<u32>(a << 1)} + b) > 0xffffffffULL));
+                                    for (u32 p = 0; p < 7; ++p)
+                                        if (p != pout)
+                                            CHECK(preds[p] == saved[p]);
+                                }
                             }
                             if (program == &low) {
                                 const bool lowcarry =
                                     (u64{static_cast<u32>(a << 1)} + b) > 0xffffffffULL;
                                 CHECK(preds[pout] == lowcarry);
+                                if (a == 0x80000000U && b == 0)
+                                    CHECK_FALSE(preds[pout]);
                             }
                         }
                         const u64 expected = (((u64{ah} << 32) | a) << 1) + ((u64{bh} << 32) | b);
