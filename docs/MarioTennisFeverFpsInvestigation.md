@@ -1,65 +1,89 @@
-# Mario Tennis Fever FPS investigation
+# Mario Tennis Fever dynamic FPS test
 
-Status: experimental test build, not a completed frame-rate-independent patch.
+Status: dynamic timing implemented; normal GPU gameplay validation is pending.
+The requested behavior is a 120-FPS limit with normal game speed when actual
+rendering falls to, for example, 90 FPS. A 30-FPS-only build does not meet that
+request.
 
-The user's reports are 120 FPS running too fast in the menu and 30 FPS running
-too slowly in gameplay, including after restarting the new high-FPS build.
+## Implementation
 
-## Confirmed paths
+`TennisDynamicFps` samples monotonic host time once per actual VI present,
+using `Core::g_nx2_present_count`, as Wonder does. The root task traversal is
+not a sufficient clock boundary: loading loops can animate and present without
+traversing the root. Sampling that root previously reused stale deltas.
 
-Offsets below refer to the unpacked, build-checked game NRO.
+The shared game field at NRO+`17995d4` remains in its canonical target-scaled
+representation. The patch normalizes 697 build-checked scalar float loads and
+one SIMD broadcast at their point of consumption. Every hook checks the actual
+load address; branch aliases load their original data unchanged.
 
-- UI root `0x11ce260` defaults to a fixed step of 1 at `0x11ce2c4`.
-  Its animation update bypasses the shared simulation scale. Scale this default
-  by `60 / target_fps`; preserve the branch that already reads the shared scale.
-- Character integration reads `model+0x390` at `0x106ed28`. It is quantized to
-  1/64-frame units. Character animation also uses this field.
-- Ball simulator `0x1081b40` converts the shared scale to 1/64-frame units.
-  At `0x1081bd8`, W23 is the requested advance. The live state is
-  NRO base + `0x3e4b9e0`. Stack copies used for prediction intentionally have a
-  different clock and must not be changed indiscriminately.
-- The ball loop consumes multiple substeps; a requested step of 2 is not
-  unconditionally capped to 1. Collisions and inactive states can stop it early.
+Nine pause snapshots and the relative speed modifier remain canonical. This
+avoids restoring a stale dynamic multiplier after a pause, replay or slow-motion
+change. The independent UI default also receives the dynamic step. A shared
+fractional carry supplies exact multiples of 1/64, because character and ball
+consumers otherwise truncate rates such as 90 or 144 FPS and lose time.
 
-## Runtime evidence, 2026-11-07
+Twenty-one timeout decrements, including the raw W24 script loop, consume real
+elapsed time. Inclusive counters finish at -1 with borrow; ordinary counters
+saturate at zero. The common FrameAdvance counter is changed only for the direct
+script-wait caller. Other FrameAdvance(1) calls still yield one frame. Polling
+callbacks use their own monotonic counter timestamps, so repeated polls cannot
+charge the same frame time repeatedly or hang waiting for a new present.
+Counter restarts, process changes, target changes and discontinuities reset their
+state. The previous direct-wait SVC's lost W0 writeback is also corrected.
 
-Private Orchid MCP GPU runs, separate profiles and displays:
+## Key consumers and preserved control reads
 
-- `20261107-140503-a45a9844`: target 30, practice court rendered. Character input
-  step 2 at about 29.5 calls/s, clock speed about 0.98. Live-ball requested step
-  2 at about 29.8 calls/s, clock speed about 0.99. UI settles near 1.0.
-- `20261107-140812-0ea06842`: target 120, title/menu and practice court rendered.
-  Actual rate about 100–102 FPS. UI, character and ball input clocks about
-  0.83–0.85. The fixed target-based scaling does not keep real-time speed when
-  presentation misses its target. This is an unresolved limitation.
-- The second run stopped cleanly. The first ended while its original development
-  executable was being rebuilt; its incomplete teardown cannot establish a
-  separate game crash. Later runs use an immutable executable copy.
+Offsets refer to the unpacked, module-ID-checked NRO.
 
-Logs live under
-`~/.local/share/codex-orchid-mcp/state/runs/<run-id>/profile/data/eden/log/`.
+- UI root `11ce260`: independent default at `11ce2c4`; audit at `11ce2c8`.
+- Character producer shared-step read `10630b8`; integration reads model+390
+  at `106ed28`. Character animation also uses model+390.
+- Ball simulator shared-step read `1081b8c`; requested 1/64-frame advance at
+  `1081bd8`. Live state is NRO+`3e4b9e0`. Prediction copies intentionally use
+  a different mode and must not receive unconditional timestep overrides.
+- SIMD position integration: `LD1R {V3.4S},[X8]` at `f179c0`.
+- Canonical snapshot reads: `975198`, `9755bc`, `980c00`, `982118`, `9825fc`,
+  `982838`, `987380`, `9876f4`, `f949b8`.
+- Canonical relative-speed read: `9469b8`, before the *=1.05 write at `9469d0`.
 
-## Logging and remaining checks
+All patch words, including the dynamic read table and counter operations, are
+validated before any write. The local unpacked game file accepted the patch.
 
-The former audit of the shared scale did not measure the independent UI clock
-and must not be called a whole-game speed measurement. The replacement logs
-separate UI, character and live-ball input clocks. Ball results explicitly say
-`ball_flight_requested`; they do not prove all requested physics was executed.
-CSV also records character/live-ball positions before integration.
+## Validation and limits
 
-The planned held-stick distance comparison at 30 versus 60 FPS is unfinished:
-the next GPU boot was rejected because another Orchid MCP instance owned a GPU
-test. Do not bypass that ownership or claim the comparison passed. No position
-comparison has yet validated the final CSV additions at runtime.
+- Local GUI build passed. All23 Tennis/Wonder test cases passed (26,249 assertions).
+  Selected-line mutation score85.7%:6 killed,1 survived,15 invalid; report
+  `/home/leon/Orchid/orchid-issues/mutation/20261107-145103-1436313`.
+- Final executable software-renderer smoke test `tennis-software-probe-xj6xwcsu`
+  rendered the main menu and shut down cleanly. Target120, actual UI calls around
+  29–32/s, observed input clock0.99996–1.000032 in steady5-second windows.
+  This confirms the measured menu input clock, not full GPU gameplay.
+- Synthetic tests cover 120-target/90-actual timing, changing actual FPS,
+  30/120/144/1000 targets, slow motion, pause, restart, 1/64 carry, timeout
+  completion, inclusive borrow, and polling without new presents.
+- Software-renderer run `tennis-software-probe-skdgi5r2` (under `/tmp`) reported
+  the actual UI input clock near 1.000 while the target was 120 and actual calls
+  varied well below that, including about 12–14/s. This is not a GPU performance
+  benchmark. Long loading gaps were marked uncovered.
+- CPU software rendering reached the practice court, but its multi-second frame
+  times exceed the catch-up limit. Its character/ball samples cannot validate
+  normal gameplay speed and must not be presented as a passed gameplay check.
+- Normal GPU runs were rejected because another Orchid MCP instance owned a GPU
+  test. Do not bypass that ownership. A real 120-to-90 gameplay test, movement
+  distance comparison, prediction behavior and performance overhead remain open.
+- Discontinuities longer than max(250 ms, four target frames) reseed instead of
+  advancing the game by an unbounded loading/pause catch-up step. Emulation speed
+  overrides retain their meaning; unlimited emulation uses the nominal step.
+- Specialized timeline clocks (17999b4 and scene+ea4), unknown indirect consumers
+  and per-call damping are not proven fully independent of frame rate.
 
-Other known limits: character and ball quantization introduces error at targets
-such as 144 or 1000 FPS; script frame counters and per-call damping need further
-validation. A complete real-time correction must cover these consumers and
-preserve pause, hit stop, replay and prediction semantics.
+Logging remains enabled in the launcher. `clock_speed` is a separate observed
+input clock, not a claim that every part of the game has been validated.
+`ball_flight_requested` measures requested advance; collisions or inactive states
+can stop actual substep processing. CSV position columns contain pre-integration
+positions for character/live ball and NaN for UI.
 
-Validation: local GUI build passed; 18 Tennis/Wonder test cases, 12,646
-assertions passed; mutation check on selected patch-header lines killed 16
-mutants, survived 0, invalid 6. Mutation report:
-`/home/leon/Orchid/orchid-issues/mutation/20261107-140216-1228319`.
-The tests validate patch guards, bytes and arithmetic, not every SVC register or
-the game's physical movement.
+The branch remains a test build while normal GPU gameplay checks are unavailable;
+it is not pushed to main under the repository's requirement that unavailable
+required checks do not satisfy the release condition.

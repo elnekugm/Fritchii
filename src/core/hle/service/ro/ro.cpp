@@ -275,7 +275,7 @@ struct ProcessContext {
                 Settings::tennis_fps_nro_base.store(base_address, std::memory_order_relaxed);
                 Settings::tennis_fps_generation.fetch_add(1, std::memory_order_relaxed);
                 Settings::tennis_fps_active.store(target, std::memory_order_release);
-                LOG_INFO(Service_LDR, "Tennis FPS patch: {} FPS, simulation step {}, native interval unlocked",
+                LOG_INFO(Service_LDR, "Tennis FPS patch: target {} FPS, canonical step {}, dynamic timing on (698 readers), native interval unlocked",
                          target, FileSys::TennisSimulationStep(1.0f, target));
             } else {
                 LOG_WARNING(Service_LDR, "Tennis FPS patch skipped: modified or truncated game module");

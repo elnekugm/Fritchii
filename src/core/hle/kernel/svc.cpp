@@ -23,6 +23,7 @@
 #include "common/settings.h"
 #include "core/wonder_dynamic_fps.h"
 #include "core/tennis_clock_log.h"
+#include "core/tennis_dynamic_fps.h"
 #include "core/file_sys/tennis_fps_patch.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/svc.h"
@@ -2556,7 +2557,7 @@ void Call(Core::System& system, u32 imm) {
                      list);
         }
     }
-    if (imm >= 0xf003 && imm <= 0xf00b && process.Is64Bit() &&
+    if (imm >= 0xf003 && imm <= 0xf011 && process.Is64Bit() &&
         system.GetApplicationProcessProgramID() == Settings::TennisFpsProgramId &&
         Settings::tennis_fps_active.load(std::memory_order_acquire) != 0) {
         ThreadContext context{};
@@ -2571,6 +2572,88 @@ void Call(Core::System& system, u32 imm) {
             site -= 4;
         }
         if (!memory.IsValidVirtualAddressRange(site, 4) || memory.Read32(site) != hook) {
+            return;
+        }
+        static Core::TennisDynamicFps tennis_timing;
+        const auto generation = Settings::tennis_fps_generation.load(std::memory_order_relaxed);
+        s64 tennis_now{};
+        if (imm == 0xf00c || imm == 0xf00e || imm == 0xf008 || imm >= 0xf00f) {
+            // Loading loops can present and animate without traversing the root
+            // task. Follow actual VI presents, as Wonder's controller does.
+            tennis_now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count();
+            const u32 speed =
+                Settings::values.use_speed_limit.GetValue() ? Settings::SpeedLimit() : 0;
+            tennis_timing.Advance(generation, static_cast<u32>(presents), tennis_now, fps, speed);
+        }
+        if (imm == 0xf00c || (imm == 0xf00e && site == base + FileSys::TennisBroadcastOffset)) {
+            u32 original = 0x4d40c903;
+            if (imm == 0xf00c) {
+                const auto& loads = FileSys::TennisStepLoads;
+                const auto it = std::lower_bound(
+                    loads.begin(), loads.end(), site - base,
+                    [](const auto& load, u64 offset) { return load.offset < offset; });
+                if (it == loads.end() || it->offset != site - base)
+                    return;
+                original = it->instruction;
+            }
+            const u32 source = (original >> 5) & 31;
+            const u32 destination = original & 31;
+            const u64 address = context.r[source];
+            u32 bits = memory.Read32(address);
+            if (address == base + FileSys::TennisStepOffset) {
+                bits = std::bit_cast<u32>(
+                    tennis_timing.Scale(std::bit_cast<float>(bits), fps, generation));
+            }
+            if (imm == 0xf00e) {
+                const u64 lane = (static_cast<u64>(bits) << 32) | bits;
+                context.v[destination] = {lane, lane};
+            } else {
+                context.v[destination] = {bits, 0};
+            }
+            context.pc = site + 4;
+            arm->SetContext(context);
+            return;
+        }
+        if (imm == 0xf00f || (imm == 0xf010 && site == base + FileSys::TennisRawCounterOffset) ||
+            (imm == 0xf011 && site == base + FileSys::TennisRawCompareOffset)) {
+            if (imm == 0xf00f) {
+                const auto& counters = FileSys::TennisCounters;
+                const auto it =
+                    std::find_if(counters.begin(), counters.end(), [&](const auto& counter) {
+                        return site == base + counter.offset;
+                    });
+                if (it == counters.end())
+                    return;
+                const u32 reg = it->instruction & 31;
+                const u32 before = static_cast<u32>(context.r[reg]);
+                const u32 after =
+                    tennis_timing.Consume(GetCurrentThread(kernel).GetThreadId(), reg, before,
+                                          it->inclusive, fps, generation, tennis_now);
+                context.r[reg] = after;
+                context.pstate = (context.pstate & ~0xf0000000U) |
+                                 FileSys::TennisSubtractFlags(before, before - after);
+            } else {
+                // Only the direct script wait owns this counter. Other users of
+                // FrameAdvance(1) must still yield exactly one frame.
+                const bool direct = (memory.Read64(context.fp + 8) & 0x0000ffffffffffffULL) ==
+                                    base + FileSys::TennisDirectWaitOffset + 8;
+                if (imm == 0xf010) {
+                    const u32 before = static_cast<u32>(context.r[19]);
+                    context.r[20] =
+                        direct ? tennis_timing.Consume(GetCurrentThread(kernel).GetThreadId(), 20,
+                                                       before, false, fps, generation, tennis_now)
+                               : before - 1;
+                } else {
+                    const u32 compared =
+                        direct ? (context.r[20] == 0 ? 1 : 2) : static_cast<u32>(context.r[19]);
+                    context.pstate =
+                        (context.pstate & ~0xf0000000U) | FileSys::TennisCompareOneFlags(compared);
+                }
+            }
+            context.pc = site + 4;
+            arm->SetContext(context);
             return;
         }
         if ((imm == 0xf006 && site == base + FileSys::TennisFrameWaitOffset) ||
@@ -2594,7 +2677,9 @@ void Call(Core::System& system, u32 imm) {
             }
             if (imm == 0xf007) {
                 // MOV W0,W21 before a distinct raw N-frame script wait.
-                args[0] = ticks;
+                context.r[0] = ticks;
+                context.pc = site + 4;
+                arm->SetContext(context);
                 return;
             }
             context.r[24] = ticks;
@@ -2624,7 +2709,9 @@ void Call(Core::System& system, u32 imm) {
         if (imm == 0xf008 && site == base + FileSys::TennisUiStepOffset) {
             // The default UI path supplies 1 independently of the optional game-speed
             // branch. Adjust this real animation delta, leaving that branch untouched.
-            context.v[8] = {std::bit_cast<u32>(FileSys::TennisSimulationStep(1.0f, fps)), 0};
+            context.v[8] = {std::bit_cast<u32>(tennis_timing.Scale(
+                                FileSys::TennisSimulationStep(1.0f, fps), fps, generation)),
+                            0};
             context.pc = site + 4;
             arm->SetContext(context);
             return;
@@ -2665,8 +2752,7 @@ void Call(Core::System& system, u32 imm) {
                 context.v[1] = {bits, 0};
                 step = std::bit_cast<float>(bits);
             }
-            if (observe && imm != 0xf009 &&
-                memory.IsValidVirtualAddressRange(object + 0x10, 12)) {
+            if (observe && imm != 0xf009 && memory.IsValidVirtualAddressRange(object + 0x10, 12)) {
                 for (size_t axis = 0; axis < position.size(); ++axis) {
                     position[axis] = std::bit_cast<float>(memory.Read32(object + 0x10 + axis * 4));
                 }

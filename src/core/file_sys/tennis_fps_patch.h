@@ -13,6 +13,14 @@ namespace FileSys {
 inline constexpr std::array<u8, 32> TennisFpsModuleId{0x25, 0x0a, 0x51, 0x0a, 0x93, 0x41, 0x29,
                                                       0xcb, 0x38, 0xe9, 0x30, 0xc9, 0xa2, 0x90,
                                                       0x82, 0xb6, 0x97, 0xfd, 0x76, 0xc4};
+inline constexpr u32 TennisReadHook = 0xd4000001U | (0xf00cU << 5);
+inline constexpr u32 TennisBroadcastOffset = 0xf179c0;
+inline constexpr u32 TennisBroadcastHook = 0xd4000001U | (0xf00eU << 5);
+inline constexpr u32 TennisCounterHook = 0xd4000001U | (0xf00fU << 5);
+inline constexpr u32 TennisRawCounterOffset = 0x11fa35c;
+inline constexpr u32 TennisRawCompareOffset = 0x11fa37c;
+inline constexpr u32 TennisRawCounterHook = 0xd4000001U | (0xf010U << 5);
+inline constexpr u32 TennisRawCompareHook = 0xd4000001U | (0xf011U << 5);
 inline constexpr u32 TennisStepOffset = 0x17995d4;
 inline constexpr u32 TennisDirectWaitOffset = 0x95d880;
 inline constexpr u32 TennisDirectWaitHook = 0xd4000001U | (0xf007U << 5);
@@ -34,6 +42,28 @@ struct TennisStepStore {
     u32 offset;
     u32 instruction;
 };
+struct TennisCounter {
+    u32 offset;
+    u32 instruction;
+    bool inclusive{};
+};
+inline constexpr std::array TennisCounters{
+    TennisCounter{0x947810, 0x71000673},       TennisCounter{0x95757c, 0x710006b5},
+    TennisCounter{0x9575c0, 0x710006b5},       TennisCounter{0x957a58, 0x710006b5},
+    TennisCounter{0x95a41c, 0x710006b5},       TennisCounter{0x95a454, 0x710006b5},
+    TennisCounter{0x96457c, 0x710006d6},       TennisCounter{0x9646d4, 0x710006d6},
+    TennisCounter{0x9655c4, 0x710006d6},       TennisCounter{0x95c530, 0x710006b5, true},
+    TennisCounter{0x965bf8, 0x710006d6, true}, TennisCounter{0x9616c4, 0x710006d6},
+    TennisCounter{0x961c98, 0x710006d6},       TennisCounter{0x962c9c, 0x710006d6},
+    TennisCounter{0x962f38, 0x710006d6},       TennisCounter{0x9631c0, 0x710006d6},
+    TennisCounter{0x964d64, 0x710006d6},       TennisCounter{0x965024, 0x710006d6},
+    TennisCounter{0x965798, 0x710006d6},       TennisCounter{0x965a98, 0x710006d6},
+    TennisCounter{0x966518, 0x71000718},
+};
+inline constexpr std::array TennisStepLoads{
+#include "core/file_sys/tennis_step_loads.inc"
+};
+
 // Fresh nominal speed setters only. Pause/restore writes and relative changes keep
 // working on the already scaled value; hooking them would scale the step twice.
 inline constexpr std::array TennisStepStores{
@@ -97,6 +127,13 @@ inline u32 TennisFrameDelay(u32 frames, u32 fps, u32& remainder) {
     return static_cast<u32>(std::min<u64>(ticks / 60, 0x7fffffff));
 }
 
+inline constexpr u32 TennisSubtractFlags(u32 left, u32 right) {
+    const u32 result = left - right;
+    return (result & 0x80000000U) | (result == 0 ? 0x40000000U : 0) |
+           (left >= right ? 0x20000000U : 0) |
+           ((((left ^ right) & (left ^ result)) >> 3) & 0x10000000U);
+}
+
 inline constexpr u32 TennisCompareOneFlags(u32 value) {
     const u32 result = value - 1;
     return (result & 0x80000000U) | (result == 0 ? 0x40000000U : 0U) |
@@ -114,15 +151,26 @@ inline bool ApplyTennisFpsPatch(std::span<u8> nro, std::span<const u8> module_id
         std::memcpy(&word, nro.data() + offset, sizeof(word));
         return word;
     };
-    if (read(0x25524) != 0x2a0203f5 || read(0x11f76b4) != 0x1a9f17e8 ||
-        read(TennisStepOffset) != 0x3f800000 || read(TennisDirectWaitOffset) != 0x2a1503e0 ||
-        read(TennisFrameWaitOffset) != 0x7100071f || read(TennisUiStepOffset) != 0x1e2e1008 ||
-        read(TennisUiAuditOffset) != 0xf9412a68 || read(TennisBallStepOffset) != 0x91004268 ||
-        read(TennisCharacterStepOffset) != 0xbd439101 || read(TennisTimelineOffset) != 0xbd000320) {
+    if (read(TennisRawCounterOffset) != 0x51000674 || read(TennisRawCompareOffset) != 0x7100067f ||
+        read(TennisBroadcastOffset) != 0x4d40c903 || read(0x25524) != 0x2a0203f5 ||
+        read(0x11f76b4) != 0x1a9f17e8 || read(TennisStepOffset) != 0x3f800000 ||
+        read(TennisDirectWaitOffset) != 0x2a1503e0 || read(TennisFrameWaitOffset) != 0x7100071f ||
+        read(TennisUiStepOffset) != 0x1e2e1008 || read(TennisUiAuditOffset) != 0xf9412a68 ||
+        read(TennisBallStepOffset) != 0x91004268 || read(TennisCharacterStepOffset) != 0xbd439101 ||
+        read(TennisTimelineOffset) != 0xbd000320) {
         return false;
     }
     for (const auto& store : TennisStepStores) {
         if (read(store.offset) != store.instruction) {
+            return false;
+        }
+    }
+    for (const auto& counter : TennisCounters) {
+        if (read(counter.offset) != counter.instruction)
+            return false;
+    }
+    for (const auto& load : TennisStepLoads) {
+        if (read(load.offset) != load.instruction) {
             return false;
         }
     }
@@ -134,6 +182,14 @@ inline bool ApplyTennisFpsPatch(std::span<u8> nro, std::span<const u8> module_id
     const auto write = [&](u32 offset, u32 word) {
         std::memcpy(nro.data() + offset, &word, sizeof(word));
     };
+    write(TennisRawCounterOffset, TennisRawCounterHook);
+    write(TennisRawCompareOffset, TennisRawCompareHook);
+    for (const auto& counter : TennisCounters)
+        write(counter.offset, TennisCounterHook);
+    write(TennisBroadcastOffset, TennisBroadcastHook);
+    for (const auto& load : TennisStepLoads) {
+        write(load.offset, TennisReadHook);
+    }
     // Disable NVN's native present interval and its focused half-rate render branch.
     // The emulator's explicit FPS target now owns pacing, paired with the time step.
     write(0x25524, 0x52800015);   // mov w21, #0

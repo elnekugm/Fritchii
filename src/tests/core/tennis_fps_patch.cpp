@@ -8,6 +8,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include "common/game_fps.h"
 #include "core/file_sys/tennis_fps_patch.h"
+#include "core/tennis_dynamic_fps.h"
 #include "core/tennis_speed_audit.h"
 
 namespace {
@@ -47,6 +48,17 @@ std::vector<u8> CapturedModule() {
     for (const auto& wait : CapturedWaits) {
         std::memcpy(module.data() + wait[0], &wait[1], sizeof(u32));
     }
+    for (const auto& load : FileSys::TennisStepLoads) {
+        std::memcpy(module.data() + load.offset, &load.instruction, sizeof(u32));
+    }
+    for (const auto& counter : FileSys::TennisCounters) {
+        std::memcpy(module.data() + counter.offset, &counter.instruction, sizeof(u32));
+    }
+    constexpr u32 raw_sub = 0x51000674, raw_cmp = 0x7100067f;
+    std::memcpy(module.data() + 0x11fa35c, &raw_sub, sizeof(u32));
+    std::memcpy(module.data() + 0x11fa37c, &raw_cmp, sizeof(u32));
+    constexpr u32 broadcast = 0x4d40c903;
+    std::memcpy(module.data() + 0xf179c0, &broadcast, sizeof(u32));
     // The timeline STR to the shared step remains native after S0 was scaled upstream.
     constexpr u32 native_store = 0xbd000360;
     std::memcpy(module.data() + 0x10588e8, &native_store, sizeof(u32));
@@ -211,4 +223,114 @@ TEST_CASE("Integer script waits retain real duration at fractional and high FPS"
     REQUIRE(FileSys::TennisCompareOneFlags(0x80000000U) == 0x30000000U);
     u32 remainder = 0;
     REQUIRE(FileSys::TennisFrameDelay(0x7fffffff, 1000, remainder) == 0x7fffffffU);
+}
+
+TEST_CASE("Tennis dynamic input clocks keep real time when120 drops to90", "[tennis_fps]") {
+    Core::TennisDynamicFps timing;
+    timing.Advance(1, 0, 0, 120, 100);
+    timing.Scale(0.5f, 120, 1);
+    double game_frames{};
+    for (u32 frame = 1; frame <= 900; ++frame) {
+        timing.Advance(1, frame, s64(frame) * 1'000'000'000 / 90, 120, 100);
+        const float step = timing.Scale(0.5f, 120, 1);
+        REQUIRE(step == timing.Scale(0.5f, 120, 1)); // many readers, one phase advance
+        game_frames += std::trunc(step * 64) / 64;
+    }
+    REQUIRE(std::abs(game_frames / 60 - 10) <= 1.0 / 3840);
+}
+
+TEST_CASE("Tennis changing FPS preserves pause control and slow motion", "[tennis_fps]") {
+    for (const u32 target : {30U, 120U, 144U, 1000U}) {
+        Core::TennisDynamicFps timing;
+        timing.Advance(7, 0, 0, target, 100);
+        const float canonical = FileSys::TennisSimulationStep(1, target);
+        timing.Scale(canonical, target, 7);
+        timing.Scale(canonical * 0.5f, target, 7);
+        double normal{}, slow{};
+        s64 now{};
+        for (u32 frame = 1; frame <= 900; ++frame) {
+            const u32 actual = frame <= 300 ? target : frame <= 600 ? 90 : 48;
+            now += 1'000'000'000 / actual;
+            timing.Advance(7, frame, now, target, 100);
+            normal += timing.Scale(canonical, target, 7) / 60;
+            REQUIRE(timing.Scale(0, target, 7) == 0);
+            slow += timing.Scale(canonical * 0.5f, target, 7) / 60;
+        }
+        REQUIRE(std::abs(normal - now / 1e9) < 1.0 / 3840);
+        REQUIRE(std::abs(slow - now / 2e9) < 1.0 / 3840);
+        // Long stop and process/target changes do not cause a catch-up jump.
+        timing.Advance(7, 901, now + 10'000'000'000LL, target, 100);
+        REQUIRE(timing.Scale(canonical, target, 7) <= canonical + 1.0f / 64);
+        timing.Advance(8, 0, 0, 60, 100);
+        REQUIRE(timing.Scale(1, 60, 8) == 1);
+        REQUIRE(timing.Scale(canonical, target, 7) == canonical);
+    }
+}
+
+TEST_CASE("Tennis dynamic patch guards its read sites and preserves canonical saves",
+          "[tennis_fps]") {
+    auto module = CapturedModule();
+    const auto original = module;
+    REQUIRE(FileSys::ApplyTennisFpsPatch(module, ModuleId, 120));
+    REQUIRE(ReadWord(module, 0xf179c0) == FileSys::TennisBroadcastHook);
+    for (const auto& load : FileSys::TennisStepLoads) {
+        REQUIRE(ReadWord(module, load.offset) == FileSys::TennisReadHook);
+        REQUIRE((load.instruction & 0xfffffc00) == 0xbd400000);
+        REQUIRE(((load.instruction >> 5) & 31) < 29);
+        for (const u32 saved : {0x9469b8U, 0x975198U, 0x9755bcU, 0x980c00U, 0x982118U, 0x9825fcU,
+                                0x982838U, 0x987380U, 0x9876f4U, 0xf949b8U}) {
+            REQUIRE(load.offset != saved);
+        }
+    }
+    for (const u32 offset :
+         {FileSys::TennisStepLoads.front().offset, FileSys::TennisStepLoads[348].offset,
+          FileSys::TennisStepLoads.back().offset, FileSys::TennisBroadcastOffset}) {
+        module = original;
+        module[offset] ^= 1;
+        const auto changed = module;
+        REQUIRE_FALSE(FileSys::ApplyTennisFpsPatch(module, ModuleId, 120));
+        REQUIRE(module == changed);
+    }
+}
+
+TEST_CASE("Tennis script counters consume wall time across an FPS drop", "[tennis_fps]") {
+    for (const bool inclusive : {false, true}) {
+        Core::TennisDynamicFps timing;
+        timing.Advance(1, 0, 0, 120, 100);
+        u32 remaining = inclusive ? 599 : 600;
+        s64 now{};
+        u32 frame{};
+        for (; frame < 1000; ++frame) {
+            now += frame < 120 ? 1'000'000'000 / 120 : 1'000'000'000 / 90;
+            timing.Advance(1, frame + 1, now, 120, 100);
+            const u32 before = remaining;
+            remaining = timing.Consume(17, 22, remaining, inclusive, 120, 1, now);
+            const u32 flags = FileSys::TennisSubtractFlags(before, before - remaining);
+            if (inclusive ? !(flags & 0x20000000U) : (flags & 0x40000000U))
+                break;
+        }
+        REQUIRE(frame < 1000);
+        REQUIRE(std::abs(now / 1e9 - 5) < 1.0 / 90);
+        REQUIRE(remaining == (inclusive ? 0xffffffffU : 0));
+    }
+    REQUIRE(FileSys::TennisSubtractFlags(0x80000000U, 1) == 0x30000000U);
+    REQUIRE(FileSys::TennisSubtractFlags(0, 1) == 0x80000000U);
+}
+
+TEST_CASE("Tennis counter polling cannot reuse one frame's elapsed time", "[tennis_fps]") {
+    Core::TennisDynamicFps timing;
+    timing.Advance(1, 0, 0, 120, 100);
+    timing.Advance(1, 1, 11'111'111, 120, 100);
+    u32 remaining = timing.Consume(7, 21, 600, false, 120, 1, 11'111'111);
+    const u32 after_frame = remaining;
+    for (int poll = 0; poll < 450; ++poll) {
+        remaining = timing.Consume(7, 21, remaining, false, 120, 1, 11'111'111);
+    }
+    REQUIRE(remaining == after_frame);
+    for (s64 tick = 1; tick <= 5000 && remaining != 0; ++tick) {
+        // A callback may poll without submitting another present; real time still passes.
+        remaining = timing.Consume(7, 21, remaining, false, 120, 1, 11'111'111 + tick * 1'000'000);
+    }
+    REQUIRE(remaining == 0);
+    REQUIRE(timing.Consume(7, 21, 600, false, 120, 1, 100'000'000) >= 598);
 }
