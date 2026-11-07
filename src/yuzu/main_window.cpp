@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <chrono>
+#include "common/game_fps.h"
+#include "core/tennis_speed_meter.h"
+
 // Static Qt on macOS doesn't use Vulkan
 // Other platforms do, and thus have conflicting VulkanMemoryAllocator symbols
 #include "core/launch_params.h"
@@ -5578,7 +5582,22 @@ void MainWindow::UpdateStatusBar() {
     res_scale_label->setText(
         tr("Scale: %1x", "%1 is the resolution scaling factor").arg(res_scale));
 
-    if (Settings::SpeedLimitEnabled()) {
+    const bool tennis_speed = QtCommon::system->GetApplicationProcessProgramID() ==
+                                  Settings::TennisFpsProgramId &&
+                              Settings::tennis_fps_active.load(std::memory_order_relaxed) != 0;
+    if (tennis_speed) {
+        const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        const auto measured = Core::g_tennis_speed_meter.Read(
+            Settings::tennis_fps_generation.load(std::memory_order_relaxed), now);
+        emu_speed_label->setText(measured ? tr("Game speed: %1%")
+                                                   .arg(*measured * 100.0, 0, 'f', 0)
+                                              : tr("Game speed: —"));
+        emu_speed_label->setToolTip(tr("Measured character simulation time per real second; "
+                                      "menu animation time when no character is active. "
+                                      "100% means normal game speed. No value is shown while "
+                                      "the measurement is missing or interrupted."));
+    } else if (Settings::values.use_speed_limit.GetValue()) {
         emu_speed_label->setText(tr("Speed: %1% / %2%")
                                      .arg(results.emulation_speed * 100.0, 0, 'f', 0)
                                      .arg(Settings::SpeedLimit()));
@@ -5586,6 +5605,10 @@ void MainWindow::UpdateStatusBar() {
         emu_speed_label->setText(tr("Speed: %1%").arg(results.emulation_speed * 100.0, 0, 'f', 0));
     }
 
+    if (!tennis_speed) {
+        emu_speed_label->setToolTip(tr("Current emulation speed. Values higher or lower than 100% "
+                                      "indicate emulation is running faster or slower than a Switch."));
+    }
     QString fpsText = tr("Game: %1 FPS").arg(std::round(results.average_game_fps), 0, 'f', 0);
     if (!m_fpsSuffix.isEmpty())
         fpsText = fpsText % QStringLiteral(" (%1)").arg(m_fpsSuffix);

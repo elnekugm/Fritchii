@@ -87,3 +87,25 @@ positions for character/live ball and NaN for UI.
 The branch remains a test build while normal GPU gameplay checks are unavailable;
 it is not pushed to main under the repository's requirement that unavailable
 required checks do not satisfy the release condition.
+
+## Status display and AI report
+
+The Tennis status label now reads a separate `TennisSpeedMeter` from actual
+character integration observations, falling back to a UI animation stream in
+menus. It does not use the FPS target, emulator-clock percentage or the ball's
+requested prediction advance. It works without CSV logging, ignores other
+objects instead of adding their clocks, averages over half a second and shows
+no value for interrupted/stale measurements. Other games retain emulator speed.
+A private software-rendered title-screen test displayed Game speed100% at24FPS,
+matching its input audit near1.0. Tests cover a real75% character clock overriding
+an otherwise100% menu clock, pause, missing data and process generation changes.
+
+The user reports that only the AI visibly swings but misses balls. This may be
+a dynamic-patch regression, but is not yet causally confirmed. Prediction mode1
+uses fixed nominal future steps; live integration uses dynamic steps. Reachability
+path106b660→1071580 and106b7b8–106b7d4 (predicted frames added to ball time) need
+further checking. The integer actor+78 update truncates fractional steps at
+106a150–106a158, but the known hit gate only checks age>=3; this does not establish
+why shots would miss throughout a match. No direct AI use of native3ece3b4 was
+found among its35GOT and9direct references. No speculative AI correction is
+included in the speed-display build.

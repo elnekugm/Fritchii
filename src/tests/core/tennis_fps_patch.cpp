@@ -9,6 +9,7 @@
 #include "common/game_fps.h"
 #include "core/file_sys/tennis_fps_patch.h"
 #include "core/tennis_dynamic_fps.h"
+#include "core/tennis_speed_meter.h"
 #include "core/tennis_speed_audit.h"
 
 namespace {
@@ -333,4 +334,49 @@ TEST_CASE("Tennis counter polling cannot reuse one frame's elapsed time", "[tenn
     }
     REQUIRE(remaining == 0);
     REQUIRE(timing.Consume(7, 21, 600, false, 120, 1, 100'000'000) >= 598);
+}
+
+
+TEST_CASE("Tennis status meter measures consumer speed rather than target speed", "[tennis_fps]") {
+    Core::TennisSpeedMeter meter;
+    for (u32 frame = 0; frame <= 90; ++frame) {
+        const s64 now = s64(frame) * 1'000'000'000 / 90;
+        meter.Observe(1, false, 100, now, 2.0f / 3, 120);
+        meter.Observe(1, false, 200, now, 2.0f / 3, 120); // no double counting
+    }
+    REQUIRE(meter.Read(1, 1'000'000'000).has_value());
+    REQUIRE(std::abs(*meter.Read(1, 1'000'000'000) - 1) < 0.00001);
+    for (u32 frame = 0; frame <= 90; ++frame) {
+        const s64 now = 1'000'000'000 + s64(frame) * 1'000'000'000 / 90;
+        meter.Observe(1, false, 100, now, 2.0f / 3, 120);
+        meter.Observe(1, true, 300, now, 0.5f, 120);
+    }
+    REQUIRE(std::abs(*meter.Read(1, 2'000'000'000) - 0.75) < 0.00001);
+    REQUIRE_FALSE(meter.Read(2, 2'000'000'000));
+    REQUIRE_FALSE(meter.Read(1, 4'000'000'000));
+    for (u32 frame = 1; frame <= 90; ++frame) {
+        meter.Observe(1, true, 300, 2'000'000'000 + s64(frame)*1'000'000'000/90, 0, 120);
+    }
+    REQUIRE(*meter.Read(1, 3'000'000'000) == 0);
+    meter.Observe(2, true, 300, 3'000'000'001, 1, 60);
+    REQUIRE_FALSE(meter.Read(1, 3'000'000'001));
+    REQUIRE_FALSE(meter.Read(2, 3'000'000'001));
+}
+
+TEST_CASE("Tennis status keeps an active object and replaces a stale scene object", "[tennis_fps]") {
+    Core::TennisSpeedMeter meter;
+    for (u32 frame = 0; frame <= 60; ++frame) {
+        meter.Observe(1, false, 10, s64(frame)*10'000'000, 0.6f, 120);
+    }
+    REQUIRE(meter.Read(1, 600'000'000));
+    meter.Observe(1, false, 20, 610'000'000, 0, 120);
+    REQUIRE(meter.Read(1, 620'000'000));
+    REQUIRE(std::abs(*meter.Read(1, 620'000'000) - 1) < 0.00001);
+    meter.Observe(1, false, 20, 1'200'000'000, 0.3f, 120);
+    REQUIRE_FALSE(meter.Read(1, 1'200'000'000));
+    for (u32 frame = 1; frame <= 60; ++frame) {
+        meter.Observe(1, false, 20, 1'200'000'000+s64(frame)*10'000'000, 0.3f, 120);
+    }
+    REQUIRE(meter.Read(1, 1'800'000'000));
+    REQUIRE(std::abs(*meter.Read(1, 1'800'000'000) - 0.5) < 0.00001);
 }
