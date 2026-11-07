@@ -7,8 +7,8 @@
 #include "common/common_types.h"
 
 namespace Core {
-// Readback audit: step is the game's actual shared time-step field, not the
-// selected target. One observation per native simulation tick, including pauses.
+// Consumer audit: step is the delta consumed by the observed animation/physics
+// update. One observation per call; this does not establish every other clock.
 class TennisSpeedAudit {
 public:
     bool Observe(u32 frame, s64 now_ns, float step, u32 target) {

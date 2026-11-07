@@ -10,17 +10,23 @@
 
 namespace FileSys {
 // The unpacked game NRO (nxboot's main NSO contains only its bootstrap).
-inline constexpr std::array<u8, 32> TennisFpsModuleId{
-    0x25, 0x0a, 0x51, 0x0a, 0x93, 0x41, 0x29, 0xcb, 0x38, 0xe9, 0x30, 0xc9,
-    0xa2, 0x90, 0x82, 0xb6, 0x97, 0xfd, 0x76, 0xc4};
+inline constexpr std::array<u8, 32> TennisFpsModuleId{0x25, 0x0a, 0x51, 0x0a, 0x93, 0x41, 0x29,
+                                                      0xcb, 0x38, 0xe9, 0x30, 0xc9, 0xa2, 0x90,
+                                                      0x82, 0xb6, 0x97, 0xfd, 0x76, 0xc4};
 inline constexpr u32 TennisStepOffset = 0x17995d4;
 inline constexpr u32 TennisDirectWaitOffset = 0x95d880;
 inline constexpr u32 TennisDirectWaitHook = 0xd4000001U | (0xf007U << 5);
 inline constexpr u32 TennisFrameWaitOffset = 0x9664f4;
 inline constexpr u32 TennisFrameWaitHook = 0xd4000001U | (0xf006U << 5);
-inline constexpr u32 TennisAuditOffset = 0x11f7664;
+inline constexpr u32 TennisUiStepOffset = 0x11ce2c4;
+inline constexpr u32 TennisUiAuditOffset = 0x11ce2c8;
+inline constexpr u32 TennisCharacterStepOffset = 0x106ed28;
+inline constexpr u32 TennisUiStepHook = 0xd4000001U | (0xf008U << 5);
+inline constexpr u32 TennisUiAuditHook = 0xd4000001U | (0xf009U << 5);
+inline constexpr u32 TennisCharacterStepHook = 0xd4000001U | (0xf00aU << 5);
+inline constexpr u32 TennisBallStepOffset = 0x1081bd8;
+inline constexpr u32 TennisBallStepHook = 0xd4000001U | (0xf00bU << 5);
 inline constexpr u32 TennisTimelineOffset = 0x10588e0;
-inline constexpr u32 TennisAuditHook = 0xd4000001U | (0xf004U << 5);
 inline constexpr u32 TennisTimelineHook = 0xd4000001U | (0xf005U << 5);
 inline constexpr u32 TennisFpsHook = 0xd4000001U | (0xf003U << 5);
 
@@ -110,8 +116,9 @@ inline bool ApplyTennisFpsPatch(std::span<u8> nro, std::span<const u8> module_id
     };
     if (read(0x25524) != 0x2a0203f5 || read(0x11f76b4) != 0x1a9f17e8 ||
         read(TennisStepOffset) != 0x3f800000 || read(TennisDirectWaitOffset) != 0x2a1503e0 ||
-        read(TennisFrameWaitOffset) != 0x7100071f ||
-        read(TennisAuditOffset) != 0x390002a8 || read(TennisTimelineOffset) != 0xbd000320) {
+        read(TennisFrameWaitOffset) != 0x7100071f || read(TennisUiStepOffset) != 0x1e2e1008 ||
+        read(TennisUiAuditOffset) != 0xf9412a68 || read(TennisBallStepOffset) != 0x91004268 ||
+        read(TennisCharacterStepOffset) != 0xbd439101 || read(TennisTimelineOffset) != 0xbd000320) {
         return false;
     }
     for (const auto& store : TennisStepStores) {
@@ -137,7 +144,10 @@ inline bool ApplyTennisFpsPatch(std::span<u8> nro, std::span<const u8> module_id
     }
     write(TennisDirectWaitOffset, TennisDirectWaitHook);
     write(TennisFrameWaitOffset, TennisFrameWaitHook);
-    write(TennisAuditOffset, TennisAuditHook);
+    write(TennisUiStepOffset, TennisUiStepHook);
+    write(TennisUiAuditOffset, TennisUiAuditHook);
+    write(TennisCharacterStepOffset, TennisCharacterStepHook);
+    write(TennisBallStepOffset, TennisBallStepHook);
     write(TennisTimelineOffset, TennisTimelineHook);
     write(TennisStepOffset, std::bit_cast<u32>(TennisSimulationStep(1.0f, fps)));
     for (const auto& store : TennisStepStores) {

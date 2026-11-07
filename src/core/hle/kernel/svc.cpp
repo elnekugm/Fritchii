@@ -22,7 +22,7 @@
 #include "common/fs/path_util.h"
 #include "common/settings.h"
 #include "core/wonder_dynamic_fps.h"
-#include "core/tennis_speed_audit.h"
+#include "core/tennis_clock_log.h"
 #include "core/file_sys/tennis_fps_patch.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/svc.h"
@@ -2546,15 +2546,17 @@ void Call(Core::System& system, u32 imm) {
                 const u32 handle = process.GetMemory().Read32(GetArg64(args, 1) + 4 * i);
                 KScopedAutoObject event =
                     process.GetHandleTable().GetObject<KReadableEvent>(kernel, handle);
-                list += fmt::format(" {:#x}{}", handle,
-                                    event.IsNotNull()
-                                        ? "=" + Service::KernelHelpers::DebugEventName(event.GetPointerUnsafe())
-                                        : std::string{});
+                list += fmt::format(
+                    " {:#x}{}", handle,
+                    event.IsNotNull()
+                        ? "=" + Service::KernelHelpers::DebugEventName(event.GetPointerUnsafe())
+                        : std::string{});
             }
-            LOG_INFO(Kernel_SVC, "svc 0x18 t{} waits on{}", GetCurrentThread(kernel).GetThreadId(), list);
+            LOG_INFO(Kernel_SVC, "svc 0x18 t{} waits on{}", GetCurrentThread(kernel).GetThreadId(),
+                     list);
         }
     }
-    if (imm >= 0xf003 && imm <= 0xf007 && process.Is64Bit() &&
+    if (imm >= 0xf003 && imm <= 0xf00b && process.Is64Bit() &&
         system.GetApplicationProcessProgramID() == Settings::TennisFpsProgramId &&
         Settings::tennis_fps_active.load(std::memory_order_acquire) != 0) {
         ThreadContext context{};
@@ -2580,13 +2582,15 @@ void Call(Core::System& system, u32 imm) {
                 static std::unordered_map<u64, u32> remainders;
                 static u64 generation{};
                 std::scoped_lock lock{wait_mutex};
-                const auto current = Settings::tennis_fps_generation.load(std::memory_order_relaxed);
+                const auto current =
+                    Settings::tennis_fps_generation.load(std::memory_order_relaxed);
                 if (generation != current) {
                     remainders.clear();
                     generation = current;
                 }
                 const u64 thread = GetCurrentThread(kernel).GetThreadId();
-                ticks = FileSys::TennisFrameDelay(static_cast<u32>(nominal), fps, remainders[thread]);
+                ticks =
+                    FileSys::TennisFrameDelay(static_cast<u32>(nominal), fps, remainders[thread]);
             }
             if (imm == 0xf007) {
                 // MOV W0,W21 before a distinct raw N-frame script wait.
@@ -2617,61 +2621,71 @@ void Call(Core::System& system, u32 imm) {
             arm->SetContext(context);
             return;
         }
-        if (imm == 0xf004 && site == base + FileSys::TennisAuditOffset) {
-            // Preserve the native render-pass flag. This hook observes game time only.
-            if (!memory.IsValidVirtualAddressRange(context.r[21], 1)) {
-                return;
-            }
-            memory.Write8(context.r[21], static_cast<u8>(context.r[8]));
+        if (imm == 0xf008 && site == base + FileSys::TennisUiStepOffset) {
+            // The default UI path supplies 1 independently of the optional game-speed
+            // branch. Adjust this real animation delta, leaving that branch untouched.
+            context.v[8] = {std::bit_cast<u32>(FileSys::TennisSimulationStep(1.0f, fps)), 0};
+            context.pc = site + 4;
+            arm->SetContext(context);
+            return;
+        }
+        if ((imm == 0xf009 && site == base + FileSys::TennisUiAuditOffset) ||
+            (imm == 0xf00a && site == base + FileSys::TennisCharacterStepOffset) ||
+            (imm == 0xf00b && site == base + FileSys::TennisBallStepOffset)) {
             static const bool enabled = [] {
                 const char* value = std::getenv("EDEN_TENNIS_SPEED_AUDIT");
                 return value && std::strcmp(value, "1") == 0;
             }();
-            if (!enabled || !memory.IsValidVirtualAddressRange(base + 0x3ece3b4, sizeof(u32)) ||
-                !memory.IsValidVirtualAddressRange(base + FileSys::TennisStepOffset, sizeof(u32))) {
-                return;
+            float step{};
+            std::array<float, 3> position;
+            position.fill(std::numeric_limits<float>::quiet_NaN());
+            u64 object{};
+            bool observe = enabled;
+            if (imm == 0xf009) {
+                // Original LDR X8,[X19,#0x250], after UI's actual step was selected.
+                object = context.r[19];
+                if (!memory.IsValidVirtualAddressRange(object + 0x248, 0x10))
+                    return;
+                context.r[8] = memory.Read64(object + 0x250);
+                observe &= context.r[8] != memory.Read64(object + 0x248);
+                step = std::bit_cast<float>(static_cast<u32>(context.v[8][0]));
+            } else if (imm == 0xf00b) {
+                // Original ADD X8,X19,#0x10. Log only the live ball; copied
+                // prediction states intentionally use a different clock.
+                object = context.r[19];
+                context.r[8] = object + 0x10;
+                step = static_cast<float>(static_cast<s32>(context.r[23])) / 64.0f;
+                observe &= object == base + 0x3e4b9e0;
+            } else {
+                // Original LDR S1,[X8,#0x390], consumed by position += velocity*dt.
+                object = context.r[19];
+                if (!memory.IsValidVirtualAddressRange(context.r[8] + 0x390, sizeof(u32)))
+                    return;
+                const u32 bits = memory.Read32(context.r[8] + 0x390);
+                context.v[1] = {bits, 0};
+                step = std::bit_cast<float>(bits);
             }
-            static std::mutex audit_mutex;
-            static Core::TennisSpeedAudit audit;
-            static std::ofstream csv;
-            static u64 generation{};
-            std::scoped_lock lock{audit_mutex};
-            const auto current = Settings::tennis_fps_generation.load(std::memory_order_relaxed);
-            const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
-            if (generation != current) {
-                audit = {};
-                csv.close();
-                csv.clear();
-                const auto path = Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) /
-                                  fmt::format("tennis-speed-{}.csv", now);
-                csv.open(path);
-                if (csv) {
-                    csv.precision(9);
-                    csv << "frame,present,host_ns,elapsed_ns,simulation_step,game_speed,covered,target_fps\n";
-                    LOG_INFO(Kernel_SVC, "Tennis speed CSV: {}", path.string());
-                } else {
-                    LOG_WARNING(Kernel_SVC, "Could not open Tennis speed CSV: {}", path.string());
+            if (observe && imm != 0xf009 &&
+                memory.IsValidVirtualAddressRange(object + 0x10, 12)) {
+                for (size_t axis = 0; axis < position.size(); ++axis) {
+                    position[axis] = std::bit_cast<float>(memory.Read32(object + 0x10 + axis * 4));
                 }
-                generation = current;
             }
-            const u32 frame = memory.Read32(base + 0x3ece3b4);
-            const float step = std::bit_cast<float>(memory.Read32(base + FileSys::TennisStepOffset));
-            const bool report = audit.Observe(frame, now, step, fps);
-            if (csv) {
-                csv << frame << ',' << presents << ',' << now << ',' << audit.last_elapsed << ','
-                    << step << ',' << audit.sample_speed << ',' << audit.covered << ',' << fps << '\n';
-            }
-            if (report) {
-                LOG_INFO(Kernel_SVC,
-                         "Tennis speed audit: game_speed={:.6f} active_game_speed={:.6f} "
-                         "fps={:.3f} window_s={:.3f} paused_s={:.3f} uncovered_s={:.3f} "
-                         "step={:.6f} target_fps={}",
-                         audit.GameSpeed(), audit.ActiveGameSpeed(),
-                         audit.wall_seconds > 0 ? audit.frames / audit.wall_seconds : 0,
-                         audit.wall_seconds, audit.paused_seconds, audit.uncovered_seconds, step, fps);
-                csv.flush();
-                audit.ClearWindow();
+            context.pc = site + 4;
+            arm->SetContext(context);
+            if (observe && memory.IsValidVirtualAddressRange(base + 0x3ece3b4, sizeof(u32)) &&
+                memory.IsValidVirtualAddressRange(base + FileSys::TennisStepOffset, sizeof(u32))) {
+                static Core::TennisClockLog log;
+                const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count();
+                log.Observe(Settings::tennis_fps_generation.load(std::memory_order_relaxed),
+                            imm == 0xf009   ? Core::TennisClockLog::Clock::UiAnimation
+                            : imm == 0xf00a ? Core::TennisClockLog::Clock::CharacterIntegration
+                                            : Core::TennisClockLog::Clock::BallFlight,
+                            object, memory.Read32(base + 0x3ece3b4), now, step,
+                            std::bit_cast<float>(memory.Read32(base + FileSys::TennisStepOffset)),
+                            fps, position);
             }
             return;
         }
