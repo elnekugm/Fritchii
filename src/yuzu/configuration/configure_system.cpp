@@ -152,6 +152,10 @@ void ConfigureSystem::Setup(const ConfigurationShared::Builder& builder) {
             !Settings::ShowBananzaFps(program_id, Settings::IsConfiguringGlobal())) {
             continue;
         }
+        if (setting->Id() == Settings::values.tennis_fps.Id() &&
+            !Settings::ShowTennisFps(program_id, Settings::IsConfiguringGlobal())) {
+            continue;
+        }
         if (setting->Id() == Settings::values.wonder_fps.Id() &&
             !Settings::ShowWonderFps(program_id, Settings::IsConfiguringGlobal())) {
             continue;

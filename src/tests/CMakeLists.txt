@@ -149,6 +149,7 @@ add_executable(tests
     core/read_traps.cpp
     core/nx2_readback_cache.cpp
     core/nx2_core_readback_capacity.cpp
+    core/tennis_fps_patch.cpp
     core/wonder_fps_patch.cpp
     core/nso.cpp
     core/nrr.cpp

@@ -8,6 +8,9 @@
 #include <openssl/evp.h>
 
 #include "common/scope_exit.h"
+#include "common/settings.h"
+#include "common/game_fps.h"
+#include "core/file_sys/tennis_fps_patch.h"
 #include "core/hle/kernel/k_process.h"
 
 #include "core/hle/service/cmif_serialization.h"
@@ -260,6 +263,22 @@ struct ProcessContext {
 
         // Apply patches to NRO.
         // LocateAndApplyIpsPatchesToModule(module_id, static_cast<u8*>(mapped_memory), nro_size);
+
+        if (m_process->GetProgramId() == Settings::TennisFpsProgramId &&
+            FileSys::TennisFpsHookOffset + sizeof(u32) <= text_size) {
+            std::array<u8, sizeof(u32)> instruction{};
+            auto& memory = m_process->GetMemory();
+            const u64 site = base_address + FileSys::TennisFpsHookOffset;
+            memory.ReadBlock(site, instruction.data(), instruction.size());
+            if (FileSys::ApplyTennisFpsPatch(instruction, header.m_module_id.data)) {
+                R_UNLESS(memory.WriteBlock(site, instruction.data(), instruction.size()),
+                         RO::ResultInvalidNro);
+                const u32 target = Settings::values.tennis_fps.GetValue();
+                Settings::tennis_fps_generation.fetch_add(1, std::memory_order_relaxed);
+                Settings::tennis_fps_active.store(target, std::memory_order_release);
+                LOG_INFO(Service_LDR, "Tennis experimental render patch: {} FPS, 60 Hz simulation", target);
+            }
+        }
 
         // Copy to output.
         *out_module_id = *module_id;

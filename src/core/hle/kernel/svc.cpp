@@ -21,7 +21,9 @@
 #include "common/fs/path_util.h"
 #include "common/settings.h"
 #include "core/wonder_dynamic_fps.h"
+#include "core/file_sys/tennis_fps_patch.h"
 #include "core/hle/kernel/k_process.h"
+#include "core/hle/kernel/k_hardware_timer.h"
 #include "core/hle/kernel/svc.h"
 #include "core/hle/kernel/svc/svc_nx2_oot_poll.h"
 #include "core/hle/kernel/k_readable_event.h"
@@ -2550,6 +2552,68 @@ void Call(Core::System& system, u32 imm) {
             }
             LOG_INFO(Kernel_SVC, "svc 0x18 t{} waits on{}", GetCurrentThread(kernel).GetThreadId(), list);
         }
+    }
+    if (imm == 0xf003 && process.Is64Bit() &&
+        system.GetApplicationProcessProgramID() == Settings::TennisFpsProgramId &&
+        Settings::tennis_fps_active.load(std::memory_order_acquire) != 0) {
+        ThreadContext context{};
+        auto* arm = process.GetArmInterface(kernel.CurrentPhysicalCore().CoreIndex());
+        arm->GetContext(context);
+        auto& memory = process.GetMemory();
+        u64 site = context.pc;
+        if (memory.IsValidVirtualAddressRange(site - 4, 4) &&
+            memory.Read32(site - 4) == FileSys::TennisFpsHook) {
+            site -= 4;
+        }
+        if (memory.IsValidVirtualAddressRange(site, 4) &&
+            memory.Read32(site) == FileSys::TennisFpsHook) {
+            const u64 base = site - FileSys::TennisFpsHookOffset;
+            // The game's relocated GOT entry points to its simulation-frame counter.
+            if (!memory.IsValidVirtualAddressRange(base + 0x175ecc0, sizeof(u64))) {
+                return;
+            }
+            const u64 counter = memory.Read64(base + 0x175ecc0);
+            if (!memory.IsValidVirtualAddressRange(counter, sizeof(u32)) ||
+                !memory.IsValidVirtualAddressRange(context.r[20], 1)) {
+                return;
+            }
+            const u32 frame = memory.Read32(counter);
+            const u32 fps = Settings::tennis_fps_active.load(std::memory_order_relaxed);
+            const u8 selected = static_cast<u8>(FileSys::TennisRenderTick(frame, fps));
+            const u8 render = static_cast<u8>(context.r[8]) & selected;
+            // Emulate the replaced STRB without changing guest registers or flags.
+            memory.Write8(context.r[20], render);
+            // C20 gates preparation and final submission of the main render task. CF0
+            // alone only suppresses optional passes, leaving the main renderer at 60 Hz.
+            const u64 submit_flag = memory.Read64(base + 0x1760c20);
+            if (memory.IsValidVirtualAddressRange(submit_flag, 1)) {
+                memory.Write8(submit_flag, memory.Read8(submit_flag) & selected);
+            }
+            if (fps < 60 && Settings::values.use_speed_limit.GetValue() &&
+                Settings::SpeedLimit() != 0) {
+                // Skipped draws must not allow the next simulation tick to run early merely
+                // because there was no present to pace. Sleep the guest, not a host CPU core.
+                static std::mutex pace_mutex;
+                static u64 generation{};
+                static std::chrono::steady_clock::time_point next_tick{};
+                std::scoped_lock lock{pace_mutex};
+                const auto current = Settings::tennis_fps_generation.load(std::memory_order_relaxed);
+                const auto now = std::chrono::steady_clock::now();
+                const auto interval = std::chrono::nanoseconds{
+                    100'000'000'000LL / 60 / Settings::SpeedLimit()};
+                if (generation != current || now > next_tick + interval) {
+                    next_tick = now;
+                    generation = current;
+                }
+                if (now < next_tick) {
+                    const auto wait = std::chrono::duration_cast<std::chrono::nanoseconds>(next_tick - now);
+                    static_cast<void>(GetCurrentThread(kernel).Sleep(
+                        kernel, kernel.HardwareTimer().GetTick() + wait.count() + 2));
+                }
+                next_tick += interval;
+            }
+        }
+        return;
     }
     if ((imm == 0xf001 || imm == 0xf002) && process.Is64Bit() &&
         system.GetApplicationProcessProgramID() == Settings::WonderSwitch2ProgramId &&

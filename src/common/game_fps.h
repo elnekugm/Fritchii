@@ -8,6 +8,14 @@
 namespace Settings {
 
 inline constexpr u64 WonderSwitch2ProgramId = 0x040015100B514001ULL;
+inline constexpr u64 TennisFpsProgramId = 0x0400D4201C6EA000ULL;
+inline std::atomic<u32> tennis_fps_active{0};
+inline std::atomic<u64> tennis_fps_generation{0};
+
+inline constexpr bool ShowTennisFps(u64 program_id, bool global) {
+    return !global && program_id == TennisFpsProgramId;
+}
+
 inline constexpr u64 BananzaFpsProgramId = 0x040074A01BF12000ULL;
 
 // Convert the preset index stored by older configs to the numeric FPS target.
