@@ -265,18 +265,20 @@ struct ProcessContext {
         // LocateAndApplyIpsPatchesToModule(module_id, static_cast<u8*>(mapped_memory), nro_size);
 
         if (m_process->GetProgramId() == Settings::TennisFpsProgramId &&
-            FileSys::TennisFpsHookOffset + sizeof(u32) <= text_size) {
-            std::array<u8, sizeof(u32)> instruction{};
+            header.m_module_id.data == FileSys::TennisFpsModuleId) {
+            std::vector<u8> module(nro_size);
             auto& memory = m_process->GetMemory();
-            const u64 site = base_address + FileSys::TennisFpsHookOffset;
-            memory.ReadBlock(site, instruction.data(), instruction.size());
-            if (FileSys::ApplyTennisFpsPatch(instruction, header.m_module_id.data)) {
-                R_UNLESS(memory.WriteBlock(site, instruction.data(), instruction.size()),
-                         RO::ResultInvalidNro);
-                const u32 target = Settings::values.tennis_fps.GetValue();
+            R_UNLESS(memory.ReadBlock(base_address, module.data(), module.size()), RO::ResultInvalidNro);
+            const u32 target = Settings::values.tennis_fps.GetValue();
+            if (FileSys::ApplyTennisFpsPatch(module, header.m_module_id.data, target)) {
+                R_UNLESS(memory.WriteBlock(base_address, module.data(), module.size()), RO::ResultInvalidNro);
+                Settings::tennis_fps_nro_base.store(base_address, std::memory_order_relaxed);
                 Settings::tennis_fps_generation.fetch_add(1, std::memory_order_relaxed);
                 Settings::tennis_fps_active.store(target, std::memory_order_release);
-                LOG_INFO(Service_LDR, "Tennis experimental render patch: {} FPS, 60 Hz simulation", target);
+                LOG_INFO(Service_LDR, "Tennis FPS patch: {} FPS, simulation step {}, native interval unlocked",
+                         target, FileSys::TennisSimulationStep(1.0f, target));
+            } else {
+                LOG_WARNING(Service_LDR, "Tennis FPS patch skipped: modified or truncated game module");
             }
         }
 

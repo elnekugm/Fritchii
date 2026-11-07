@@ -50,10 +50,9 @@ static VkPresentModeKHR ChooseSwapPresentMode(bool has_imm, bool has_mailbox,
     Settings::VSyncMode setting = [has_imm, has_mailbox]() {
         // Choose Mailbox or Immediate if unlocked and those modes are supported
         const auto mode = Settings::values.vsync_mode.GetValue();
-        // The explicit Wonder target owns frame pacing. FIFO would cap high targets at the
+        // The explicit game-patch target owns frame pacing. FIFO would cap high targets at the
         // monitor's refresh rate even though the patched game uses a smaller simulation step.
-        if (Settings::GetCurrentProgramID() == Settings::WonderSwitch2ProgramId &&
-            Settings::wonder_fps_active.load(std::memory_order_relaxed) > 60) {
+        if (Settings::GetActiveGameFps(Settings::GetCurrentProgramID()) > 60) {
             return has_mailbox ? Settings::VSyncMode::Mailbox : Settings::VSyncMode::Immediate;
         }
         if (Settings::values.frame_gen.GetValue()) {
@@ -206,8 +205,7 @@ bool Swapchain::AcquireNextImage(bool may_flush) {
     }
 
     const auto wait_with_frame_pacing = [this, may_flush] {
-    if (Settings::GetCurrentProgramID() == Settings::WonderSwitch2ProgramId &&
-        Settings::wonder_fps_active.load(std::memory_order_relaxed) != 0) {
+    if (Settings::GetActiveGameFps(Settings::GetCurrentProgramID()) != 0) {
         scheduler.Wait(resource_ticks[image_index], 0.0, may_flush);
         return;
     }

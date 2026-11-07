@@ -286,8 +286,8 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Makes the game believe GPU work finishes faster than it does, so it stops lowering "
               "resolution and render distance to fit the Switch's clocks."));
     INSERT(Settings, tennis_fps, tr("Frame rate (FPS, experimental game patch)"),
-           tr("Selects rendered frames while retaining the game's 60 Hz simulation. "
-              "Supports 1–60 FPS in the supported Mario Tennis Fever update. Requires a restart. "
+           tr("Sets Tennis' frame rate and simulation time step together. "
+              "Supports 1–1000 FPS in the supported game update. Requires a restart. "
               "Experimental: check gameplay speed and animations."));
     INSERT(Settings, wonder_fps, tr("Frame rate (FPS, game patch)"),
            tr("Sets Wonder's frame rate and simulation rate together. Requires a supported game "

@@ -397,6 +397,7 @@ struct System::Impl {
 
     SystemResultStatus Load(System& system, Frontend::EmuWindow& emu_window, const std::string& filepath, Service::AM::FrontendAppletParameters& params) {
         Settings::tennis_fps_active.store(0, std::memory_order_relaxed);
+        Settings::tennis_fps_nro_base.store(0, std::memory_order_relaxed);
         Settings::wonder_fps_active.store(0, std::memory_order_relaxed);
         Settings::wonder_dynamic_fps_active.store(false, std::memory_order_relaxed);
         if (params.launch_type == Service::AM::LaunchType::FrontendInitiated) {

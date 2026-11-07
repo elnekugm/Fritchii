@@ -10,6 +10,7 @@ namespace Settings {
 inline constexpr u64 WonderSwitch2ProgramId = 0x040015100B514001ULL;
 inline constexpr u64 TennisFpsProgramId = 0x0400D4201C6EA000ULL;
 inline std::atomic<u32> tennis_fps_active{0};
+inline std::atomic<u64> tennis_fps_nro_base{0};
 inline std::atomic<u64> tennis_fps_generation{0};
 
 inline constexpr bool ShowTennisFps(u64 program_id, bool global) {
@@ -42,6 +43,16 @@ inline constexpr u32 WonderFpsValue(WonderFps target) {
 inline std::atomic<u32> wonder_fps_active{0};
 inline std::atomic<bool> wonder_dynamic_fps_active{false};
 inline std::atomic<u64> wonder_dynamic_fps_generation{0};
+
+inline u32 GetActiveGameFps(u64 program_id) {
+    if (program_id == WonderSwitch2ProgramId) {
+        return wonder_fps_active.load(std::memory_order_relaxed);
+    }
+    if (program_id == TennisFpsProgramId) {
+        return tennis_fps_active.load(std::memory_order_relaxed);
+    }
+    return 0;
+}
 
 inline constexpr bool ShowWonderFps(u64 program_id, bool global) {
     return !global && program_id == WonderSwitch2ProgramId;

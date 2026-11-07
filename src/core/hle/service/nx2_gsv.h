@@ -2290,14 +2290,12 @@ private:
             LOG_INFO(Service, "nx2:vi2 present #{} swap interval {} at {} Hz (word 12 = {:#x})",
                      m_presents, swap_interval, refresh_rate, timing);
         }
-        // Wonder's patched simulation rate can exceed the display's nominal 60 Hz. Pace its
-        // presents at the rate actually patched into this boot, not at a changed UI preference.
-        const u32 wonder_fps =
-            system.GetApplicationProcessProgramID() == Settings::WonderSwitch2ProgramId
-                ? Settings::wonder_fps_active.load(std::memory_order_relaxed) : 0;
+        // Explicit game patches pair the presentation target with their simulation step.
+        // Read the successfully installed target, not a GUI preference changed mid-session.
+        const u32 game_fps = Settings::GetActiveGameFps(system.GetApplicationProcessProgramID());
         const auto interval = std::chrono::nanoseconds{
-            wonder_fps != 0 ? 100'000'000'000LL / wonder_fps / Settings::SpeedLimit()
-                            : 100'000'000'000LL * swap_interval / refresh_rate / Settings::SpeedLimit()};
+            game_fps != 0 ? 100'000'000'000LL / game_fps / Settings::SpeedLimit()
+                          : 100'000'000'000LL * swap_interval / refresh_rate / Settings::SpeedLimit()};
         const auto now = std::chrono::steady_clock::now();
         auto pacing = m_present_pacer.Advance(now, interval);
         if (trace) {
@@ -2955,51 +2953,21 @@ private:
             const std::chrono::nanoseconds VblankInterval = DefaultVblankInterval();
             m_vsync_timer = Core::Timing::CreateEvent(
                 "nx2:vi2 vsync",
-                [vsync_state = m_vsync, &kernel = system.Kernel(), VblankInterval](
-                    s64 scheduled,
-                    std::chrono::nanoseconds late) -> std::optional<std::chrono::nanoseconds> {
+                [vsync_state = m_vsync, &kernel = system.Kernel(),
+                 program_id = system.GetApplicationProcessProgramID()](
+                    s64, std::chrono::nanoseconds) -> std::optional<std::chrono::nanoseconds> {
                     std::scoped_lock lk{vsync_state->mutex};
                     for (auto* vsync : vsync_state->events) {
                         vsync->Signal(kernel);
                     }
-                    // 0 = the default period, as scheduled.
-                    std::optional<std::chrono::nanoseconds> next;
-                    if (const s64 interval_ns =
-                            vsync_state->interval_ns.load(std::memory_order_relaxed);
-                        interval_ns > 0) {
-                        next = std::chrono::nanoseconds{interval_ns};
+                    // This timer can start before Tennis' NRO has been loaded. Follow
+                    // the active patch each tick instead of latching a 60-Hz startup value.
+                    const u32 fps = program_id == Settings::TennisFpsProgramId
+                                        ? Settings::GetActiveGameFps(program_id) : 0;
+                    if (fps != 0) {
+                        return std::chrono::nanoseconds{1'000'000'000LL / fps};
                     }
-                    if (Common::DkbFrameTrace::Enabled()) {
-                        const s64 observed = scheduled + late.count();
-                        ++vsync_state->trace_callbacks;
-                        vsync_state->trace_late_callbacks +=
-                            VblankInterval.count() > 0 && late >= VblankInterval;
-                        vsync_state->trace_max_late =
-                            (std::max)(vsync_state->trace_max_late, late.count());
-                        if (vsync_state->trace_last_callback) {
-                            const s64 gap = observed - *vsync_state->trace_last_callback;
-                            vsync_state->trace_min_gap = vsync_state->trace_min_gap
-                                ? (std::min)(*vsync_state->trace_min_gap, gap) : gap;
-                        }
-                        vsync_state->trace_last_callback = observed;
-                        if (vsync_state->trace_rate.Ready(std::chrono::steady_clock::now())) {
-                            LOG_INFO(Service,
-                                     "DKB vsync present={} callbacks={} bound_events={} interval_ns={} "
-                                     "late_callbacks={} max_late_ns={} min_gap_ns={} "
-                                     "observed_global_ns={} guest_ticks={}",
-                                     vsync_state->trace_present.load(std::memory_order_relaxed),
-                                     vsync_state->trace_callbacks, vsync_state->events.size(),
-                                     VblankInterval.count(), vsync_state->trace_late_callbacks,
-                                     vsync_state->trace_max_late,
-                                     vsync_state->trace_min_gap.value_or(-1), observed,
-                                     kernel.System().CoreTiming().GetClockTicks());
-                            vsync_state->trace_callbacks = 0;
-                            vsync_state->trace_late_callbacks = 0;
-                            vsync_state->trace_max_late = 0;
-                            vsync_state->trace_min_gap.reset();
-                        }
-                    }
-                    return next;
+                    return std::nullopt;
                 });
             system.CoreTiming().ScheduleLoopingEvent(VblankInterval, VblankInterval, m_vsync_timer);
         }
