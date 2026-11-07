@@ -37,10 +37,20 @@ inline bool IsUpgradeProgramMain(const std::filesystem::path& main) {
         return name == expected;
     };
     const auto package = main.parent_path().parent_path();
-    return equals(main, u8"main") && equals(main.parent_path(), u8"exefs") &&
-           (equals(package, u8"0") || equals(package, u8"1")) &&
-           equals(package.parent_path(), u8"program") &&
-           equals(package.parent_path().parent_path().parent_path(), u8"upgrade");
+    if (!equals(main, u8"main") || !equals(main.parent_path(), u8"exefs") ||
+        !(equals(package, u8"0") || equals(package, u8"1")) ||
+        !equals(package.parent_path(), u8"program")) {
+        return false;
+    }
+    const auto storage = package.parent_path().parent_path();
+    if (equals(storage, u8"base") || equals(storage.parent_path(), u8"upgrade")) {
+        return true;
+    }
+    const auto name = Loader::LooseDirectoryDetail::Name(storage);
+    u64 version{};
+    const auto parsed = std::from_chars(name.data(), name.data() + name.size(), version);
+    return equals(storage.parent_path(), u8"updates") && !name.empty() &&
+           parsed.ec == std::errc{} && parsed.ptr == name.data() + name.size();
 }
 
 template <typename Supported, typename Stopped>
@@ -133,6 +143,9 @@ Result Discover(const std::filesystem::path& root, bool deep, Supported supporte
                 });
                 if (name == u8"romfs" && IsExeFS(directory / "exefs")) {
                     ++result.skipped_romfs;
+                    continue;
+                }
+                if (name == u8"dlc" && Loader::ResolveLooseProgramPath(directory)) {
                     continue;
                 }
                 if (deep || depth == 0) {

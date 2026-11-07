@@ -292,6 +292,8 @@ std::vector<FileSys::VirtualDir> FindSidecarDirs(const FileSys::VirtualDir& exef
     return dirs;
 }
 
+} // namespace
+
 // Extracted add-on content of a loose dump: <game>/dlc/<aoc title id>/<version>/romfs. Switch 2
 // Edition upgrade packs ship this way (often just a placeholder file), and the game only unlocks
 // once aoc:u lists them. Dumpers name the pack after the NX application (0100...) even when the
@@ -340,25 +342,6 @@ std::vector<std::pair<u64, FileSys::VirtualDir>> FindLooseAOC(const FileSys::Vir
                     }
                 }
             }
-            // A patched add-on ships next to its base as <version>/updates/<patch>/program/0/romfs
-            // (Xenoblade 2 keeps its whole game data in one). Dumps hold the full patched RomFS,
-            // so the newest patch replaces the base instead of layering on it.
-            if (const auto updates = version_dir->GetSubdirectory("updates")) {
-                u64 best_patch = 0;
-                for (const auto& patch_dir : updates->GetSubdirectories()) {
-                    const auto& patch = patch_dir->GetName();
-                    if (patch.empty() || patch.find_first_not_of("0123456789") != std::string::npos) {
-                        continue;
-                    }
-                    const auto programs = patch_dir->GetSubdirectory("program");
-                    const auto zero = programs != nullptr ? programs->GetSubdirectory("0") : nullptr;
-                    const auto patched = zero != nullptr ? zero->GetSubdirectory("romfs") : nullptr;
-                    if (patched != nullptr && std::stoull(patch) >= best_patch) {
-                        candidate = patched;
-                        best_patch = std::stoull(patch);
-                    }
-                }
-            }
             if (candidate != nullptr && (romfs_dir == nullptr || std::stoull(version) >= best_version)) {
                 romfs_dir = candidate;
                 best_version = std::stoull(version);
@@ -370,33 +353,6 @@ std::vector<std::pair<u64, FileSys::VirtualDir>> FindLooseAOC(const FileSys::Vir
         LOG_INFO(Loader, "Loose add-on content {:016X} (v{}) from {}", aoc_id, best_version,
                  aoc_dir->GetFullPath());
         out.emplace_back(aoc_id, romfs_dir);
-    }
-    return out;
-}
-
-// The sibling programs of a loose multi-program dump: <...>/program/<n>/exefs is running, every
-// other <...>/program/<m>/romfs is program index m of the same application.
-std::vector<std::pair<u64, FileSys::VirtualDir>> FindLooseSiblingPrograms(
-    const FileSys::VirtualDir& exefs_dir, u64 program_id) {
-    std::vector<std::pair<u64, FileSys::VirtualDir>> out;
-    const auto is_index = [](const std::string& name) {
-        return !name.empty() && name.size() <= 3 &&
-               name.find_first_not_of("0123456789") == std::string::npos;
-    };
-    const auto own = exefs_dir != nullptr ? exefs_dir->GetParentDirectory() : nullptr;
-    const auto programs = own != nullptr ? own->GetParentDirectory() : nullptr;
-    if (programs == nullptr || programs->GetName() != "program" || !is_index(own->GetName())) {
-        return out;
-    }
-    for (const auto& sibling : programs->GetSubdirectories()) {
-        const auto& name = sibling->GetName();
-        if (!is_index(name) || name == own->GetName()) {
-            continue;
-        }
-        if (const auto romfs = FindLooseRomFSDirectory(sibling)) {
-            out.emplace_back(FileSys::GetBaseTitleIDWithProgramIndex(program_id, std::stoull(name)),
-                             romfs);
-        }
     }
     return out;
 }

@@ -143,12 +143,18 @@ inline std::optional<std::filesystem::path> ResolveLooseProgramPath(
             if (name.empty() || parsed.ec != std::errc{} || parsed.ptr != name.data() + name.size()) {
                 continue;
             }
+            if (const auto main = ProgramMain(Subdirectory(version, "program"))) {
+                return main;
+            }
             if (const auto main = PackageMain(version)) {
                 return main;
             }
         }
     }
     if (const auto base = Subdirectory(directory, "base"); !base.empty()) {
+        if (const auto main = ProgramMain(Subdirectory(base, "program"))) {
+            return main;
+        }
         if (const auto main = PackageMain(base)) {
             return main;
         }
@@ -170,8 +176,10 @@ inline std::optional<std::filesystem::path> LooseGameRootFromMain(
     if ((NameIs(package, "0") || NameIs(package, "1")) &&
         NameIs(package.parent_path(), "program")) {
         auto root = package.parent_path().parent_path();
-        if (NameIs(root.parent_path(), "upgrade")) {
+        if (NameIs(root.parent_path(), "upgrade") || NameIs(root.parent_path(), "updates")) {
             root = root.parent_path().parent_path();
+        } else if (NameIs(root, "base")) {
+            root = root.parent_path();
         }
         return root;
     }
