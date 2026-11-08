@@ -10,6 +10,7 @@
 #include <chrono>
 #include <atomic>
 #include <condition_variable>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <vector>
@@ -139,6 +140,41 @@ u64 BeginSubmission(s32 fd, u32 ioctl, u32 variant, u64 session,
                     std::span<const u8> input, std::size_t inline_size) noexcept;
 void RecordEnqueue(u64 submit_id, s32 channel, const char* origin, CommandList& entries) noexcept;
 void Flush(const char* reason) noexcept;
+}
+
+/// Submit time of the list the GPU is running (0: none yet), for GPU time reports.
+inline std::atomic<u64> g_nx2_list_submit_ns;
+
+/// The GPU time a report shows: when the game submitted the work, not when the host got to it.
+/// Games time their GPU work with these reports, and the host's command processing is no
+/// measure of it (Wonder took its frames for GPU-bound and switched its light mask to a
+/// cheaper pass every other frame: flickering dark scenery). Never later than now, never
+/// behind an earlier report.
+constexpr u64 Nx2ReportTimeNs(u64 now, u64 submitted, u64 last) {
+    const u64 time = submitted != 0 && submitted < now ? submitted : now;
+    return time > last ? time : last;
+}
+
+/// The GPU times reports show, never behind an earlier one (reports come from several threads).
+class Nx2ReportClock {
+public:
+    u64 Next(u64 now) {
+        std::scoped_lock lock{mutex};
+        last = Nx2ReportTimeNs(now, g_nx2_list_submit_ns.load(std::memory_order_relaxed), last);
+        return last;
+    }
+
+private:
+    std::mutex mutex;
+    u64 last{};
+};
+
+/// The GPU starts on `list`: its reports show its submit time (lists from before it was known
+/// keep the previous one).
+inline void Nx2NoteRunningList(const CommandList& list) {
+    if (list.submit_ns != 0) {
+        g_nx2_list_submit_ns.store(list.submit_ns, std::memory_order_relaxed);
+    }
 }
 
 /// FNV-1a over pushbuffer words (EDEN_NX2_PB_CHECK).
