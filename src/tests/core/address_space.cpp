@@ -19,10 +19,27 @@ TEST_CASE("Switch 2 processes reserve a heap beyond the legacy 8 GiB ceiling", "
     REQUIRE(Space::GetAddressSpaceSize(36, Type::Heap, true) == 8_GiB);
     REQUIRE(Space::GetAddressSpaceSize(32, Type::Heap, true) == 1_GiB);
 
-    for (const auto type : {Type::Map39Bit, Type::MapSmall, Type::Alias, Type::Stack}) {
+    for (const auto type : {Type::Map39Bit, Type::MapSmall, Type::Stack}) {
         REQUIRE(Space::GetAddressSpaceSize(39, type, true) ==
                 Space::GetAddressSpaceSize(39, type, false));
     }
+}
+
+TEST_CASE("Switch 2 processes get a 128 GiB alias region", "[kernel][heap]") {
+    using Space = Kernel::KAddressSpaceInfo;
+    using Type = Space::Type;
+
+    // Xenoblade 2 reserves 60 GiB of alias space twice through its SDK VAMM allocator.
+    REQUIRE(Space::GetAddressSpaceSize(39, Type::Alias, true) == 128_GiB);
+    REQUIRE(Space::GetAddressSpaceSize(39, Type::Alias, true) > 2 * 60_GiB);
+    REQUIRE(Space::GetAddressSpaceSize(39, Type::Alias, false) == 64_GiB);
+    REQUIRE(Space::GetAddressSpaceSize(36, Type::Alias, true) == 6_GiB);
+    // Alias, heap, stack and kernel map must still fit the 256 GiB NCE code space.
+    REQUIRE(Space::GetAddressSpaceSize(39, Type::Alias, true) +
+                Space::GetAddressSpaceSize(39, Type::Heap, true) +
+                Space::GetAddressSpaceSize(39, Type::Stack, true) +
+                Space::GetAddressSpaceSize(39, Type::MapSmall, true) <
+            256_GiB - 128_MiB);
 }
 
 TEST_CASE("Kernel page table heap covers the Switch 2 main memory", "[kernel][heap]") {

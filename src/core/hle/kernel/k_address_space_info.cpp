@@ -63,6 +63,11 @@ std::size_t KAddressSpaceInfo::GetAddressSpaceSize(size_t width, KAddressSpaceIn
     if (is_switch2 && width == 39 && type == Type::Heap) {
         return MainMemorySizeMaxSwitch2;
     }
+    // The Switch 2 SDK hands its whole alias region (minus the extra size) to its VAMM address
+    // allocator, and Xenoblade 2 reserves 60 GiB from it twice (nninitStartup and nnMain).
+    if (is_switch2 && width == 39 && type == Type::Alias) {
+        return 128_GiB;
+    }
     return GetAddressSpaceInfo(width, type).size;
 }
 
