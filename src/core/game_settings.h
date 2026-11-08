@@ -48,6 +48,7 @@ enum class TitleID : std::uint64_t {
     MarioTennisFever = 0x0400D4201C6EA000ULL,
     HyruleWarriorsAgeOfImprisonment = 0x04003F40232DE000ULL,
     DonkeyKongBananza = 0x040074A01BF12000ULL,
+    XenobladeChroniclesDENintendoSwitch2Edition = 0x0400FF500E34A001ULL,
 };
 
 struct EnvironmentInfo {

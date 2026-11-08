@@ -220,6 +220,12 @@ void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& rend
             // while it asked for 1 it ran at half speed), so the clock only changes which it picks.
             OverrideIfGlobal(Settings::values.gpu_clock, Settings::GpuClock::Boost);
             break;
+        case TitleID::XenobladeChroniclesDENintendoSwitch2Edition:
+            // The game reads a 32x1 GPU-written texture back every frame (two of them, alternating);
+            // each ordered read emptied the whole host GPU queue (~70 waits a second). Opening intro
+            // on a RX 9070 XT: 26-32 ms frames before, 16.7 ms (60 fps) after.
+            Settings::values.preemptive_cpu_reads = true;
+            break;
         default:
             break;
     }
