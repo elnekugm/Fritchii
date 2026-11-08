@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <unordered_map>
@@ -651,6 +652,15 @@ private:
     NxTools* nx_tools = nullptr;
     bool nx_metadata_write_in_progress = false;
     std::string nup_source_path;
+
+    using NupJob = std::function<FileSys::Nup::PackResult(
+        const std::function<void(const FileSys::Nup::PackProgress&)>&, const std::atomic_bool*,
+        std::string*)>;
+    // Runs one NUP job at a time in the background behind a progress window. `game_path` cannot
+    // be booted meanwhile; `done` receives the result and error on the GUI thread.
+    void RunNupJob(const QString& window_title, const QString& title, const QPixmap& icon,
+                   const std::string& game_path, NupJob job,
+                   std::function<void(FileSys::Nup::PackResult, const QString&)> done);
 
     // Last game booted, used for multi-process apps
     QString last_filename_booted;

@@ -825,6 +825,39 @@ void NupContainer::BuildDirTree(u32 dir_index, VectorVfsDirectory& out) {
     }
 }
 
+bool NupContainer::ForEachMember(
+    std::size_t package_index,
+    const std::function<bool(const std::string&, const std::string&, const VirtualFile&,
+                             const std::array<u8, 0x20>&)>& visit) {
+    if (package_index >= packages.size()) {
+        return false;
+    }
+    static constexpr std::array<u8, 0x20> NoHash{};
+    // ValidateDirTree bounds the depth, so recursion is safe.
+    const std::function<bool(u32, const std::string&)> walk = [&](u32 dir_index,
+                                                                  const std::string& prefix) {
+        const DirNode& node = dirs[dir_index];
+        const u64 end = static_cast<u64>(node.first_child) + node.child_count;
+        for (u64 slot = node.first_child; slot < end; ++slot) {
+            const u32 child = children[slot];
+            if (child >= dirs.size()) {
+                const std::size_t index = child - dirs.size();
+                const auto& name = files[index].name;
+                if (!visit(prefix + name, name, OpenFile(index), files[index].sha256)) {
+                    return false;
+                }
+            } else {
+                const auto path = prefix + dirs[child].name;
+                if (!visit(path, dirs[child].name, nullptr, NoHash) || !walk(child, path + "/")) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    return walk(packages[package_index].root_dir, "");
+}
+
 VirtualDir NupContainer::BuildPackageDir(u32 dir_index) {
     auto out = std::make_shared<VectorVfsDirectory>(std::vector<VirtualFile>{},
                                                     std::vector<VirtualDir>{}, dirs[dir_index].name);
