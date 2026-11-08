@@ -1100,6 +1100,21 @@ private:
         ArmReadTraps(addr, size);
     }
 
+    /// Writes downloaded bytes to guest memory, except where a held-back CPU write is newer.
+    void WriteDownloadToGuest(DAddr device_addr, const u8* data, u64 size) {
+        DAddr cursor = device_addr;
+        const auto write_until = [&](DAddr end) {
+            if (cursor < end) {
+                device_memory.WriteBlockUnsafe(cursor, data + (cursor - device_addr), end - cursor);
+            }
+        };
+        cpu_held_ranges.ForEachInRange(device_addr, size, [&](DAddr start, DAddr end) {
+            write_until(start);
+            cursor = (std::max)(cursor, end);
+        });
+        write_until(device_addr + size);
+    }
+
     // Async Buffers
     std::deque<std::optional<Async_Buffer>> async_buffers;
     std::deque<boost::container::small_vector<BufferCopy, 4>> pending_downloads;

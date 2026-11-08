@@ -296,12 +296,34 @@ void BufferCache<P>::CachedWriteMemory(DAddr device_addr, u64 size) {
 }
 
 template <class P>
+void BufferCache<P>::BeginCachedWrites() {
+    cpu_recent_held_ranges.Clear();
+}
+
+template <class P>
+void BufferCache<P>::EndCachedWrites() {
+    // Writes held back before the round were gathered by it and are applied now. The page of
+    // one gathered while a core collected the next write to it is held again, after the round
+    // began (Core::GPUDirtyMemoryManager::Generation), and stays held until the next one.
+    cpu_held_ranges = std::move(cpu_recent_held_ranges);
+}
+
+template <class P>
 bool BufferCache<P>::OnCPUWrite(DAddr device_addr, u64 size) {
     const bool is_dirty = IsRegionRegistered(device_addr, size);
     if (!is_dirty) {
         return false;
     }
     if (memory_tracker.IsRegionGpuModified(device_addr, size)) {
+        // Held back until the GPU thread applies it (CachedWriteMemory). Downloads taken before
+        // hold older bytes; the core reports one write per page, so the whole page is held.
+        const DAddr page_start = Common::AlignDown(device_addr, DEVICE_PAGESIZE);
+        const u64 page_size = Common::AlignUp(device_addr + size, DEVICE_PAGESIZE) - page_start;
+        for (auto& ranges : pending_download_ranges) {
+            ranges.Subtract(page_start, page_size);
+        }
+        cpu_held_ranges.Add(page_start, page_size);
+        cpu_recent_held_ranges.Add(page_start, page_size);
         return true;
     }
     WriteMemory(device_addr, size);
@@ -1594,6 +1616,9 @@ void BufferCache<P>::CommitAsyncFlushesHigh() {
         normalized_copies.push_back(second_copy);
     }
     runtime.PostCopyBarrier();
+    cpu_held_ranges.ForEach([&](DAddr start, DAddr end) {
+        download_ranges.Subtract(start, end - start);
+    });
     pending_downloads.emplace_back(std::move(normalized_copies));
     pending_download_ranges.emplace_back(std::move(download_ranges));
     async_buffers.emplace_back(download_staging);

@@ -139,3 +139,17 @@ TEST_CASE("Short row-upload storage is rejected before reading guest memory",
     CHECK(allocations == 1);
     CHECK(std::ranges::all_of(guard, [](u8 byte) { return byte == 0xa5; }));
 }
+
+TEST_CASE("Unswizzling an image with no guest bytes yields zeros", "[texture_row_upload]") {
+    VideoCommon::ImageInfo info;
+    info.type = VideoCommon::ImageType::e2D;
+    info.format = VideoCore::Surface::PixelFormat::R8_UNORM;
+    info.size = {64, 64, 1};
+    info.resources = {2, 2};
+    info.layer_stride = VideoCommon::CalculateLayerStride(info);
+    std::vector<u8> output(64 * 64 * 2 * 2, 0xee);
+    const auto copies =
+        VideoCommon::UnswizzleBlockLinearImage(info, std::span<const u8>{}, output, false);
+    REQUIRE(copies.size() == 2);
+    CHECK(std::ranges::all_of(std::span{output}.first(64 * 64 * 2), [](u8 x) { return x == 0; }));
+}
