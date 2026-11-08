@@ -1042,6 +1042,10 @@ std::pair<typename P::Buffer*, u32> BufferCache<P>::ObtainCPUBuffer(
     default:
         break;
     }
+    // The caller's GPU work (DMA buffer/image copies, indirect dispatches, query writes) uses
+    // these bytes: without this a later upload to them in the same command buffer was reordered
+    // in front of that work, so it read the newer data (textures from a later DMA upload).
+    buffer.MarkUsage(buffer.Offset(device_addr), size);
 
     return {&buffer, buffer.Offset(device_addr)};
 }
@@ -1955,14 +1959,16 @@ void BufferCache<P>::BindHostVertexBuffers() {
                 SynchronizeBuffer(buffer, binding.device_addr, binding.size);
                 synced = {binding.buffer_id, binding.device_addr, binding.size, epoch};
             }
+            const u32 offset = buffer.Offset(binding.device_addr);
+            // Still read by this draw when the binding is unchanged: unmarked, a later upload to
+            // these vertices was reordered in front of this draw once TickFrame reset the tracker.
+            buffer.MarkUsage(offset, binding.size);
             if (!flags[Dirty::VertexBuffer0 + index]) {
                 flush_bindings();
                 continue;
             }
             flags[Dirty::VertexBuffer0 + index] = false;
             const u32 stride = maxwell3d->regs.vertex_streams[index].stride;
-            const u32 offset = buffer.Offset(binding.device_addr);
-            buffer.MarkUsage(offset, binding.size);
             if (!bindings.buffers.empty() && index != last_index + 1) {
                 flush_bindings();
             }
@@ -4248,6 +4254,17 @@ void BufferCache<P>::MappedUploadMemory([[maybe_unused]] Buffer& buffer,
         }
         const bool can_reorder = runtime.CanReorderUpload(buffer, copies);
         runtime.CopyBuffer(buffer, upload_staging.buffer, copies, true, can_reorder);
+        MarkUploaded(buffer, copies);
+    }
+}
+
+template <class P>
+void BufferCache<P>::MarkUploaded(Buffer& buffer, std::span<const BufferCopy> copies) {
+    // An upload that stayed in this command buffer (its region was in use, or the stream buffer
+    // was full) did not mark its bytes: a later upload to them was reordered in front of it, and
+    // this older copy overwrote the newer data.
+    for (const BufferCopy& copy : copies) {
+        buffer.MarkUsage(copy.dst_offset, copy.size);
     }
 }
 
@@ -4292,6 +4309,7 @@ void BufferCache<P>::InlineMemoryImplementation(DAddr dest_address, size_t copy_
         std::memcpy(src_pointer, inlined_buffer.data(), copy_size);
         const bool can_reorder = runtime.CanReorderUpload(buffer, copies);
         runtime.CopyBuffer(buffer, upload_staging.buffer, copies, true, can_reorder);
+        MarkUploaded(buffer, copies);
     } else {
         buffer.ImmediateUpload(buffer.Offset(dest_address), inlined_buffer.first(copy_size));
     }

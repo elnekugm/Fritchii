@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
@@ -24,7 +25,11 @@ struct FixtureBuffer : VideoCommon::BufferBase {
         : BufferBase(addr, size), bytes(size) {}
     explicit FixtureBuffer(size_t size)
         : BufferBase(VideoCommon::NullBufferParams{}), bytes(size) {}
-    void MarkUsage(u64, u64) {}
+    // (offset, size) of every MarkUsage call: what the cache told the runtime its GPU work uses.
+    std::vector<std::pair<u64, u64>> marked;
+    void MarkUsage(u64 offset, u64 size) {
+        marked.emplace_back(offset, size);
+    }
 };
 struct FixtureStage {
     // Shared: the cache keeps a copy of a fence download's stage until its fence pops.
@@ -258,5 +263,80 @@ TEST_CASE("BufferCache: downloads keep held-back CPU writes", "[video_core][buff
     cache->PopAsyncFlushes();
     CHECK(guest_byte(held + 0x2000) == 0x31);
     CHECK(guest_byte(held + 0x1080) == 0xab);
+    cache.reset();
+}
+
+TEST_CASE("BufferCache: obtained buffers count as used by this command buffer",
+          "[video_core][buffer_cache]") {
+    // DMA buffer/image copies, indirect dispatches and query writes get their buffer through
+    // ObtainCPUBuffer. Unless the bytes are marked used, CanReorderUpload lets a later upload to
+    // them in the same command buffer run in front of that GPU work (Yoshi and the Mysterious
+    // Book: a texture copied from a buffer took the next upload's bytes for one frame).
+    const bool old_multi_core = Settings::values.use_multi_core.GetValue();
+    SCOPE_EXIT {
+        Settings::values.use_multi_core.SetValue(old_multi_core);
+    };
+    Settings::values.use_multi_core.SetValue(false);
+    Core::System system;
+    system.Initialize();
+    Kernel::KProcess process(system.Kernel());
+    SCOPE_EXIT {
+        system.Kernel().UnregisterKernelObject(&process);
+    };
+    auto& cpu = process.GetMemory();
+    auto& table = process.GetPageTable().GetImpl();
+    table.Resize(32, 12);
+    cpu.SetCurrentPageTable(process);
+    constexpr u64 phys = 0x80000, guest = 0x200000, dev = 0x70000, size = 0x3000;
+    system.DeviceMemory().buffer.ClearBackingRegion(phys, size, 0);
+    cpu.MapMemoryRegion(table, Common::ProcessAddress{guest}, size,
+                        Common::PhysicalAddress{Core::DramMemoryMap::Base + phys},
+                        Common::MemoryPermission::ReadWrite, false);
+    Tegra::MaxwellDeviceMemoryManager manager(system.DeviceMemory());
+    manager.Map(dev, guest, size, manager.RegisterProcess(&cpu));
+    FixtureRuntime runtime;
+    auto cache = std::make_unique<VideoCommon::BufferCache<FixtureParams>>(manager, runtime);
+
+    constexpr u64 addr = dev + 0x1100;
+    constexpr u32 bytes = 0x340;
+    const auto check = [&](VideoCommon::ObtainBufferSynchronize sync,
+                           VideoCommon::ObtainBufferOperation op) {
+        const auto [buffer, offset] = cache->ObtainCPUBuffer(addr, bytes, sync, op);
+        REQUIRE(buffer->CpuAddr() + offset == addr);
+        REQUIRE_FALSE(buffer->marked.empty());
+        CHECK(buffer->marked.back() == std::pair<u64, u64>{offset, bytes});
+    };
+    // An upload source (the copy reads it) and a download target (the copy writes it).
+    check(VideoCommon::ObtainBufferSynchronize::FullSynchronize,
+          VideoCommon::ObtainBufferOperation::DoNothing);
+    check(VideoCommon::ObtainBufferSynchronize::FullSynchronize,
+          VideoCommon::ObtainBufferOperation::MarkAsWritten);
+    check(VideoCommon::ObtainBufferSynchronize::NoSynchronize,
+          VideoCommon::ObtainBufferOperation::DiscardWrite);
+
+    // Uploads mark their bytes too. One that stays in this command buffer is otherwise overtaken
+    // by a later upload to the same bytes, and its older data wins.
+    const auto covered = [](const FixtureBuffer& buffer, u64 offset, u64 length) {
+        return std::ranges::any_of(buffer.marked, [&](const std::pair<u64, u64>& mark) {
+            return mark.first <= offset && offset + length <= mark.first + mark.second;
+        });
+    };
+    constexpr u64 inline_addr = dev + 0x2040;
+    const auto [written, written_offset] =
+        cache->ObtainCPUBuffer(inline_addr, 0x80, VideoCommon::ObtainBufferSynchronize::FullSynchronize,
+                               VideoCommon::ObtainBufferOperation::MarkAsWritten);
+    written->marked.clear();
+    const std::array<u8, 0x20> words{};
+    REQUIRE(cache->InlineMemory(inline_addr + 0x10, words.size(), words));
+    CHECK(covered(*written, written_offset + 0x10, words.size()));
+
+    constexpr u64 cpu_addr = dev + 0x400;
+    cache->WriteMemory(cpu_addr, 0x40);
+    const auto [synced, synced_offset] =
+        cache->ObtainCPUBuffer(cpu_addr, 0x40, VideoCommon::ObtainBufferSynchronize::FullSynchronize,
+                               VideoCommon::ObtainBufferOperation::DoNothing);
+    REQUIRE(synced->marked.size() >= 2);
+    synced->marked.pop_back(); // ObtainCPUBuffer's own mark
+    CHECK(covered(*synced, synced_offset, 0x40));
     cache.reset();
 }
