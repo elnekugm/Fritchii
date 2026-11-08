@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <map>
 #include <memory>
 #include <mutex>
 #include "common/assert.h"
@@ -14,6 +15,7 @@
 #include "core/file_sys/nca_metadata.h"
 #include "core/file_sys/patch_manager.h"
 #include "core/file_sys/registered_cache.h"
+#include "core/file_sys/romfs.h"
 #include "core/file_sys/romfs_factory.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/service/filesystem/filesystem.h"
@@ -66,11 +68,49 @@ VirtualFile RomFSFactory::OpenPatchedRomFS(u64 title_id, ContentRecordType type)
     return patch_manager.PatchRomFS(nca.get(), nca->GetRomFS(), type);
 }
 
+namespace {
+// Directories are kept and built into a RomFS on first use: building walks every file, and most
+// titles never open their sibling programs.
+std::mutex loose_program_mutex;
+std::vector<std::pair<u64, VirtualDir>> loose_program_dirs;
+std::map<u64, VirtualFile> loose_program_romfs;
+} // namespace
+
+void SetLooseProgramRomFS(std::vector<std::pair<u64, VirtualDir>> entries) {
+    std::scoped_lock lk{loose_program_mutex};
+    loose_program_dirs = std::move(entries);
+    loose_program_romfs.clear();
+}
+
+VirtualFile OpenLooseProgramRomFS(u64 title_id) {
+    std::scoped_lock lk{loose_program_mutex};
+    if (const auto it = loose_program_romfs.find(title_id); it != loose_program_romfs.end()) {
+        return it->second;
+    }
+    for (const auto& [id, dir] : loose_program_dirs) {
+        if (id == title_id) {
+            LOG_INFO(Service_FS, "Serving loose program {:016X} RomFS from {}", id,
+                     dir->GetFullPath());
+            return loose_program_romfs[id] = CreateRomFS(dir);
+        }
+    }
+    return nullptr;
+}
+
 VirtualFile RomFSFactory::OpenPatchedRomFSWithProgramIndex(u64 title_id, u8 program_index,
                                                            ContentRecordType type) const {
     const auto res_title_id = GetBaseTitleIDWithProgramIndex(title_id, program_index);
 
-    return OpenPatchedRomFS(res_title_id, type);
+    if (auto patched = OpenPatchedRomFS(res_title_id, type); patched != nullptr ||
+                                                             type != ContentRecordType::Program) {
+        return patched;
+    }
+    auto romfs = OpenLooseProgramRomFS(res_title_id);
+    if (romfs == nullptr) {
+        return nullptr;
+    }
+    const PatchManager mods{res_title_id, filesystem_controller, content_provider};
+    return mods.PatchRomFS(nullptr, std::move(romfs), type, nullptr);
 }
 
 namespace {

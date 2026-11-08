@@ -6,7 +6,6 @@
 
 #include <cinttypes>
 #include <cstring>
-#include <cstdlib>
 #include <iterator>
 #include <string>
 #include <utility>
@@ -563,19 +562,6 @@ Result FSP_SRV::OpenDataStorageWithProgramIndex(OutInterface<IStorage> out_inter
     if (!patched_romfs &&
         FileSys::GetBaseTitleIDWithProgramIndex(program_id, program_index) == program_id) {
         patched_romfs = romfs_controller->OpenRomFSCurrentProcess();
-    }
-
-    // Experimental compatibility for the index-1 Xenoblade Switch 2 loose dumps.
-    // shortcut: shared RomFS is unverified; keep opt-in until tested with these dumps.
-    const bool xenoblade_index_one = program_id == 0x0400453019AA8001ULL ||
-                                    program_id == 0x0400E95004038001ULL ||
-                                    program_id == 0x0400FF500E34A001ULL;
-    if (!patched_romfs && program_index == 0 && xenoblade_index_one &&
-        std::getenv("ORCHID_XENOBLADE_ROMFS_FALLBACK") != nullptr) {
-        patched_romfs = romfs_controller->OpenRomFSCurrentProcess();
-        LOG_WARNING(Service_FS,
-                    "Xenoblade test: program {:016X} index 0 uses current RomFS, available={}",
-                    program_id, patched_romfs != nullptr);
     }
 
     if (!patched_romfs) {

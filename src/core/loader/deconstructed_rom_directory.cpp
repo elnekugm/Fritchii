@@ -311,7 +311,44 @@ std::vector<std::pair<u64, FileSys::VirtualFile>> FindLooseAOC(const FileSys::Vi
             if (version.empty() || version.find_first_not_of("0123456789") != std::string::npos) {
                 continue;
             }
-            const auto candidate = version_dir->GetSubdirectory("romfs");
+            auto candidate = version_dir->GetSubdirectory("romfs");
+            if (candidate == nullptr) {
+                const auto base = version_dir->GetSubdirectory("base");
+                for (const auto& package : {version_dir, base}) {
+                    if (package == nullptr) {
+                        continue;
+                    }
+                    candidate = package->GetSubdirectory("romfs");
+                    if (candidate == nullptr) {
+                        const auto programs = package->GetSubdirectory("program");
+                        const auto zero = programs != nullptr ? programs->GetSubdirectory("0")
+                                                              : nullptr;
+                        candidate = zero != nullptr ? zero->GetSubdirectory("romfs") : nullptr;
+                    }
+                    if (candidate != nullptr) {
+                        break;
+                    }
+                }
+            }
+            // A patched add-on ships next to its base as <version>/updates/<patch>/program/0/romfs
+            // (Xenoblade 2 keeps its whole game data in one). Dumps hold the full patched RomFS,
+            // so the newest patch replaces the base instead of layering on it.
+            if (const auto updates = version_dir->GetSubdirectory("updates")) {
+                u64 best_patch = 0;
+                for (const auto& patch_dir : updates->GetSubdirectories()) {
+                    const auto& patch = patch_dir->GetName();
+                    if (patch.empty() || patch.find_first_not_of("0123456789") != std::string::npos) {
+                        continue;
+                    }
+                    const auto programs = patch_dir->GetSubdirectory("program");
+                    const auto zero = programs != nullptr ? programs->GetSubdirectory("0") : nullptr;
+                    const auto patched = zero != nullptr ? zero->GetSubdirectory("romfs") : nullptr;
+                    if (patched != nullptr && std::stoull(patch) >= best_patch) {
+                        candidate = patched;
+                        best_patch = std::stoull(patch);
+                    }
+                }
+            }
             if (candidate != nullptr && (romfs_dir == nullptr || std::stoull(version) >= best_version)) {
                 romfs_dir = candidate;
                 best_version = std::stoull(version);
@@ -327,7 +364,45 @@ std::vector<std::pair<u64, FileSys::VirtualFile>> FindLooseAOC(const FileSys::Vi
     return out;
 }
 
-} // namespace
+// The sibling programs of a loose multi-program dump: <...>/program/<n>/exefs is running, every
+// other <...>/program/<m>/romfs is program index m of the same application.
+std::vector<std::pair<u64, FileSys::VirtualDir>> FindLooseSiblingPrograms(
+    const FileSys::VirtualDir& exefs_dir, u64 program_id) {
+    std::vector<std::pair<u64, FileSys::VirtualDir>> out;
+    const auto is_index = [](const std::string& name) {
+        return !name.empty() && name.size() <= 3 &&
+               name.find_first_not_of("0123456789") == std::string::npos;
+    };
+    const auto own = exefs_dir != nullptr ? exefs_dir->GetParentDirectory() : nullptr;
+    const auto programs = own != nullptr ? own->GetParentDirectory() : nullptr;
+    if (programs == nullptr || programs->GetName() != "program" || !is_index(own->GetName())) {
+        return out;
+    }
+    for (const auto& sibling : programs->GetSubdirectories()) {
+        const auto& name = sibling->GetName();
+        if (!is_index(name) || name == own->GetName()) {
+            continue;
+        }
+        if (const auto romfs = FindLooseRomFSDirectory(sibling)) {
+            out.emplace_back(FileSys::GetBaseTitleIDWithProgramIndex(program_id, std::stoull(name)),
+                             romfs);
+        }
+    }
+    // Some Switch 2 Edition dumps ship without the Switch 1 program 0 (Xenoblade 2 keeps all its
+    // data in an add-on). The game still opens program 0 and panics without it, so stand in the
+    // running program's own RomFS for it.
+    const u64 index_zero = FileSys::GetBaseTitleIDWithProgramIndex(program_id, 0);
+    const bool has_zero = std::any_of(out.begin(), out.end(),
+                                      [&](const auto& entry) { return entry.first == index_zero; });
+    if (!has_zero && own->GetName() != "0") {
+        if (const auto romfs = FindLooseRomFSDirectory(own)) {
+            LOG_WARNING(Loader, "Loose dump has no program 0, using program {} RomFS for it",
+                        own->GetName());
+            out.emplace_back(index_zero, romfs);
+        }
+    }
+    return out;
+}
 
 AppLoader_DeconstructedRomDirectory::AppLoader_DeconstructedRomDirectory(FileSys::VirtualFile file_, bool override_update_)
     : AppLoader(std::move(file_))
@@ -460,6 +535,8 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
 
     FileSys::SetLooseAOC(standalone ? FindLooseAOC(dir, metadata.GetTitleID())
                                     : std::vector<std::pair<u64, FileSys::VirtualFile>>{});
+    FileSys::SetLooseProgramRomFS(standalone ? FindLooseSiblingPrograms(dir, metadata.GetTitleID())
+                                             : std::vector<std::pair<u64, FileSys::VirtualDir>>{});
 
     if (override_update) {
         const FileSys::PatchManager patch_manager(
