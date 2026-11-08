@@ -285,9 +285,9 @@ std::vector<FileSys::VirtualDir> FindSidecarDirs(const FileSys::VirtualDir& exef
 // Edition upgrade packs ship this way (often just a placeholder file), and the game only unlocks
 // once aoc:u lists them. Dumpers name the pack after the NX application (0100...) even when the
 // program is the Switch 2 build (0400...), so the platform byte follows the running program.
-std::vector<std::pair<u64, FileSys::VirtualFile>> FindLooseAOC(const FileSys::VirtualDir& exefs_dir,
-                                                               u64 program_id) {
-    std::vector<std::pair<u64, FileSys::VirtualFile>> out;
+std::vector<std::pair<u64, FileSys::VirtualDir>> FindLooseAOC(const FileSys::VirtualDir& exefs_dir,
+                                                              u64 program_id) {
+    std::vector<std::pair<u64, FileSys::VirtualDir>> out;
     const auto game_dir = FindSidecarDirs(exefs_dir).back();
     const auto dlc_dir = game_dir != nullptr ? game_dir->GetSubdirectory("dlc") : nullptr;
     if (dlc_dir == nullptr) {
@@ -298,8 +298,7 @@ std::vector<std::pair<u64, FileSys::VirtualFile>> FindLooseAOC(const FileSys::Vi
         if (name.size() != 16 || name.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos) {
             continue;
         }
-        const u64 aoc_id = (std::stoull(name, nullptr, 16) & 0x00FFFFFFFFFFFFFFULL) |
-                           (program_id & 0xFF00000000000000ULL);
+        const u64 aoc_id = FileSys::WithPlatformOf(std::stoull(name, nullptr, 16), program_id);
         if (FileSys::GetBaseTitleID(aoc_id) != FileSys::GetBaseTitleID(program_id)) {
             continue;
         }
@@ -359,7 +358,7 @@ std::vector<std::pair<u64, FileSys::VirtualFile>> FindLooseAOC(const FileSys::Vi
         }
         LOG_INFO(Loader, "Loose add-on content {:016X} (v{}) from {}", aoc_id, best_version,
                  aoc_dir->GetFullPath());
-        out.emplace_back(aoc_id, FileSys::CreateRomFS(romfs_dir));
+        out.emplace_back(aoc_id, romfs_dir);
     }
     return out;
 }
@@ -386,19 +385,6 @@ std::vector<std::pair<u64, FileSys::VirtualDir>> FindLooseSiblingPrograms(
         if (const auto romfs = FindLooseRomFSDirectory(sibling)) {
             out.emplace_back(FileSys::GetBaseTitleIDWithProgramIndex(program_id, std::stoull(name)),
                              romfs);
-        }
-    }
-    // Some Switch 2 Edition dumps ship without the Switch 1 program 0 (Xenoblade 2 keeps all its
-    // data in an add-on). The game still opens program 0 and panics without it, so stand in the
-    // running program's own RomFS for it.
-    const u64 index_zero = FileSys::GetBaseTitleIDWithProgramIndex(program_id, 0);
-    const bool has_zero = std::any_of(out.begin(), out.end(),
-                                      [&](const auto& entry) { return entry.first == index_zero; });
-    if (!has_zero && own->GetName() != "0") {
-        if (const auto romfs = FindLooseRomFSDirectory(own)) {
-            LOG_WARNING(Loader, "Loose dump has no program 0, using program {} RomFS for it",
-                        own->GetName());
-            out.emplace_back(index_zero, romfs);
         }
     }
     return out;
@@ -533,10 +519,19 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
         return {result, {}};
     }
 
-    FileSys::SetLooseAOC(standalone ? FindLooseAOC(dir, metadata.GetTitleID())
-                                    : std::vector<std::pair<u64, FileSys::VirtualFile>>{});
-    FileSys::SetLooseProgramRomFS(standalone ? FindLooseSiblingPrograms(dir, metadata.GetTitleID())
-                                             : std::vector<std::pair<u64, FileSys::VirtualDir>>{});
+    const u64 addon_application_id = control && control->GetDLCBaseTitleId() != 0
+                                         ? control->GetDLCBaseTitleId()
+                                         : metadata.GetTitleID();
+    std::vector<FileSys::BootContent> boot_content;
+    if (standalone) {
+        for (auto& [id, romfs] : FindLooseAOC(dir, addon_application_id)) {
+            boot_content.push_back({id, FileSys::ContentRecordType::Data, std::move(romfs)});
+        }
+        for (auto& [id, romfs] : FindLooseSiblingPrograms(dir, metadata.GetTitleID())) {
+            boot_content.push_back({id, FileSys::ContentRecordType::Program, std::move(romfs)});
+        }
+    }
+    FileSys::SetBootContent(std::move(boot_content));
 
     if (override_update) {
         const FileSys::PatchManager patch_manager(

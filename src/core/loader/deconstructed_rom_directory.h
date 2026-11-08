@@ -20,7 +20,7 @@ class System;
 namespace Loader {
 
 /// Resolve the add-on content stored alongside a loose multi-program dump.
-std::vector<std::pair<u64, FileSys::VirtualFile>> FindLooseAOC(
+std::vector<std::pair<u64, FileSys::VirtualDir>> FindLooseAOC(
     const FileSys::VirtualDir& exefs_dir, u64 program_id);
 
 /// Resolve the RomFS directories of the other programs in a loose multi-program dump, keyed by

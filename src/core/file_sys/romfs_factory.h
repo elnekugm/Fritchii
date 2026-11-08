@@ -35,17 +35,20 @@ enum class StorageId : u8 {
     SdCard = 5,
 };
 
-// Extracted add-on content (<game>/dlc/<aoc title id>/<n>/romfs) has no NCA to register, so the
-// loose ExeFS and NUP loaders hand their RomFS over here; aoc:u lists it and Open() serves it as Data.
-void SetLooseAOC(std::vector<std::pair<u64, VirtualFile>> entries);
-[[nodiscard]] std::vector<u64> GetLooseAOCTitleIDs();
-
-// The other programs of a loose multi-program dump (<game>/.../program/<n>/romfs, keyed by the
-// title ID of program index n). Switch 2 Edition builds sit at index 1 and read the original
-// game data of index 0 through OpenDataStorageWithProgramIndex (Xenoblade X).
-void SetLooseProgramRomFS(std::vector<std::pair<u64, VirtualDir>> entries);
-/// The registered sibling program RomFS for a title ID, built on first use, or nullptr.
-[[nodiscard]] VirtualFile OpenLooseProgramRomFS(u64 title_id);
+// Content of the booted title that has no NCA in the content provider (loose dumps, NUP
+// containers). Program entries are the other programs of a multi-program application, keyed by
+// the title ID of their program index (Switch 2 Editions run index 1 and read index 0 through
+// OpenDataStorageWithProgramIndex). Data entries are add-on content, listed by aoc:u. Every
+// loader that boots a title replaces the whole set; RomFS images are built on first open.
+struct BootContent {
+    u64 title_id{};
+    ContentRecordType type{};
+    VirtualDir romfs;
+};
+void SetBootContent(std::vector<BootContent> entries);
+[[nodiscard]] std::vector<u64> ListBootContent(ContentRecordType type);
+/// The registered RomFS for a title ID and type, built on first use, or nullptr.
+[[nodiscard]] VirtualFile OpenBootContent(u64 title_id, ContentRecordType type);
 
 /// File system interface to the RomFS archive
 class RomFSFactory {

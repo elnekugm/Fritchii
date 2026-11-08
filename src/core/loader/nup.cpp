@@ -234,7 +234,14 @@ AppLoader::LoadResult AppLoader_NUP::Load(Kernel::KProcess& process, Core::Syste
     const u64 addon_application_id = nacp_file && nacp_file->GetDLCBaseTitleId() != 0
                                          ? FileSys::GetBaseTitleID(nacp_file->GetDLCBaseTitleId())
                                          : base_title_id;
-    FileSys::SetLooseAOC(nup->GetAddonRomFS(addon_application_id));
+    std::vector<FileSys::BootContent> boot_content;
+    for (auto& [id, romfs] : nup->GetAddonRomFS(addon_application_id)) {
+        boot_content.push_back({id, FileSys::ContentRecordType::Data, std::move(romfs)});
+    }
+    for (auto& [id, romfs] : nup->GetSiblingProgramRomFS()) {
+        boot_content.push_back({id, FileSys::ContentRecordType::Program, std::move(romfs)});
+    }
+    FileSys::SetBootContent(std::move(boot_content));
 
     system.GetFileSystemController().RegisterProcess(
         process.GetProcessId(), base_title_id,

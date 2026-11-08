@@ -69,29 +69,42 @@ VirtualFile RomFSFactory::OpenPatchedRomFS(u64 title_id, ContentRecordType type)
 }
 
 namespace {
-// Directories are kept and built into a RomFS on first use: building walks every file, and most
-// titles never open their sibling programs.
-std::mutex loose_program_mutex;
-std::vector<std::pair<u64, VirtualDir>> loose_program_dirs;
-std::map<u64, VirtualFile> loose_program_romfs;
+// One global set, replaced on every boot; only one title runs at a time. Directories are kept
+// and built into a RomFS on first use: building walks every file, and most titles never open
+// their sibling programs.
+std::mutex boot_content_mutex;
+std::vector<BootContent> boot_content;
+std::map<std::pair<u64, ContentRecordType>, VirtualFile> boot_content_romfs;
 } // namespace
 
-void SetLooseProgramRomFS(std::vector<std::pair<u64, VirtualDir>> entries) {
-    std::scoped_lock lk{loose_program_mutex};
-    loose_program_dirs = std::move(entries);
-    loose_program_romfs.clear();
+void SetBootContent(std::vector<BootContent> entries) {
+    std::scoped_lock lk{boot_content_mutex};
+    boot_content = std::move(entries);
+    boot_content_romfs.clear();
 }
 
-VirtualFile OpenLooseProgramRomFS(u64 title_id) {
-    std::scoped_lock lk{loose_program_mutex};
-    if (const auto it = loose_program_romfs.find(title_id); it != loose_program_romfs.end()) {
+std::vector<u64> ListBootContent(ContentRecordType type) {
+    std::scoped_lock lk{boot_content_mutex};
+    std::vector<u64> ids;
+    for (const auto& entry : boot_content) {
+        if (entry.type == type) {
+            ids.push_back(entry.title_id);
+        }
+    }
+    return ids;
+}
+
+VirtualFile OpenBootContent(u64 title_id, ContentRecordType type) {
+    std::scoped_lock lk{boot_content_mutex};
+    if (const auto it = boot_content_romfs.find({title_id, type}); it != boot_content_romfs.end()) {
         return it->second;
     }
-    for (const auto& [id, dir] : loose_program_dirs) {
-        if (id == title_id) {
-            LOG_INFO(Service_FS, "Serving loose program {:016X} RomFS from {}", id,
-                     dir->GetFullPath());
-            return loose_program_romfs[id] = CreateRomFS(dir);
+    for (const auto& entry : boot_content) {
+        if (entry.title_id == title_id && entry.type == type) {
+            LOG_INFO(Service_FS, "Serving {:016X} ({}) RomFS from {}", title_id,
+                     type == ContentRecordType::Data ? "add-on" : "program",
+                     entry.romfs->GetFullPath());
+            return boot_content_romfs[{title_id, type}] = CreateRomFS(entry.romfs);
         }
     }
     return nullptr;
@@ -105,7 +118,7 @@ VirtualFile RomFSFactory::OpenPatchedRomFSWithProgramIndex(u64 title_id, u8 prog
                                                              type != ContentRecordType::Program) {
         return patched;
     }
-    auto romfs = OpenLooseProgramRomFS(res_title_id);
+    auto romfs = OpenBootContent(res_title_id, type);
     if (romfs == nullptr) {
         return nullptr;
     }
@@ -113,34 +126,10 @@ VirtualFile RomFSFactory::OpenPatchedRomFSWithProgramIndex(u64 title_id, u8 prog
     return mods.PatchRomFS(nullptr, std::move(romfs), type, nullptr);
 }
 
-namespace {
-// One global set, replaced on every loose boot; only one title runs at a time.
-std::mutex loose_aoc_mutex;
-std::vector<std::pair<u64, VirtualFile>> loose_aoc;
-} // namespace
-
-void SetLooseAOC(std::vector<std::pair<u64, VirtualFile>> entries) {
-    std::scoped_lock lk{loose_aoc_mutex};
-    loose_aoc = std::move(entries);
-}
-
-std::vector<u64> GetLooseAOCTitleIDs() {
-    std::scoped_lock lk{loose_aoc_mutex};
-    std::vector<u64> ids;
-    for (const auto& [id, romfs] : loose_aoc) {
-        ids.push_back(id);
-    }
-    return ids;
-}
-
 VirtualFile RomFSFactory::Open(u64 title_id, StorageId storage, ContentRecordType type) const {
     if (type == ContentRecordType::Data) {
-        std::scoped_lock lk{loose_aoc_mutex};
-        for (const auto& [id, romfs] : loose_aoc) {
-            if (id == title_id) {
-                LOG_INFO(Service_FS, "Serving loose add-on content {:016X}", title_id);
-                return romfs;
-            }
+        if (auto romfs = OpenBootContent(title_id, type)) {
+            return romfs;
         }
     }
 

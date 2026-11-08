@@ -27,6 +27,7 @@
 
 #include "common/fs/file.h"
 #include "common/fs/path_util.h"
+#include "core/file_sys/common_funcs.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/nup_container.h"
 #include "core/file_sys/vfs/vfs_real.h"
@@ -559,15 +560,35 @@ public:
         const auto dlc = FindDirectory(dump_root, "dlc");
 
         std::optional<u64> base_title_id;
-        if (!base.empty() && HasContent(base)) {
+        std::error_code ec;
+        if (program_variant) {
+            // A legacy base/update must not shadow the native edition's selected executable.
+            const auto program = selected->parent_path().parent_path();
+            base_title_id = AddPackage(KindBase, program, 0, {});
+            // The other programs follow as further base packages, keyed by program index:
+            // Switch 2 Editions read the original game data of program 0.
+            std::vector<std::pair<u64, fs::path>> siblings;
+            for (const auto& sibling : fs::directory_iterator(program.parent_path(), ec)) {
+                const auto index = ParseDecimal(ToUtf8(sibling.path().filename()));
+                const auto romfs = FindDirectory(sibling.path(), "romfs");
+                if (index && *index <= 0xFF && sibling.path() != program && !romfs.empty() &&
+                    DirHasFiles(romfs)) {
+                    siblings.emplace_back(*index, sibling.path());
+                }
+            }
+            std::ranges::sort(siblings);
+            for (const auto& [index, path] : siblings) {
+                AddPackage(KindBase, path, 0, {});
+                plan.packages.back().title_id = GetBaseTitleIDWithProgramIndex(*base_title_id, index);
+            }
+        } else if (!base.empty() && HasContent(base)) {
             base_title_id = AddPackage(KindBase, base, 0, {});
         } else if (updates.empty() && HasContent(dump_root)) {
             base_title_id = AddPackage(KindBase, dump_root, 0, {"base", "updates", "dlc"});
         }
 
         std::vector<std::pair<u64, fs::path>> versions;
-        std::error_code ec;
-        if (!updates.empty()) {
+        if (!program_variant && !updates.empty()) {
             for (const auto& entry : fs::directory_iterator(updates, ec)) {
                 const auto version = ParseDecimal(ToUtf8(entry.path().filename()));
                 if (version && entry.is_directory(ec) && HasContent(entry.path())) {

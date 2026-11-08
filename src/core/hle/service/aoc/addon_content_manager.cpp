@@ -70,7 +70,7 @@ static std::vector<u64> AccumulateAOCTitleIDs(Core::System& system) {
                        Loader::ResultStatus::Success;
             }),
         add_on_content.end());
-    for (const u64 tid : FileSys::GetLooseAOCTitleIDs()) {
+    for (const u64 tid : FileSys::ListBootContent(FileSys::ContentRecordType::Data)) {
         if (std::find(add_on_content.begin(), add_on_content.end(), tid) == add_on_content.end()) {
             add_on_content.push_back(tid);
         }
