@@ -8,7 +8,9 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
+#include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/util.h"
+#include "video_core/textures/decoders.h"
 
 TEST_CASE("Direct row uploads match whole-image bytes across mip and layer boundaries",
           "[texture_row_upload]") {
@@ -152,4 +154,40 @@ TEST_CASE("Unswizzling an image with no guest bytes yields zeros", "[texture_row
         VideoCommon::UnswizzleBlockLinearImage(info, std::span<const u8>{}, output, false);
     REQUIRE(copies.size() == 2);
     CHECK(std::ranges::all_of(std::span{output}.first(64 * 64 * 2), [](u8 x) { return x == 0; }));
+}
+
+TEST_CASE("Switch 2 headers asking for Maxwell GOBs decode without the bit 5/6 swap",
+          "[texture_row_upload]") {
+    // An R8 64x16 surface, two GOBs tall, as Xenoblade Chronicles' font atlas: header word 2 bit
+    // 24 set, data in the Maxwell GOB layout.
+    Tegra::Texture::TICEntry tic{};
+    tic.format.Assign(Tegra::Texture::TextureFormat::R8);
+    tic.r_type.Assign(Tegra::Texture::ComponentType::UNORM);
+    tic.g_type.Assign(Tegra::Texture::ComponentType::UNORM);
+    tic.b_type.Assign(Tegra::Texture::ComponentType::UNORM);
+    tic.a_type.Assign(Tegra::Texture::ComponentType::UNORM);
+    tic.header_version.Assign(Tegra::Texture::TICHeaderVersion::BlockLinear);
+    tic.texture_type.Assign(Tegra::Texture::TextureType::Texture2D);
+    tic.block_height.Assign(1);
+    tic.width_minus_one.Assign(63);
+    tic.height_minus_1.Assign(15);
+    const bool maxwell = GENERATE(false, true);
+    tic.load_store_hint.Assign(maxwell ? 1 : 0);
+    const VideoCommon::ImageInfo info{tic};
+    REQUIRE(info.maxwell_gobs == maxwell);
+    REQUIRE(VideoCommon::UsesNativeGobs(true, info) == !maxwell);
+    REQUIRE_FALSE(VideoCommon::UsesNativeGobs(false, info));
+    // Render targets and other images built without a texture header keep the Switch 2 layout.
+    REQUIRE(VideoCommon::UsesNativeGobs(true, VideoCommon::ImageInfo{}));
+
+    std::vector<u8> linear(64 * 16);
+    for (size_t i = 0; i < linear.size(); ++i) {
+        linear[i] = static_cast<u8>(i * 7 + i / 64);
+    }
+    std::vector<u8> tiled(2 * 512);
+    Tegra::Texture::SwizzleTexture(tiled, linear, 1, 64, 16, 1, 1, 0, 1, !maxwell);
+    std::vector<u8> decoded(linear.size());
+    (void)VideoCommon::UnswizzleBlockLinearImage(info, tiled, decoded,
+                                                 VideoCommon::UsesNativeGobs(true, info));
+    REQUIRE(decoded == linear);
 }

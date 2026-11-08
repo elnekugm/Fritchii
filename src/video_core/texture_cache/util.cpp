@@ -573,7 +573,7 @@ void SwizzleBlockLinearImage(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr
                            num_tiles.depth, block.height, block.depth,
                            StrideAlignment(num_tiles, info.block, BytesPerBlockLog2(info.format),
                                            info.tile_width_spacing),
-                           gpu_memory.UsesNativeTiling());
+                           UsesNativeGobs(gpu_memory.UsesNativeTiling(), info));
         }
 
         host_offset += host_bytes_per_layer;
