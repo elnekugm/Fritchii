@@ -162,6 +162,8 @@ public:
     VirtualDir GetRomFSDir(std::size_t package_index);
     VirtualDir GetPackageDir(std::size_t package_index);
 
+    std::vector<std::size_t> FindAddonPackages(u64 program_id) const;
+
     /// Newest usable add-on RomFS per title belonging to this application.
     std::vector<std::pair<u64, VirtualFile>> GetAddonRomFS(u64 program_id);
 

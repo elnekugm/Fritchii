@@ -270,9 +270,9 @@ QString FormatPatchNameVersions(const FileSys::PatchManager& patch_manager,
     QString out;
     FileSys::VirtualFile update_raw;
     loader.ReadUpdateRaw(update_raw);
-    for (const auto& patch : patch_manager.GetPatches(update_raw)) {
+    for (const auto& patch : patch_manager.GetPatches(update_raw, loader.ReadEmbeddedPatches())) {
         const bool is_update = patch.name == "Update";
-        if (!updatable && is_update) {
+        if (!updatable && is_update && patch.source != FileSys::PatchSource::Embedded) {
             continue;
         }
 

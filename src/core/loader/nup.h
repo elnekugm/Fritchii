@@ -42,6 +42,8 @@ public:
 
     ResultStatus VerifyIntegrity(std::function<bool(size_t, size_t)> progress_callback) override;
 
+    std::vector<FileSys::Patch> ReadEmbeddedPatches() const override;
+
     ResultStatus ReadRomFS(FileSys::VirtualFile& out_file) override;
     bool IsRomFSUpdatable() const override;
     ResultStatus ReadProgramId(u64& out_program_id) override;
