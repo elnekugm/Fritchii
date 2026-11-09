@@ -27,6 +27,7 @@
 #include "common/common_types.h"
 #include "common/thread_worker.h"
 #include "shader_recompiler/frontend/ir/basic_block.h"
+#include "shader_recompiler/frontend/ir/program.h"
 #include "shader_recompiler/frontend/ir/value.h"
 #include "shader_recompiler/frontend/maxwell/control_flow.h"
 #include "shader_recompiler/host_translate_info.h"
@@ -109,6 +110,18 @@ using VideoCommon::GraphicsEnvironment;
 using VideoCommon::ShaderInfo;
 
 struct ShaderPools {
+    void ReleaseComputeContents(Shader::IR::Program& program, std::vector<u32>& code,
+                                bool build_in_parallel) {
+        if (build_in_parallel) {
+            return;
+        }
+        // Disk-cache workers do not need translation storage during the synchronous driver call.
+        program = {};
+        code = std::vector<u32>{};
+        block.Free();
+        inst.Free();
+    }
+
     void ReleaseContents() {
         flow_block.ReleaseContents();
         block.ReleaseContents();

@@ -153,6 +153,7 @@ add_executable(tests
     core/internal_network/socket_proxy.cpp
     core/priority_queue.cpp
     core/internal_network/network.cpp
+    video_core/shader_object_pool.cpp
     video_core/aftermath_dump.cpp
     video_core/stall_diagnostics.cpp
     video_core/oot_visual_workaround.cpp
