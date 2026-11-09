@@ -132,6 +132,13 @@ static void OverrideIfGlobal(Settings::SwitchableSetting<T, ranged>& setting, T 
 
 void LoadEarlyOverrides(std::uint64_t program_id) {
     switch (static_cast<TitleID>(program_id)) {
+        case TitleID::Orbitals:
+            // Apply before CPU/renderer setup, including their cached accuracy and memory policy.
+            OverrideIfGlobal(Settings::values.gpu_accuracy, Settings::GpuAccuracy::Low);
+            OverrideIfGlobal(Settings::values.gpu_fence_behavior, Settings::GpuFenceBehavior::Balanced);
+            OverrideIfGlobal(Settings::values.use_reactive_flushing, false);
+            Settings::UpdateGPUAccuracy();
+            break;
         case TitleID::MarioTennisFever:
             // Present from the present thread: otherwise the GPU thread's back half acquires the
             // swapchain image and presents itself, and with FIFO vsync each can block it for up to

@@ -903,6 +903,9 @@ bool GpuSplit::WaitFor(u64 target, DrainSite site) {
         }
         Backoff(spins, target);
     }
+    SleepUntilConsumed(target);
+    wait_target.store(~u64{0}, std::memory_order_relaxed);
+    return true;
 }
 
 void GpuSplit::Backoff(u32 spins, u64 target) {

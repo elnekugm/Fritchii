@@ -1248,6 +1248,18 @@ void TextureCache<P>::ReplaceColorFeedbackViews(std::span<ImageViewInOut> views)
     // Every replacement remains live until this draw executes. Reusing a same-shaped shadow
     // within this call would overwrite an earlier binding's snapshot before it is sampled.
     boost::container::small_vector<ImageId, 8> used_shadows;
+    // Every draw comes here: decode the bound targets once, not once per sampled view.
+    boost::container::static_vector<GPUVAddr, Tegra::Engines::Maxwell3D::Regs::NumRenderTargets> targets;
+    for (u32 index = 0; index < regs.rt_control.count && index < Tegra::Engines::Maxwell3D::Regs::NumRenderTargets;
+         ++index) {
+        const auto& rt = regs.rt[regs.rt_control.Map(index)];
+        if (rt.format != Tegra::RenderTargetFormat::NONE) {
+            targets.push_back(rt.Address());
+        }
+    }
+    if (targets.empty()) {
+        return;
+    }
     for (ImageViewInOut& view : views) {
         if (view.id == NULL_IMAGE_VIEW_ID || view.blacklist) {
             continue;
@@ -1258,11 +1270,7 @@ void TextureCache<P>::ReplaceColorFeedbackViews(std::span<ImageViewInOut> views)
         }
         const ImageId image_id = image_view.image_id;
         const GPUVAddr gpu_addr = slot_images[image_id].gpu_addr;
-        bool is_target = false;
-        for (u32 index = 0; index < regs.rt_control.count; ++index) {
-            const auto& rt = regs.rt[regs.rt_control.Map(index)];
-            is_target |= rt.format != Tegra::RenderTargetFormat::NONE && rt.Address() == gpu_addr;
-        }
+        const bool is_target = std::ranges::find(targets, gpu_addr) != targets.end();
         // ponytail: rescaled and multisampled targets keep the loop; copy them when a game needs it.
         if (!is_target || True(slot_images[image_id].flags & ImageFlagBits::Rescaled) ||
             slot_images[image_id].info.num_samples != 1) {

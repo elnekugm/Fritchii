@@ -45,6 +45,7 @@ enum class GPUVendor {
 
 enum class TitleID : std::uint64_t {
     NinjaGaidenRagebound = 0x0100781020710000ULL,
+    Orbitals = 0x040004F027560000ULL,
     MarioTennisFever = 0x0400D4201C6EA000ULL,
     HyruleWarriorsAgeOfImprisonment = 0x04003F40232DE000ULL,
     DonkeyKongBananza = 0x040074A01BF12000ULL,

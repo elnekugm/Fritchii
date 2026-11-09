@@ -24,6 +24,7 @@
 #include "common/hitch_diagnostic.h"
 #include "common/range_sets.inc"
 #include "common/unmapped_read_diagnostic.h"
+#include "video_core/buffer_cache/approximate_gpu_writes.h"
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/buffer_cache/multi_range_refresh.h"
 #include "video_core/buffer_cache/nx2_bytes_equal.h"
@@ -54,6 +55,7 @@ BufferCache<P>::BufferCache(Tegra::MaxwellDeviceMemoryManager& device_memory_, R
     // Ensure the first slot is used for the null buffer
     void(slot_buffers.insert(runtime, NullBufferParams{}));
     gpu_modified_ranges.Clear();
+    approx_gpu_modified_ranges.Clear();
     inline_buffer_id = NULL_BUFFER_ID;
 #ifdef YUZU_LEGACY
     immediately_free = (Settings::values.vram_usage_mode.GetValue() == Settings::VramUsageMode::Aggressive);
@@ -944,6 +946,8 @@ bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 am
     const bool has_new_downloads = tmp_intervals.size() != 0;
     for (const auto& pair : tmp_intervals) {
         gpu_modified_ranges.Add(pair.first, pair.second);
+        approx_gpu_modified_ranges.Subtract(pair.first, pair.second);
+        NoteExactGpuWrite(pair.first, pair.second);
         if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed)) {
             Tegra::Nx2MarkGpuWritten(pair.first, pair.second);
             Nx2NoteListWrite(buffer_b, pair.first, pair.second);
@@ -1743,6 +1747,12 @@ void BufferCache<P>::PopAsyncBuffers() {
     async_buffers.pop_front();
     pending_downloads.pop_front();
     pending_download_ranges.pop_front();
+}
+
+template <class P>
+bool BufferCache<P>::IsRegionExactlyGpuModified(DAddr addr, size_t size) {
+    return VideoCommon::IsRegionExactlyGpuModified(approx_gpu_modified_ranges, gpu_modified_ranges,
+                                                   addr, size);
 }
 
 template <class P>

@@ -290,6 +290,11 @@ private:
     static constexpr u32 CommandChecksBeforeBitsFirst = 2048;
     u64 command_check_generation{~u64{0}};
     u32 command_checks_since_mark{};
+    /// The same for the wait for queued writers before reading an entry (WaitForEntryWriters).
+    u64 entry_wait_generation{~u64{0}};
+    u32 entry_checks_since_mark{};
+    /// Whether an entry not on GPU-written pages must still wait for the split's queued writers.
+    bool WaitForEntryWriters();
 
 public:
 

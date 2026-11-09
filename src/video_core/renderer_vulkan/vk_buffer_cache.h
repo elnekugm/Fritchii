@@ -80,17 +80,26 @@ public:
     }
 
 private:
-    struct BufferView {
+    struct ViewKey {
         u32 offset;
         u32 size;
         VideoCore::Surface::PixelFormat format;
-        vk::BufferView handle;
+        bool operator==(const ViewKey&) const = default;
+    };
+    struct ViewKeyHash {
+        size_t operator()(const ViewKey& key) const noexcept {
+            return ((static_cast<u64>(key.offset) << 32) ^ key.size ^
+                    (static_cast<u64>(key.format) << 20)) *
+                   0x9E3779B97F4A7C15ULL;
+        }
     };
 
     const Device* device{};
     Scheduler* scheduler{};
     vk::Buffer buffer;
-    std::vector<BufferView> views;
+    // One view per (offset, size, format); a buffer bound at many offsets collects many, and
+    // every texel buffer of every draw looks one up.
+    std::unordered_map<ViewKey, vk::BufferView, ViewKeyHash> views;
     VideoCommon::UsageTracker tracker;
     VkDeviceAddress device_address{};
     u64 last_usage_tick{};

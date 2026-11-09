@@ -999,6 +999,10 @@ private:
         }
     }
     void WaitForSpace(size_t words);
+    /// Front: blocks until the back stored `consumed` at or past target.
+    void SleepUntilConsumed(u64 target);
+    /// Back: hands ring space back and wakes a front sleeping for this position.
+    void StoreConsumed(u64 position);
     void SelectEngine(Tegra::Engines::EngineInterface* engine) {
         // Before the engine is compared: the held-back work selects its own.
         RunPendingFlush();

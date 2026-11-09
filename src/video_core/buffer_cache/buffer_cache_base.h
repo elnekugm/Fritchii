@@ -21,6 +21,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <utility>
 
 #include "common/container/unordered_map.h"
 #include <boost/unordered/unordered_node_map.hpp>
@@ -57,6 +58,7 @@
 #include "video_core/texture_cache/types.h"
 
 namespace VideoCommon {
+
 
 using BufferId = Common::SlotId;
 
@@ -1081,6 +1083,17 @@ private:
     Common::RangeSet<DAddr> cpu_read_ranges;
     bool download_cpu_read_ranges{};
     Common::RangeSet<DAddr> gpu_modified_ranges;
+    // GPU-modified bytes only covered by guessed native compute extents (approximate_gpu_writes.h).
+    Common::RangeSet<DAddr> approx_gpu_modified_ranges;
+    std::vector<std::pair<DAddr, u64>> exact_gpu_writes;
+    bool exact_gpu_writes_overflow{};
+    void NoteExactGpuWrite(DAddr addr, u64 size) {
+        if (exact_gpu_writes.size() < 1024) {
+            exact_gpu_writes.emplace_back(addr, size);
+        } else {
+            exact_gpu_writes_overflow = true;
+        }
+    }
     std::deque<Common::RangeSet<DAddr>> committed_gpu_modified_ranges;
     /// Buffer pages the guest CPU reads (NoteCpuRead). Without AsyncBufferDownloads, GPU writes
     /// to them are still copied back at fences: Pokemon Pokopia builds its sky, fog and exposure
