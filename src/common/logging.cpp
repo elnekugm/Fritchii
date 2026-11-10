@@ -491,6 +491,27 @@ std::filesystem::path FilePath(bool* primary_locked) {
     return {};
 }
 
+std::string DescribeException(std::exception_ptr exception) {
+    if (!exception) {
+        return "no active exception";
+    }
+    try {
+        std::rethrow_exception(exception);
+    } catch (const std::exception& e) {
+        return e.what();
+    } catch (...) {
+        return "non-standard exception";
+    }
+}
+
+void InstallTerminateHandler() {
+    std::set_terminate([] {
+        // Critical entries flush the file backend before the abort below.
+        LOG_CRITICAL(Common, "std::terminate: {}", DescribeException(std::current_exception()));
+        std::abort();
+    });
+}
+
 void SetGlobalFilter(const Filter& filter) {
     if (logging_instance)
         logging_instance->filter = filter;
