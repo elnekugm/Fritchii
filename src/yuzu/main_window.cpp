@@ -5414,6 +5414,13 @@ void MainWindow::UpdateStatusBar() {
         return;
     }
 
+    // The timer fires every 500 ms: once a minute, so a crash report shows what ran out and how
+    // fast (issue 140).
+    if (static u32 updates{}; ++updates % 120 == 0) {
+        LOG_INFO(Frontend, "Host resources: {}",
+                 Common::DescribeHostResources(Common::QueryHostResources()));
+    }
+
     if (Settings::values.tas_enable)
         tas_label->setText(GetTasStateDescription());
     else

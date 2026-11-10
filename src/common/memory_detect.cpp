@@ -4,6 +4,7 @@
 #ifdef _WIN32
 // clang-format off
 #include <windows.h>
+#include <psapi.h>
 #include <sysinfoapi.h>
 #include <psapi.h>
 // clang-format on
@@ -14,6 +15,7 @@
 #include <sys/sysctl.h>
 #elif defined(__linux__)
 #include <sys/sysinfo.h>
+#include <unistd.h>
 #else
 #include <unistd.h>
 #endif

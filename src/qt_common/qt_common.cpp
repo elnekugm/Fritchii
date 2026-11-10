@@ -247,6 +247,8 @@ void Init(QWidget* root) {
             const std::string text = message.toStdString();
             if (type == QtFatalMsg) {
                 LOG_CRITICAL(Frontend, "Qt fatal: {}", text);
+                LOG_CRITICAL(Frontend, "Host resources: {}",
+                             Common::DescribeHostResources(Common::QueryHostResources()));
             } else if (type == QtCriticalMsg || type == QtWarningMsg) {
                 LOG_WARNING(Frontend, "Qt: {}", text);
             }

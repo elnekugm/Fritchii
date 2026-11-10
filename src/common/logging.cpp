@@ -37,6 +37,7 @@
 #include "common/thread.h"
 
 #include "common/logging.h"
+#include "common/memory_detect.h"
 #include "common/settings.h"
 #include "common/string_util.h"
 #include "common/bounded_threadsafe_queue.h"
@@ -508,6 +509,7 @@ void InstallTerminateHandler() {
     std::set_terminate([] {
         // Critical entries flush the file backend before the abort below.
         LOG_CRITICAL(Common, "std::terminate: {}", DescribeException(std::current_exception()));
+        LOG_CRITICAL(Common, "Host resources: {}", DescribeHostResources(QueryHostResources()));
         std::abort();
     });
 }
