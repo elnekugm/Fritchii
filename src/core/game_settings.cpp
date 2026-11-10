@@ -132,6 +132,12 @@ static void OverrideIfGlobal(Settings::SwitchableSetting<T, ranged>& setting, T 
 
 void LoadEarlyOverrides(std::uint64_t program_id) {
     switch (static_cast<TitleID>(program_id)) {
+        case TitleID::SuperMarioBrosWonderNintendoSwitch2Edition:
+            // High accuracy keeps the GPU thread split off, and reactive flushing had ~34 MB of
+            // GPU-written buffers copied back per frame once the game had read a page of them.
+            // RX 9070 XT, first world map with the fps option at 240: 140 presents a second
+            // before, 182 after (three runs each). Balanced fences signal as High did.
+            [[fallthrough]];
         case TitleID::Orbitals:
             // Apply before CPU/renderer setup, including their cached accuracy and memory policy.
             OverrideIfGlobal(Settings::values.gpu_accuracy, Settings::GpuAccuracy::Low);
@@ -153,6 +159,9 @@ void LoadEarlyOverrides(std::uint64_t program_id) {
 
 void LoadOverrides(std::uint64_t program_id, const VideoCore::RendererBase& renderer) {
     const auto env = DetectEnvironment(renderer);
+    // Again here: the configuration dialog resets every untouched setting to global mid-game and
+    // then calls only this function (the split stopped and the title lost its early defaults).
+    LoadEarlyOverrides(program_id);
     Settings::values.preemptive_cpu_reads = false;
 
     switch (static_cast<TitleID>(program_id)) {
