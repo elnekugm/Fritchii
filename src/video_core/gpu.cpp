@@ -249,7 +249,7 @@ struct GPU::Impl {
     }
 
     void NotifyShutdown() {
-        // Stops the GPU thread and the split's back (GpuSplit::Stop): no TickWork runs after it.
+        shutdown_source.request_stop();
         gpu_thread.NotifyShutdown();
         {
             // The GPU threads stopped: no sync operation runs anymore. Guest threads still run
@@ -485,6 +485,8 @@ struct GPU::Impl {
 
     // Destruction of thread must be done before all (non trivial)
     // previous members has been destroyed
+    // Outlives gpu_thread so its workers can observe cancellation during shutdown/join.
+    std::stop_source shutdown_source;
     VideoCommon::GPUThread::ThreadManager gpu_thread;
 
     std::unique_ptr<VideoCore::RendererBase> renderer;
@@ -706,6 +708,10 @@ void GPU::Start() {
 
 void GPU::NotifyShutdown() {
     impl->NotifyShutdown();
+}
+
+std::stop_token GPU::GetShutdownToken() const noexcept {
+    return impl->shutdown_source.get_token();
 }
 
 void GPU::WaitForIdle() {

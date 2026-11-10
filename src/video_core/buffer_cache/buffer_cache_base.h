@@ -9,8 +9,8 @@
 #include <algorithm>
 #include <array>
 #include <bit>
-#include <bitset>
-#include <chrono>
+#include <condition_variable>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -18,6 +18,7 @@
 #include <optional>
 #include <source_location>
 #include <span>
+#include <stop_token>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -418,6 +419,9 @@ public:
     void CommitAsyncFlushes();
     void CommitAsyncFlushesHigh();
 
+    /// Called without cache locks; cancellation leaves outstanding downloads intact.
+    bool WaitAsyncFlushBudget(std::stop_token stop_token, size_t budget = 256 * 1024 * 1024);
+
     /// Pop asynchronous downloads
     void PopAsyncFlushes();
     void PopAsyncBuffers();
@@ -684,8 +688,11 @@ public:
     }
 
 private:
-    template <typename Mask, typename Func>
-    static void ForEachEnabledBit(Mask enabled_mask, Func&& func) {
+    /// Recycle completed readbacks on the GPU owner thread with mutex held.
+    void ReleaseCompletedAsyncBuffers();
+
+    template <typename Func>
+    static void ForEachEnabledBit(u32 enabled_mask, Func&& func) {
         for (u32 index = 0; enabled_mask != 0; ++index, enabled_mask >>= 1) {
             const int disabled_bits = std::countr_zero(enabled_mask);
             index += disabled_bits;
@@ -953,116 +960,17 @@ private:
                Tegra::Nx2NeedsBufferDownloads();
     }
 
-    /// Experiment, EDEN_NX2_WRITTEN_SSBO_MARK_KIB=<n>: marks at most n KiB of a written Switch 2
-    /// storage buffer binding GPU-written. Native pointers carry no size, so a written binding
-    /// spans up to 8 MiB of its mapping and arms read traps and fence downloads over CPU data
-    /// the shader never writes. Writes past the cap are not tracked, so this only measures how
-    /// much of the marked range the GPU really writes.
-    u32 WrittenStorageMarkSize(u32 size) const {
-        static const u64 cap = [] {
-            const char* value = std::getenv("EDEN_NX2_WRITTEN_SSBO_MARK_KIB");
-            return value == nullptr ? u64{0} : std::strtoull(value, nullptr, 10) * 1024;
-        }();
-        if (cap == 0 || gpu_memory == nullptr || !gpu_memory->UsesNativeTiling()) {
-            return size;
-        }
-        return static_cast<u32>((std::min<u64>)(size, cap));
-    }
-
-    /// Write extent self-check (fable_answer_25; Ocarina of Time's glowing triangles,
-    /// 2026-11-09). The store analysis bounds how far a native compute program writes, and only
-    /// that much is marked GPU-written; one program writes past it, and the CPU then read stale
-    /// guest bytes back (particle positions turned into one right vertex and garbage). Each program
-    /// is marked in full until a dispatch at its dims was checked: its tail past the proof, as
-    /// the GPU left it after that one dispatch, is compared with guest memory from right before
-    /// it (known GPU writes and unapplied CPU writes left out). The same: the proof holds at these
-    /// dims (and at smaller ones). Different: the program is marked in full for the session and
-    /// logged, naming it. EDEN_NX2_EXP45=1 (live) skips the check (the proof is trusted as before).
-    struct ExtentTrust {
-        std::array<u32, 3> block{};
-        std::array<u32, 3> grid{};
-        bool distrusted{};
-        bool probe_pending{};
-    };
-    struct ExtentProbeRequest {
-        bool active{};
-        u64 proven{};
-        u64 pointer{};
-        u64 pad{};
-        std::array<u32, 3> block{};
-        std::array<u32, 3> grid{};
-    };
-    struct ExtentProbe {
-        u64 shader_hash{};
-        BufferId buffer_id{};
-        DAddr device_addr{}; ///< The tail's start (in buffer_id)
-        u64 binding_size{};
-        ExtentProbeRequest request{};
-        u64 span{};
-        /// Guest memory of the tail at bind (fable_answer_26). Under the full mark the CPU's reads
-        /// bring the GPU's bytes into guest memory, so only a copy made before the dispatch shows
-        /// what the CPU would have read without the mark.
-        std::vector<u8> guest;
-        /// Tail offsets [begin, end) left out of the compare: known GPU writes and CPU writes not
-        /// applied to the buffer yet.
-        std::vector<std::pair<u64, u64>> skip;
-        std::optional<Async_Buffer> after;
-        u64 tick{};
-    };
-    u64 compute_shader_hash{};
-    std::unordered_map<u64, ExtentTrust> extent_trust;
-    std::array<ExtentProbeRequest, NUM_STORAGE_BUFFERS> extent_probe_requests{};
-    std::vector<ExtentProbe> extent_probes;
-    u64 extent_probes_trusted{};
-    u64 extent_probes_distrusted{};
-    u64 extent_full_marks{};
-
-    void CheckExtentProbes();
-    void ProbeExtentTail(u32 index, const Binding& binding);
-
-    /// Whether a GPU write to this range is copied back at the next fence. Ranges the guest CPU
-    /// has read (Preflushable, set by the first reactive flush) always are: later reads skip the
-    /// flush and rely on these downloads, e.g. collision meshes skinned by compute shaders.
+    /// Whether full async downloads are enabled or any part of this write is Preflushable.
+    /// Previously CPU-read pages need fence downloads, e.g. collision meshes skinned by compute.
     bool DownloadsAtFence(DAddr device_addr, u64 size) noexcept {
         return AsyncBufferDownloads() || memory_tracker.IsRegionPreflushable(device_addr, size);
     }
 
-    /// Queues a GPU write for download at the next fence where DownloadsAtFence holds. With only
-    /// Preflushable marks, just the marked pages are queued: a write that covers one marked page
-    /// of a large buffer would otherwise copy the whole buffer back at every fence.
-    void QueueFenceDownload(DAddr device_addr, u64 size) {
-        static const bool exact = [] {
-            const char* value = std::getenv("EDEN_NX2_EXACT_PREFLUSH");
-            return value == nullptr || value[0] != '0';
-        }();
-        if (AsyncBufferDownloads()) {
-            uncommitted_gpu_modified_ranges.Add(device_addr, size);
-            return;
-        }
-        // Preflushed writes arm the read traps too: their data reaches guest memory only when
-        // the fence's download lands, and a read before that saw stale words (Ocarina of Time's
-        // whole screen flashed white at the sword boulder, ~180 times in 30 s). The trapped read
-        // flushes on demand only while the data is still in flight (GetFlushArea).
-        if (!exact) {
-            if (memory_tracker.IsRegionPreflushable(device_addr, size)) {
-                uncommitted_gpu_modified_ranges.Add(device_addr, size);
-            }
-            ArmReadTraps(device_addr, size);
-            return;
-        }
-        const DAddr end = device_addr + size;
-        u64 queued = 0;
-        memory_tracker.ForEachPreflushableRange(device_addr, size, [&](DAddr begin, u64 length) {
-            const DAddr lower = (std::max)(begin, device_addr);
-            const DAddr upper = (std::min)(begin + length, end);
-            if (lower < upper) {
-                uncommitted_gpu_modified_ranges.Add(lower, upper - lower);
-                queued += upper - lower;
-            }
-        });
-        ArmReadTraps(device_addr, size);
-        if (Nx2DownloadTrace::g_enabled && queued != 0) [[unlikely]] {
-            Nx2DownloadTrace::Queued(device_addr, size, queued);
+    /// Whether QueueDownload(addr, size) copies any part of the range back at the next fence:
+    /// full async downloads, overlapping Preflushable pages, or known CPU-read ranges.
+    bool HasFenceDownload(DAddr device_addr, u64 size) {
+        if (DownloadsAtFence(device_addr, size)) {
+            return true;
         }
     }
 
@@ -1105,10 +1013,16 @@ private:
     /// Queues the parts of a GPU write to [addr, addr + size) that are copied back at the next
     /// fence.
     void QueueDownload(DAddr addr, u64 size) {
-        if (DownloadsAtFence(addr, size)) {
+        if (AsyncBufferDownloads()) {
             uncommitted_gpu_modified_ranges.Add(addr, size);
             return;
         }
+        // A CPU-read page inside a guessed 8 MiB compute write does not make the rest of
+        // that write CPU-visible. Queue only the marked intersections, retaining read traps
+        // so a first CPU read of any remaining page still downloads its current contents.
+        memory_tracker.ForEachPreflushableRange(addr, size, [this](DAddr start, u64 length) {
+            uncommitted_gpu_modified_ranges.Add(start, length);
+        });
         cpu_read_ranges.ForEachInRange(addr, size, [this](DAddr start, DAddr end) {
             uncommitted_gpu_modified_ranges.Add(start, end - start);
         });
@@ -1132,6 +1046,8 @@ private:
 
     // Async Buffers
     std::deque<std::optional<Async_Buffer>> async_buffers;
+    size_t pending_async_download_bytes{};
+    std::condition_variable_any async_download_progress;
     std::deque<boost::container::small_vector<BufferCopy, 4>> pending_downloads;
     /// For each entry of pending_downloads: the ranges it still writes to guest memory when its
     /// fence pops. A write to a range after a download was taken removes it from that download

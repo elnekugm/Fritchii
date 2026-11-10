@@ -3,7 +3,12 @@
 
 #include <algorithm>
 #include <array>
+#include <barrier>
+#include <chrono>
 #include <cstring>
+#include <future>
+#include <memory>
+#include <thread>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
 #include "common/scope_exit.h"
@@ -15,6 +20,8 @@
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/buffer_cache/memory_tracker_base.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/memory_manager.h"
+#include "video_core/nx2.h"
 
 namespace {
 struct FixtureRuntime;
@@ -38,12 +45,54 @@ struct FixtureStage {
     std::span<u8> mapped_span;
     explicit FixtureStage(size_t size)
         : buffer(std::make_shared<FixtureBuffer>(size)), mapped_span(buffer->bytes) {}
+    explicit FixtureStage(std::shared_ptr<FixtureBuffer> buffer_)
+        : buffer(std::move(buffer_)), mapped_span(buffer->bytes) {}
 };
 struct FixtureRuntime {
     bool out_of_bounds{};
     std::vector<std::pair<u64, u64>> copied;
-    FixtureStage DownloadStagingBuffer(size_t size, bool = false) {
-        return FixtureStage(size);
+    struct DeferredStage {
+        std::shared_ptr<FixtureBuffer> buffer;
+        bool active{};
+        u64 last_use_tick{};
+    };
+    u64 current_tick{};
+    u64 gpu_tick{};
+    std::vector<DeferredStage> deferred_stages;
+    std::vector<size_t> allocation_ids;
+    std::vector<size_t> freed_ids;
+    FixtureStage DownloadStagingBuffer(size_t size, bool deferred = false) {
+        if (!deferred) {
+            return FixtureStage(size);
+        }
+        for (size_t i = 0; i < deferred_stages.size(); ++i) {
+            auto& stage = deferred_stages[i];
+            if (!stage.active && IsFree(stage.last_use_tick) && stage.buffer->bytes.size() >= size) {
+                stage.active = true;
+                allocation_ids.push_back(i);
+                return FixtureStage(stage.buffer);
+            }
+        }
+        FixtureStage stage(size);
+        allocation_ids.push_back(deferred_stages.size());
+        deferred_stages.push_back({stage.buffer, true});
+        return stage;
+    }
+    void FreeDeferredStagingBuffer(FixtureStage& ref) {
+        ReleaseDeferredStage(ref, current_tick);
+    }
+    void FreeCompletedDeferredStagingBuffer(FixtureStage& ref) {
+        ReleaseDeferredStage(ref, 0);
+    }
+    void ReleaseDeferredStage(FixtureStage& ref, u64 last_use_tick) {
+        const auto it = std::ranges::find_if(deferred_stages, [&](const auto& stage) {
+            return stage.buffer == ref.buffer;
+        });
+        REQUIRE(it != deferred_stages.end());
+        REQUIRE(it->active);
+        it->active = false;
+        it->last_use_tick = last_use_tick;
+        freed_ids.push_back(static_cast<size_t>(it - deferred_stages.begin()));
     }
     FixtureStage UploadStagingBuffer(size_t size) {
         return FixtureStage(size);
@@ -56,10 +105,10 @@ struct FixtureRuntime {
     }
     void Finish() {}
     u64 CurrentTick() {
-        return 0;
+        return current_tick;
     }
-    bool IsFree(u64) {
-        return true;
+    bool IsFree(u64 tick) {
+        return tick <= gpu_tick;
     }
     void Wait(u64) {}
     template <class... T>
@@ -104,6 +153,14 @@ struct FixtureParams {
                           NEEDS_BIND_UNIFORM_INDEX = false, NEEDS_BIND_STORAGE_INDEX = false,
                           USE_MEMORY_MAPS = true, SEPARATE_IMAGE_BUFFERS_BINDINGS = false,
                           USE_MEMORY_MAPS_FOR_UPLOADS = true;
+};
+// Bind just the real address-space policy needed by these memory-only cache tests. Engines
+// and channel execution are not involved in ObtainCPUBuffer/GetFlushArea/CommitAsyncFlushes.
+struct NativeFixtureCache : VideoCommon::BufferCache<FixtureParams> {
+    using VideoCommon::BufferCache<FixtureParams>::BufferCache;
+    void SetAddressSpace(Tegra::MemoryManager& memory) {
+        gpu_memory = &memory;
+    }
 };
 } // namespace
 TEST_CASE("BufferCache: readback spanning separate buffers", "[video_core][buffer_cache]") {
@@ -339,4 +396,345 @@ TEST_CASE("BufferCache: obtained buffers count as used by this command buffer",
     synced->marked.pop_back(); // ObtainCPUBuffer's own mark
     CHECK(covered(*synced, synced_offset, 0x40));
     cache.reset();
+}
+
+TEST_CASE("BufferCache: completed downloads are reusable without a frame",
+          "[video_core][buffer_cache][download_lifetime]") {
+    const bool old_multi_core = Settings::values.use_multi_core.GetValue();
+    SCOPE_EXIT { Settings::values.use_multi_core.SetValue(old_multi_core); };
+    Settings::values.use_multi_core.SetValue(false);
+    Core::System system;
+    system.Initialize();
+    Kernel::KProcess process(system.Kernel());
+    SCOPE_EXIT { system.Kernel().UnregisterKernelObject(&process); };
+    auto& cpu = process.GetMemory();
+    auto& table = process.GetPageTable().GetImpl();
+    table.Resize(32, 12);
+    cpu.SetCurrentPageTable(process);
+    constexpr u64 phys = 0x80000, guest = 0x200000, dev = 0x70000, page = 0x1000;
+    system.DeviceMemory().buffer.ClearBackingRegion(phys, 3 * page, 0);
+    cpu.MapMemoryRegion(table, Common::ProcessAddress{guest}, 3 * page,
+                        Common::PhysicalAddress{Core::DramMemoryMap::Base + phys},
+                        Common::MemoryPermission::ReadWrite, false);
+    Tegra::MaxwellDeviceMemoryManager manager(system.DeviceMemory());
+    manager.Map(dev, guest, 3 * page, manager.RegisterProcess(&cpu));
+    FixtureRuntime runtime;
+    auto cache = std::make_unique<VideoCommon::BufferCache<FixtureParams>>(manager, runtime);
+    const auto write = [&](DAddr address, u8 value) {
+        const auto [buffer, offset] = cache->ObtainCPUBuffer(
+            address, page, VideoCommon::ObtainBufferSynchronize::FullSynchronize,
+            VideoCommon::ObtainBufferOperation::MarkAsWritten);
+        std::fill_n(buffer->bytes.begin() + offset, page, value);
+    };
+    const auto check_guest = [&](DAddr address, u8 expected) {
+        std::array<u8, page> bytes{};
+        manager.ReadBlockUnsafe(address, bytes.data(), bytes.size());
+        CHECK(std::ranges::all_of(bytes, [expected](u8 value) { return value == expected; }));
+    };
+
+    // Two fences are outstanding. A later allocation must not reuse either one's storage.
+    write(dev, 0x31);
+    cache->CommitAsyncFlushes();
+    write(dev + page, 0x72);
+    cache->CommitAsyncFlushes();
+    REQUIRE(runtime.allocation_ids.size() == 2);
+    CHECK(runtime.allocation_ids[0] != runtime.allocation_ids[1]);
+    CHECK(runtime.freed_ids.empty());
+    // These readbacks' fences completed, but unrelated newer work is still outstanding.
+    // Retagging completed buffers with the current tick would prevent their immediate reuse.
+    runtime.current_tick = 20;
+    runtime.gpu_tick = 10;
+    cache->PopAsyncFlushes();
+    check_guest(dev, 0x31);
+    // Popping happens on the fencing thread: release remains a backend operation.
+    CHECK(runtime.freed_ids.empty());
+    write(dev + 2 * page, 0x53);
+    cache->CommitAsyncFlushes();
+    REQUIRE(runtime.allocation_ids.size() == 3);
+    REQUIRE(runtime.freed_ids.size() == 1);
+    CHECK(runtime.freed_ids[0] == runtime.allocation_ids[0]);
+    CHECK(runtime.allocation_ids[2] == runtime.allocation_ids[0]);
+    CHECK(runtime.deferred_stages[runtime.allocation_ids[1]].active);
+    cache->PopAsyncFlushes();
+    check_guest(dev + page, 0x72);
+    cache->PopAsyncFlushes();
+    check_guest(dev + 2 * page, 0x53);
+
+    // More compute-release fences in the same frame reuse completed storage indefinitely.
+    for (u8 value : std::array<u8, 4>{0x64, 0x75, 0x86, 0x97}) {
+        write(dev + 2 * page, value);
+        cache->CommitAsyncFlushes();
+        CHECK(runtime.deferred_stages.size() == 2);
+        cache->PopAsyncFlushes();
+        check_guest(dev + 2 * page, value);
+    }
+    CHECK_FALSE(runtime.out_of_bounds);
+}
+
+TEST_CASE("DeviceMemoryManager: translations distinguish reused manager lifetimes on another thread",
+          "[video_core][buffer_cache][translation_lifetime]") {
+    const bool old_multi_core = Settings::values.use_multi_core.GetValue();
+    SCOPE_EXIT { Settings::values.use_multi_core.SetValue(old_multi_core); };
+    Settings::values.use_multi_core.SetValue(false);
+    Core::System system;
+    system.Initialize();
+    Kernel::KProcess process(system.Kernel());
+    SCOPE_EXIT { system.Kernel().UnregisterKernelObject(&process); };
+    auto& cpu = process.GetMemory();
+    auto& table = process.GetPageTable().GetImpl();
+    table.Resize(32, 12);
+    cpu.SetCurrentPageTable(process);
+    constexpr u64 phys = 0x80000, guest = 0x200000, dev = 0x70000, page = 0x1000;
+    system.DeviceMemory().buffer.ClearBackingRegion(phys, page, 0x31);
+    system.DeviceMemory().buffer.ClearBackingRegion(phys + page, page, 0x72);
+    cpu.MapMemoryRegion(table, Common::ProcessAddress{guest}, 2 * page,
+                        Common::PhysicalAddress{Core::DramMemoryMap::Base + phys},
+                        Common::MemoryPermission::ReadWrite, false);
+
+    using Manager = Tegra::MaxwellDeviceMemoryManager;
+    alignas(Manager) std::array<std::byte, sizeof(Manager)> storage;
+    auto* manager = std::construct_at(reinterpret_cast<Manager*>(storage.data()),
+                                      system.DeviceMemory());
+    manager->Map(dev, guest, page, manager->RegisterProcess(&cpu));
+    const u64 first_generation = manager->MappingGeneration();
+    std::array<u8, 6> observed{};
+    std::barrier gate{2};
+    std::thread reader([&] {
+        observed[0] = manager->Read<u8>(dev);
+        manager->ReadBlockUnsafe(dev + 1, &observed[1], 1);
+        gate.arrive_and_wait(); // The worker's thread-local cache now holds the first mapping.
+        gate.arrive_and_wait(); // Main has reconstructed a manager at the identical address.
+        observed[2] = manager->Read<u8>(dev);
+        manager->ReadBlockUnsafe(dev + 1, &observed[3], 1);
+        gate.arrive_and_wait(); // Retain the second instance's cached mapping.
+        gate.arrive_and_wait(); // The same instance now maps different backing.
+        observed[4] = manager->Read<u8>(dev);
+        manager->ReadBlockUnsafe(dev + 1, &observed[5], 1);
+    });
+    gate.arrive_and_wait();
+    std::destroy_at(manager);
+    manager = std::construct_at(reinterpret_cast<Manager*>(storage.data()), system.DeviceMemory());
+    const auto second_asid = manager->RegisterProcess(&cpu);
+    manager->Map(dev, guest + page, page, second_asid);
+    const u64 second_generation = manager->MappingGeneration();
+    gate.arrive_and_wait();
+    gate.arrive_and_wait();
+    // Map replaces the backing and increments the generation. Unmap also calls the GPU
+    // interface, which this memory-only fixture deliberately does not create.
+    manager->Map(dev, guest, page, second_asid);
+    const u64 remapped_generation = manager->MappingGeneration();
+    gate.arrive_and_wait();
+    reader.join();
+    std::destroy_at(manager);
+
+    CHECK(first_generation == second_generation);
+    CHECK(remapped_generation != second_generation);
+    CHECK(observed == std::array<u8, 6>{0x31, 0x31, 0x72, 0x72, 0x31, 0x31});
+}
+
+TEST_CASE("BufferCache: pending download budget waits for delivery and supports cancellation",
+          "[video_core][buffer_cache][download_budget]") {
+    using namespace std::chrono_literals;
+    const bool old_multi_core = Settings::values.use_multi_core.GetValue();
+    SCOPE_EXIT { Settings::values.use_multi_core.SetValue(old_multi_core); };
+    Settings::values.use_multi_core.SetValue(false);
+    Core::System system;
+    system.Initialize();
+    Kernel::KProcess process(system.Kernel());
+    SCOPE_EXIT { system.Kernel().UnregisterKernelObject(&process); };
+    auto& cpu = process.GetMemory();
+    auto& table = process.GetPageTable().GetImpl();
+    table.Resize(32, 12);
+    cpu.SetCurrentPageTable(process);
+    constexpr u64 phys = 0x80000, guest = 0x200000, dev = 0x70000, page = 0x1000;
+    system.DeviceMemory().buffer.ClearBackingRegion(phys, 2 * page, 0);
+    cpu.MapMemoryRegion(table, Common::ProcessAddress{guest}, 2 * page,
+                        Common::PhysicalAddress{Core::DramMemoryMap::Base + phys},
+                        Common::MemoryPermission::ReadWrite, false);
+    Tegra::MaxwellDeviceMemoryManager manager(system.DeviceMemory());
+    manager.Map(dev, guest, 2 * page, manager.RegisterProcess(&cpu));
+    FixtureRuntime runtime;
+    auto cache = std::make_unique<VideoCommon::BufferCache<FixtureParams>>(manager, runtime);
+    const auto commit = [&](u32 bytes, u8 value) {
+        const auto [buffer, offset] = cache->ObtainCPUBuffer(
+            dev, bytes, VideoCommon::ObtainBufferSynchronize::FullSynchronize,
+            VideoCommon::ObtainBufferOperation::MarkAsWritten);
+        std::fill_n(buffer->bytes.begin() + offset, bytes, value);
+        cache->CommitAsyncFlushes();
+    };
+    const auto check_guest = [&](u32 bytes, u8 expected) {
+        std::vector<u8> data(bytes);
+        manager.ReadBlockUnsafe(dev, data.data(), data.size());
+        CHECK(std::ranges::all_of(data, [expected](u8 value) { return value == expected; }));
+    };
+    const auto wait = [&](bool should_block, bool cancel) {
+        std::promise<void> entered;
+        auto started = entered.get_future();
+        std::promise<bool> completed;
+        auto result = completed.get_future();
+        std::stop_source stop;
+        std::jthread waiter([&] {
+            entered.set_value();
+            completed.set_value(cache->WaitAsyncFlushBudget(stop.get_token(), page));
+        });
+        // No Catch assertions until the worker has been cancelled and joined: even a failed
+        // readiness/wakeup check must leave neither a blocked worker nor a dangling cache.
+        const bool did_start = started.wait_for(2s) == std::future_status::ready;
+        const auto initial = result.wait_for(should_block ? 30ms : 2s);
+        if (should_block) {
+            if (cancel) {
+                stop.request_stop();
+            } else {
+                std::scoped_lock lock{cache->mutex};
+                cache->PopAsyncFlushes();
+            }
+        }
+        const bool ready = result.wait_for(2s) == std::future_status::ready;
+        stop.request_stop();
+        waiter.join();
+        const bool success = result.get();
+        REQUIRE(did_start);
+        CHECK(initial == (should_block ? std::future_status::timeout : std::future_status::ready));
+        REQUIRE(ready);
+        CHECK(success == !cancel);
+    };
+
+    SECTION("reaching the budget blocks until the completed bytes reach guest memory") {
+        commit(page, 0x31);
+        check_guest(page, 0);
+        wait(true, false);
+        check_guest(page, 0x31);
+        CHECK(runtime.freed_ids.empty()); // Delivery does not release staging on this thread.
+    }
+    SECTION("completion before waiting cannot lose the wakeup") {
+        commit(page, 0x72);
+        cache->PopAsyncFlushes();
+        check_guest(page, 0x72);
+        wait(false, false);
+    }
+    SECTION("cancellation leaves the pending copy available for later delivery") {
+        commit(page, 0x53);
+        wait(true, true);
+        CHECK(runtime.freed_ids.empty());
+        REQUIRE(cache->ShouldWaitAsyncFlushes());
+        check_guest(page, 0);
+        // A new wait still sees the pending bytes: cancellation neither drops the copy nor
+        // forgets its budget. Its eventual pop delivers the original staging contents.
+        wait(true, false);
+        check_guest(page, 0x53);
+    }
+    SECTION("one oversized batch is admitted but stalls the following producer wait") {
+        wait(false, false);
+        commit(2 * page, 0x64);
+        REQUIRE(runtime.allocation_ids.size() == 1);
+        REQUIRE(runtime.deferred_stages.front().buffer->bytes.size() >= 2 * page);
+        wait(true, false);
+        check_guest(2 * page, 0x64);
+        wait(false, false);
+    }
+    CHECK_FALSE(runtime.out_of_bounds);
+}
+
+TEST_CASE("BufferCache: native fence downloads copy only CPU-visible pages of a large write",
+          "[video_core][buffer_cache][selective_download]") {
+    const bool old_multi_core = Settings::values.use_multi_core.GetValue();
+    const u64 old_title = Tegra::g_nx2_program_id.exchange(0x04003F40232DE000ULL);
+    SCOPE_EXIT {
+        Settings::values.use_multi_core.SetValue(old_multi_core);
+        Tegra::g_nx2_program_id.store(old_title);
+    };
+    Settings::values.use_multi_core.SetValue(false);
+    Core::System system;
+    system.Initialize();
+    Kernel::KProcess process(system.Kernel());
+    SCOPE_EXIT { system.Kernel().UnregisterKernelObject(&process); };
+    auto& cpu = process.GetMemory();
+    auto& table = process.GetPageTable().GetImpl();
+    table.Resize(32, 12);
+    cpu.SetCurrentPageTable(process);
+    constexpr u64 phys = 0x80000, guest = 0x200000, dev = 0x70000;
+    constexpr u32 page = 0x1000, extent = 8 * 1024 * 1024;
+    system.DeviceMemory().buffer.ClearBackingRegion(phys, extent, 0);
+    cpu.MapMemoryRegion(table, Common::ProcessAddress{guest}, extent,
+                        Common::PhysicalAddress{Core::DramMemoryMap::Base + phys},
+                        Common::MemoryPermission::ReadWrite, false);
+    Tegra::MaxwellDeviceMemoryManager manager(system.DeviceMemory());
+    manager.Map(dev, guest, extent, manager.RegisterProcess(&cpu));
+    Tegra::MemoryManager address_space(system, manager);
+    address_space.EnableNativeTiling();
+    FixtureRuntime runtime;
+    auto cache = std::make_unique<NativeFixtureCache>(manager, runtime);
+    cache->SetAddressSpace(address_space);
+    const auto write = [&](u8 value) {
+        const auto [buffer, offset] = cache->ObtainCPUBuffer(
+            dev, extent, VideoCommon::ObtainBufferSynchronize::FullSynchronize,
+            VideoCommon::ObtainBufferOperation::MarkAsWritten);
+        std::fill_n(buffer->bytes.begin() + offset, extent, value);
+    };
+    const auto check_page = [&](DAddr address, u8 expected) {
+        std::array<u8, page> bytes{};
+        manager.ReadBlockUnsafe(address, bytes.data(), bytes.size());
+        CHECK(std::ranges::all_of(bytes, [expected](u8 value) { return value == expected; }));
+    };
+
+    write(0x31);
+    // The first ordered CPU read downloads one dirty page and marks it Preflushable.
+    const DAddr read_page = dev + 3 * page;
+    const auto first_read = cache->GetFlushArea(read_page, page);
+    REQUIRE(first_read.has_value());
+    REQUIRE_FALSE(first_read->preemtive);
+    cache->DownloadMemory(first_read->start_address,
+                          first_read->end_address - first_read->start_address);
+    check_page(read_page, 0x31);
+
+    SECTION("one preflushable page does not expand to the full guessed compute extent") {
+        write(0x72);
+        cache->CommitAsyncFlushes();
+        REQUIRE(runtime.allocation_ids.size() == 1);
+        CHECK(runtime.deferred_stages.front().buffer->bytes.size() == page);
+        cache->PopAsyncFlushes();
+        check_page(read_page, 0x72);
+        const DAddr unread_page = dev + 7 * page;
+        check_page(unread_page, 0);
+        REQUIRE(cache->IsRegionGpuModified(unread_page, page));
+        // Selective fence downloads must not lose a later first CPU read elsewhere.
+        const auto later_read = cache->GetFlushArea(unread_page, page);
+        REQUIRE(later_read.has_value());
+        REQUIRE_FALSE(later_read->preemtive);
+        cache->DownloadMemory(later_read->start_address,
+                              later_read->end_address - later_read->start_address);
+        check_page(unread_page, 0x72);
+        // Enumeration must retain both persistent read marks for subsequent GPU writes.
+        write(0x86);
+        cache->CommitAsyncFlushes();
+        REQUIRE(runtime.allocation_ids.size() == 2);
+        const auto& repeated = runtime.deferred_stages[runtime.allocation_ids.back()];
+        CHECK(repeated.buffer->bytes.size() == 2 * page);
+        cache->PopAsyncFlushes();
+        check_page(read_page, 0x86);
+        check_page(unread_page, 0x86);
+    }
+    SECTION("preflushable and explicit CPU-read pages form a union without duplicate copies") {
+        cache->NoteCpuRead(read_page, page); // Overlaps the preflushable mark.
+        cache->NoteCpuRead(dev + 5 * page, page); // Separate explicit CPU-read page.
+        write(0x53);
+        cache->CommitAsyncFlushes();
+        REQUIRE(runtime.allocation_ids.size() == 1);
+        CHECK(runtime.deferred_stages.front().buffer->bytes.size() == 2 * page);
+        cache->PopAsyncFlushes();
+        check_page(read_page, 0x53);
+        check_page(dev + 5 * page, 0x53);
+        check_page(dev + 7 * page, 0);
+    }
+    SECTION("titles requiring full asynchronous downloads still copy the whole write") {
+        Tegra::g_nx2_program_id.store(0x0400A3A01EE4C000ULL); // Pokopia's full-download policy.
+        write(0x64);
+        cache->CommitAsyncFlushes();
+        REQUIRE(runtime.allocation_ids.size() == 1);
+        CHECK(runtime.deferred_stages.front().buffer->bytes.size() == extent);
+        cache->PopAsyncFlushes();
+        check_page(dev, 0x64);
+        check_page(dev + extent - page, 0x64);
+    }
+    CHECK_FALSE(runtime.out_of_bounds);
 }

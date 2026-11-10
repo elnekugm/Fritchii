@@ -197,18 +197,7 @@ void BufferCache<P>::TickFrame() {
     ++frame_tick;
     delayed_destruction_ring.Tick();
 
-    // EDEN_NX2_EXP49: read downloads no thread waited for (the other ranges the guest read
-    // before) land once the host GPU ran them.
-    if constexpr (!IS_OPENGL) {
-        if (!read_downloads.empty()) {
-            (void)runtime.IsFreeNow(read_downloads.front().tick);
-            WriteCompletedReadDownloads();
-        }
-    }
-    for (auto& buffer : async_buffers_death_ring) {
-        runtime.FreeDeferredStagingBuffer(buffer);
-    }
-    async_buffers_death_ring.clear();
+    ReleaseCompletedAsyncBuffers();
 }
 
 template <class P>
@@ -1524,6 +1513,10 @@ bool BufferCache<P>::ShouldWaitAsyncFlushes() const noexcept {
 
 template <class P>
 void BufferCache<P>::CommitAsyncFlushesHigh() {
+    // A frame may contain thousands of readbacks. Reclaim those whose fence and guest copy
+    // have completed before allocating another, even when no new frame has been presented.
+    // PopAsyncBuffers runs on the fencing thread: it must not mutate the shared staging pool.
+    ReleaseCompletedAsyncBuffers();
     AccumulateFlushes();
 
     if (committed_gpu_modified_ranges.empty()) {
@@ -1630,6 +1623,20 @@ void BufferCache<P>::CommitAsyncFlushesHigh() {
     pending_downloads.emplace_back(std::move(normalized_copies));
     pending_download_ranges.emplace_back(std::move(download_ranges));
     async_buffers.emplace_back(download_staging);
+    pending_async_download_bytes += download_staging.mapped_span.size();
+}
+
+template <class P>
+bool BufferCache<P>::WaitAsyncFlushBudget(std::stop_token stop_token, size_t budget) {
+    std::unique_lock lock{mutex};
+    if (pending_async_download_bytes < budget) {
+        return !stop_token.stop_requested();
+    }
+    // One newly committed batch may exceed the soft budget. Its fence is submitted before
+    // the next call waits, and releasing the cache lock lets the fencing thread copy it out.
+    return async_download_progress.wait(lock, stop_token, [this, budget] {
+        return pending_async_download_bytes < budget;
+    }) && !stop_token.stop_requested();
 }
 
 template <class P>
@@ -1643,42 +1650,15 @@ void BufferCache<P>::PopAsyncFlushes() {
 }
 
 template <class P>
-void BufferCache<P>::ClaimCpuWrites(std::span<const std::pair<DAddr, u64>> ranges) {
-    for (const auto& [device_addr, size] : ranges) {
-        if (IsRegionGpuModified(device_addr, size)) {
-            // The CPU's bytes are in guest memory: read downloads leave the range.
-            ClearReplacedDownload(device_addr, size);
-            gpu_modified_ranges.Subtract(device_addr, size);
+void BufferCache<P>::ReleaseCompletedAsyncBuffers() {
+    for (auto& buffer : async_buffers_death_ring) {
+        if constexpr (requires { runtime.FreeCompletedDeferredStagingBuffer(buffer); }) {
+            runtime.FreeCompletedDeferredStagingBuffer(buffer);
+        } else {
+            runtime.FreeDeferredStagingBuffer(buffer);
         }
     }
-}
-
-template <class P>
-Common::RangeSet<DAddr> BufferCache<P>::PendingCpuWriteRanges() {
-    Common::RangeSet<DAddr> ranges;
-    if (pending_cpu_writes) {
-        pending_cpu_writes(
-            [&ranges](DAddr device_addr, size_t size) { ranges.Add(device_addr, size); });
-    }
-    return ranges;
-}
-
-template <class P>
-void BufferCache<P>::WriteDownloadedMemory(const Common::RangeSet<DAddr>& cpu_written,
-                                           DAddr device_addr, const u8* data, u64 size) {
-    Core::g_buffer_write_pages.Mark(device_addr, size);
-    if (!cpu_written.Intersects(device_addr, size)) {
-        device_memory.WriteBlockUnsafe(device_addr, data, size);
-        return;
-    }
-    Common::RangeSet<DAddr> parts;
-    parts.Add(device_addr, size);
-    cpu_written.ForEachInRange(device_addr, size, [&parts](DAddr start, DAddr end) {
-        parts.Subtract(start, end - start);
-    });
-    parts.ForEach([&](DAddr start, DAddr end) {
-        device_memory.WriteBlockUnsafe(start, data + (start - device_addr), end - start);
-    });
+    async_buffers_death_ring.clear();
 }
 
 template <class P>
@@ -1744,6 +1724,8 @@ void BufferCache<P>::PopAsyncBuffers() {
         first = last;
     }
     async_buffers_death_ring.emplace_back(*async_buffer);
+    pending_async_download_bytes -= async_buffer->mapped_span.size();
+    async_download_progress.notify_all();
     async_buffers.pop_front();
     pending_downloads.pop_front();
     pending_download_ranges.pop_front();

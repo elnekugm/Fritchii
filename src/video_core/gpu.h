@@ -8,6 +8,7 @@
 
 #include <functional>
 #include <memory>
+#include <stop_token>
 
 #include "common/bit_field.h"
 #include "common/common_types.h"
@@ -243,6 +244,7 @@ public:
 
     /// Performs any additional necessary steps to shutdown GPU emulation.
     void NotifyShutdown();
+    [[nodiscard]] std::stop_token GetShutdownToken() const noexcept;
 
     /// Obtain the CPU Context
     void ObtainContext();

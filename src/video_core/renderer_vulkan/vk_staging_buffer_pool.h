@@ -39,6 +39,8 @@ public:
 
     StagingBufferRef Request(size_t size, MemoryUsage usage, bool deferred = false);
     void FreeDeferred(StagingBufferRef& ref);
+    /// GPU access and the CPU consumer must both have finished before this call.
+    void FreeCompletedDeferred(StagingBufferRef& ref);
 
     [[nodiscard]] VkBuffer StreamBuf() const noexcept {
         return *stream_buffer;
@@ -55,6 +57,8 @@ public:
     }
 
 private:
+    void ReleaseDeferred(StagingBufferRef& ref, u64 last_use_tick);
+
     struct StreamBufferCommit {
         size_t upper_bound;
         u64 tick;
@@ -110,6 +114,8 @@ private:
 
     StagingBufferRef CreateStagingBuffer(size_t size, MemoryUsage usage, bool deferred);
 
+    void TraceAllocation(size_t requested, size_t rounded, MemoryUsage usage, bool deferred);
+
     StagingBuffersCache& GetCache(MemoryUsage usage);
 
     void ReleaseCache(StagingBuffersCache& cache, size_t& deletions_left);
@@ -139,6 +145,11 @@ private:
     u64 frame = 0;
     u64 buffer_index = 0;
     u64 unique_ids{};
+    bool trace_staging{};
+    size_t trace_cached_bytes{};
+    size_t trace_high_water{};
+    u32 trace_reports{};
+    u32 trace_large_reports{};
 };
 
 } // namespace Vulkan

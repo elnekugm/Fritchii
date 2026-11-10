@@ -830,3 +830,30 @@ TEST_CASE("DeviceMemoryManager trace after warning cap", "[.][unmapped_trace_int
     REQUIRE(std::all_of(mixed.begin() + 4096, mixed.end(), [](u8 byte) { return byte == 0; }));
     Common::Log::Stop();
 }
+
+TEST_CASE("MemoryTracker: preflushable iteration clips unaligned writes across manager boundaries",
+          "[video_core][selective_download]") {
+    RasterizerInterface rasterizer;
+    MemoryTracker tracker(rasterizer);
+    constexpr VAddr boundary = 8 * 1024 * 1024;
+    constexpr u64 page = 4096;
+    tracker.MarkRegionAsPreflushable(boundary - page, 2 * page);
+    tracker.MarkRegionAsPreflushable(boundary + 3 * page, page);
+    const auto collect = [&](VAddr start, u64 size) {
+        std::vector<std::pair<VAddr, u64>> ranges;
+        tracker.ForEachPreflushableRange(start, size, [&](VAddr address, u64 length) {
+            ranges.emplace_back(address, length);
+        });
+        return ranges;
+    };
+    // Both boundary pages are marked, but the write intersects only these exact bytes.
+    const std::vector<std::pair<VAddr, u64>> expected{
+        {boundary - 13, 13}, {boundary, 17}};
+    CHECK(collect(boundary - 13, 30) == expected);
+    CHECK(collect(boundary - 13, 30) == expected); // Marks persist after enumeration.
+    CHECK(collect(boundary + page, 2 * page).empty()); // An unmarked hole stays excluded.
+    CHECK(collect(boundary + 3 * page + 7, 19) ==
+          std::vector<std::pair<VAddr, u64>>{{boundary + 3 * page + 7, 19}});
+    tracker.UnmarkRegionAsPreflushable(boundary - page, 2 * page);
+    CHECK(collect(boundary - 13, 30).empty());
+}

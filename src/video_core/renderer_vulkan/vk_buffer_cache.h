@@ -175,6 +175,7 @@ public:
     bool CanReorderUpload(const Buffer& buffer, std::span<const VideoCommon::BufferCopy> copies);
 
     void FreeDeferredStagingBuffer(StagingBufferRef& ref);
+    void FreeCompletedDeferredStagingBuffer(StagingBufferRef& ref);
 
     void PreCopyBarrier();
 

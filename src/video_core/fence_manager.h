@@ -90,19 +90,17 @@ public:
         work_epoch.fetch_add(1, std::memory_order_release);
     }
 
-    void SignalFence(std::function<void()>&& func) {
+    /// False only when shutdown cancelled the request before its callback was queued.
+    bool SignalFence(std::function<void()>&& func) {
         Nx2Profile::Scope profile_scope{Nx2Profile::Zone::Fence};
-        // The accuracy can change while the game runs (settings dialog, Settings::UpdateGPUAccuracy
-        // at each command list end): read once, every decision of this fence uses one value.
-        // EXP33 (zortos293/Lichii#337): a fence that writes a fence-flagged query report is never
-        // skipped as empty, and its operation waits for the fence: a skipped fence runs its
-        // operation at once, before the host GPU has run the work the report follows, and
-        // Ocarina of Time then reads a wrong report (white flashes on leaves and walls at low GPU
-        // accuracy). Only set by the query cache while EXP33 is on.
-        const bool delay_fence = DelayFences() || VideoCore::g_signaling_query_report_fence;
-        // EDEN_NX2_EXP28 (zortos293/Lichii#717 FENCE_TRIM, FENCE_FOLD), one value per fence.
-        const int fence_trims = VideoCore::Nx2Debug::Experiment(28);
-        const bool trim = (fence_trims & 1) != 0;
+        if constexpr (can_async_check) {
+            // No cache/queue locks are held here. The fencing thread must remain able to
+            // finish older readbacks while the producer waits for download memory.
+            if (!buffer_cache.WaitAsyncFlushBudget(gpu.GetShutdownToken())) {
+                return false;
+            }
+        }
+        const bool delay_fence = Settings::IsGPUFenceBehaviorDefault() ? Settings::IsGPULevelHigh() : Settings::IsGPUFenceBehaviorBalanced() || Settings::IsGPUFenceBehaviorAccurate();
         if constexpr (!can_async_check) {
             TryReleasePendingFences<false>();
         }
@@ -116,7 +114,7 @@ public:
             SCOPE_EXIT { gpu.EndAsyncGuestWrite(); };
             func();
             rasterizer.InvalidateGPUCache();
-            return;
+            return true;
         }
         skipped_fences = 0;
         should_flush |= query_cache.HasUncommittedFlushes();
@@ -176,6 +174,7 @@ public:
             SubmitDeferredWork();
         }
         rasterizer.InvalidateGPUCache();
+        return true;
     }
 
     void SignalSyncPoint(u32 value) {
@@ -212,12 +211,9 @@ public:
                 wait_finished.store(true, std::memory_order_relaxed);
                 wait_cv.notify_all();
             });
-            SignalFence(std::move(func));
-            // The fence's commands can be held back by a deferred flush that only this thread
-            // submits. The fencing thread waits for that submission before releasing the fence,
-            // so waiting here without submitting deadlocks (Ocarina of Time entering gameplay).
-            SubmitDeferredWork();
-            BackWaitScope wait_scope{"FenceManager::WaitPendingFences (fencing thread callback)"};
+            if (!SignalFence(std::move(func))) {
+                return;
+            }
             std::unique_lock lk(wait_mutex);
             wait_cv.wait(
                 lk, [&wait_finished] { return wait_finished.load(std::memory_order_relaxed); });
