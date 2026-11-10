@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <memory>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -135,6 +136,27 @@ SyntheticNcz MakeRawNcz(std::size_t valid_blocks, u64 crypto_type, bool corrupt_
     return out;
 }
 
+// A solid NCZ: header, section table, then one zstd stream over the whole body.
+SyntheticNcz MakeSolidNcz(std::span<const std::pair<u64, u64>> sections, std::size_t body_size) {
+    SyntheticNcz out;
+    out.header.assign(NcaHeaderSize, 0x5A);
+    out.plain_body.resize(body_size);
+    for (std::size_t i = 0; i < body_size; ++i) {
+        out.plain_body[i] = static_cast<u8>(i * 13 + 1);
+    }
+    out.ncz = out.header;
+    PutMagic(out.ncz, "NCZSECTN");
+    PutLe(out.ncz, sections.size(), 8);
+    for (const auto& [offset, size] : sections) {
+        PutSection(out.ncz, offset, size, 1);
+    }
+    const auto stream =
+        Common::Compression::CompressDataZSTDDefault(out.plain_body.data(), body_size);
+    REQUIRE(!stream.empty());
+    out.ncz.insert(out.ncz.end(), stream.begin(), stream.end());
+    return out;
+}
+
 std::vector<u8> Slice(const std::vector<u8>& data, std::size_t offset, std::size_t length) {
     const auto end = std::min(offset + length, data.size());
     return std::vector<u8>(data.begin() + offset, data.begin() + end);
@@ -235,4 +257,58 @@ TEST_CASE("Plain files have no decrypted view", "[core][ncz]") {
     REQUIRE(plain->GetDecryptedView() == nullptr);
     const auto window = std::make_shared<FileSys::OffsetVfsFile>(plain, 0x80, 0x10);
     REQUIRE(window->GetDecryptedView() == nullptr);
+}
+
+TEST_CASE("Solid NCZ decodes adjacent sections for install", "[core][ncz]") {
+    const std::array<std::pair<u64, u64>, 2> sections{{
+        {NcaHeaderSize, SectionSize},
+        {NcaHeaderSize + SectionSize, SectionSize},
+    }};
+    const auto synthetic = MakeSolidNcz(sections, 2 * SectionSize);
+    const auto source = std::make_shared<FileSys::VectorVfsFile>(synthetic.ncz, "solid.ncz");
+    REQUIRE(Core::Crypto::DecompressNCZ(source, "solid.nca") == nullptr); // install only
+    const auto nca = Core::Crypto::DecompressNCZForInstall(source, "solid.nca");
+    REQUIRE(nca != nullptr);
+    std::vector<u8> expected = synthetic.header;
+    expected.insert(expected.end(), synthetic.plain_body.begin(), synthetic.plain_body.end());
+    REQUIRE(nca->GetSize() == expected.size());
+    REQUIRE(nca->ReadAllBytes() == expected);
+}
+
+TEST_CASE("Solid NCZ with a gap between sections stops instead of reading past its data",
+          "[core][ncz]") {
+    // The second section starts one section size too late.
+    const std::array<std::pair<u64, u64>, 2> sections{{
+        {NcaHeaderSize, SectionSize},
+        {NcaHeaderSize + 2 * SectionSize, SectionSize},
+    }};
+    const auto synthetic = MakeSolidNcz(sections, 2 * SectionSize);
+    const auto source = std::make_shared<FileSys::VectorVfsFile>(synthetic.ncz, "gap.ncz");
+    const auto nca = Core::Crypto::DecompressNCZForInstall(source, "gap.nca");
+    REQUIRE(nca != nullptr);
+    // The part before the gap is still readable.
+    REQUIRE(nca->ReadBytes(SectionSize, NcaHeaderSize) ==
+            Slice(synthetic.plain_body, 0, SectionSize));
+    // Nothing at or behind the gap is.
+    REQUIRE(nca->ReadBytes(SectionSize, NcaHeaderSize + SectionSize).empty());
+    REQUIRE(nca->ReadBytes(SectionSize, NcaHeaderSize + 2 * SectionSize).empty());
+    REQUIRE(nca->ReadBytes(1, NcaHeaderSize + 3 * SectionSize - 1).empty());
+    // And the reader still serves the good part afterwards.
+    REQUIRE(nca->ReadBytes(SectionSize, NcaHeaderSize) ==
+            Slice(synthetic.plain_body, 0, SectionSize));
+}
+
+TEST_CASE("Solid NCZ skips an empty section entry that lies ahead", "[core][ncz]") {
+    const std::array<std::pair<u64, u64>, 3> sections{{
+        {NcaHeaderSize, SectionSize},
+        {NcaHeaderSize + 2 * SectionSize, 0},
+        {NcaHeaderSize + SectionSize, SectionSize},
+    }};
+    const auto synthetic = MakeSolidNcz(sections, 2 * SectionSize);
+    const auto source = std::make_shared<FileSys::VectorVfsFile>(synthetic.ncz, "empty.ncz");
+    const auto nca = Core::Crypto::DecompressNCZForInstall(source, "empty.nca");
+    REQUIRE(nca != nullptr);
+    std::vector<u8> expected = synthetic.header;
+    expected.insert(expected.end(), synthetic.plain_body.begin(), synthetic.plain_body.end());
+    REQUIRE(nca->ReadAllBytes() == expected);
 }

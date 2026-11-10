@@ -400,6 +400,12 @@ private:
             const u64 end = std::max<u64>(static_cast<u64>(s.offset) + static_cast<u64>(s.size),
                                           begin);
             if (end <= frontier) continue;
+            // The stream holds the body without holes, so a section with bytes that starts
+            // behind the decoded end cannot be placed: `data` would fall behind `frontier`.
+            if (begin > frontier && begin < end) {
+                LOG_ERROR(Crypto, "Solid NCZ: gap before the section at {:#x}", begin);
+                return false;
+            }
             u64 pos = std::max<u64>(begin, frontier);
 
             std::optional<AESCipher<Key128>> cipher;
