@@ -1613,10 +1613,16 @@ fs::path MemberPath(const std::string& path, const std::string& name) {
     return FromUtf8(path);
 }
 
-// The folder Discovery reads the package back from.
-fs::path PackageFolder(const NupContainer::PackageInfo& package) {
+// The folder Discovery reads the package back from. An archive with several base packages is a
+// multi-program dump (a Switch 2 Edition next to the original game's program): each one goes to
+// program/<index>, the index being the low bits of its title ID.
+fs::path PackageFolder(const NupContainer::PackageInfo& package, bool multi_program) {
     switch (package.kind) {
     case NupContainer::PackageKind::Base:
+        if (multi_program) {
+            return fs::path{"program"} /
+                   std::to_string(package.title_id - GetBaseTitleID(package.title_id));
+        }
         return "base";
     case NupContainer::PackageKind::Update:
         return fs::path{"updates"} / std::to_string(package.version);
@@ -1653,9 +1659,12 @@ public:
         }
 
         const auto& packages = nup.GetPackages();
+        const bool multi_program =
+            std::ranges::count(packages, NupContainer::PackageKind::Base,
+                               &NupContainer::PackageInfo::kind) > 1;
         std::vector<fs::path> folders;
         for (size_t i = 0; i < packages.size(); ++i) {
-            auto folder = PackageFolder(packages[i]);
+            auto folder = PackageFolder(packages[i], multi_program);
             if (std::ranges::find(folders, folder) != folders.end()) {
                 throw PackError(PackResult::InvalidSource,
                                 "two packages belong in " + ToUtf8(folder));
