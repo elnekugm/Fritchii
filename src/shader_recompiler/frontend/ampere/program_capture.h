@@ -58,8 +58,8 @@ public:
             if (opcode == 0x947 && computed_branch && instruction.Bits(12, 4) == 7 &&
                 target == s64{index} * 16)
                 return Result::Complete;
-            // A closing self-branch past every branch target also ends programs whose RET pairs
-            // with a CALL.REL.NOINC, which the EXIT/RET rules below can't see. Only taken when the
+            // A closing self-branch past every branch target also ends programs whose end the
+            // EXIT/RET rules below can't see. Only taken when the
             // capture then runs into an invalid branch (FallbackEnd); ending every capture there
             // broke Donkey Kong Bananza's level loading.
             if (opcode == 0x947 && instruction.Bits(12, 4) == 7 && instruction.Bits(87, 4) == 7 &&
