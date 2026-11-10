@@ -50,6 +50,20 @@ struct NpadInternalState;
 struct NpadSixAxisSensorLifo;
 struct NpadSharedMemoryFormat;
 
+/// Sets the guessed Joy-Con 2 pair bit (12) on a dual Joy-Con style only while the game's supported
+/// set contains it (Drag x Drive). Games that do not know bit 12 abort in the SDK when they get it,
+/// e.g. Kirby Air Riders in nn::hid::GetVibrationDeviceHandles. Returns true if the style changed.
+inline bool SyncJoycon2DualStyle(Core::HID::NpadStyleTag& style,
+                                 Core::HID::NpadStyleSet supported) {
+    const Core::HID::NpadStyleTag supported_tag{supported};
+    const u32 want = style.joycon_dual && supported_tag.joycon2_dual ? 1 : 0;
+    if (style.joycon2_dual == want) {
+        return false;
+    }
+    style.joycon2_dual.Assign(want);
+    return true;
+}
+
 class NPad final {
 public:
     explicit NPad(Core::HID::HIDCore& hid_core_, KernelHelpers::ServiceContext& service_context_);

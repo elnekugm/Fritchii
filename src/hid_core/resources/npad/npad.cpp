@@ -289,9 +289,13 @@ void NPad::InitNewlyAddedController(Kernel::KernelCore& kernel, u64 aruid, Core:
         shared_memory->fullkey_color.attribute = ColorAttribute::Ok;
         shared_memory->joycon_color.attribute = ColorAttribute::Ok;
         shared_memory->style_tag.joycon_dual.Assign(1);
-        // ponytail: a dual pad also claims the guessed Joy-Con 2 bit; it must already be set when the
-        // game narrows its supported set to 0x1000 later, no reconnect happens then.
-        shared_memory->style_tag.joycon2_dual.Assign(1);
+        {
+            // Joy-Con 2 bit only for games that ask for it; SetSupportedNpadStyleSet keeps it in sync.
+            Core::HID::NpadStyleSet supported{};
+            if (npad_resource.GetSupportedNpadStyleSet(supported, aruid).IsSuccess()) {
+                SyncJoycon2DualStyle(shared_memory->style_tag, supported);
+            }
+        }
         if (controller.is_dual_left_connected) {
             shared_memory->joycon_color.left = body_colors.left;
             shared_memory->battery_level_left = battery_level.left.battery_level;
@@ -674,6 +678,16 @@ Result NPad::SetSupportedNpadStyleSet(Kernel::KernelCore& kernel, u64 aruid, Cor
     hid_core.SetSupportedStyleTag({supported_style_set});
     const Result result = npad_resource.SetSupportedNpadStyleSet(aruid, supported_style_set);
     if (result.IsSuccess()) {
+        // Drag x Drive narrows its set to the Joy-Con 2 bit later without a reconnect, so connected
+        // dual pads gain or lose that bit here.
+        for (std::size_t i = 0; i < MaxSupportedNpadIdTypes; ++i) {
+            const auto npad_id = IndexToNpadIdType(i);
+            auto& controller = GetControllerFromNpadIdType(aruid, npad_id);
+            if (controller.is_connected && controller.shared_memory &&
+                SyncJoycon2DualStyle(controller.shared_memory->style_tag, supported_style_set)) {
+                npad_resource.SignalStyleSetUpdateEvent(kernel, aruid, npad_id);
+            }
+        }
         OnUpdate(kernel, {});
     }
     return result;
