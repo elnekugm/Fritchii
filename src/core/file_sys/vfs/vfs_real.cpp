@@ -68,6 +68,13 @@ bool IsWithinRoot(std::string_view root, std::string_view full_path) {
     return full_path.size() == root.size() || full_path[root.size()] == '/' || full_path[root.size()] == '\\';
 }
 
+// A child name can come from a parsed game image or from the guest, so the path it forms has to
+// stay below the directory.
+bool IsChildPath(const std::string& root, std::string_view name) {
+    return IsWithinRoot(FS::SanitizePath(root),
+                        FS::SanitizePath(root + '/' + std::string(name)));
+}
+
 constexpr FS::FileAccessMode ModeFlagsToFileAccessMode(OpenMode mode) {
     switch (mode) {
     case OpenMode::Read:
@@ -470,7 +477,7 @@ VirtualDir RealVfsDirectory::GetSubdirectory(std::string_view name) const {
 
 VirtualFile RealVfsDirectory::CreateFileRelative(std::string_view relative_path) {
     const auto full_path = FS::SanitizePath(path + '/' + std::string(relative_path));
-    if (!FS::CreateParentDirs(full_path) || !IsWithinRoot(FS::SanitizePath(path), full_path)) {
+    if (!IsWithinRoot(FS::SanitizePath(path), full_path) || !FS::CreateParentDirs(full_path)) {
         return nullptr;
     }
     return base.CreateFile(full_path, perms);
@@ -478,10 +485,16 @@ VirtualFile RealVfsDirectory::CreateFileRelative(std::string_view relative_path)
 
 VirtualDir RealVfsDirectory::CreateDirectoryRelative(std::string_view relative_path) {
     const auto full_path = FS::SanitizePath(path + '/' + std::string(relative_path));
+    if (!IsWithinRoot(FS::SanitizePath(path), full_path)) {
+        return nullptr;
+    }
     return base.CreateDirectory(full_path, perms);
 }
 
 bool RealVfsDirectory::DeleteSubdirectoryRecursive(std::string_view name) {
+    if (!IsChildPath(path, name)) {
+        return false;
+    }
     const auto full_path = FS::SanitizePath(this->path + '/' + std::string(name));
     return FS::RemoveDirRecursively(full_path);
 }
@@ -538,21 +551,33 @@ VirtualDir RealVfsDirectory::GetParentDirectory() const {
 }
 
 VirtualDir RealVfsDirectory::CreateSubdirectory(std::string_view name) {
+    if (!IsChildPath(path, name)) {
+        return nullptr;
+    }
     const std::string subdir_path = (path + '/').append(name);
     return base.CreateDirectory(subdir_path, perms);
 }
 
 VirtualFile RealVfsDirectory::CreateFile(std::string_view name) {
+    if (!IsChildPath(path, name)) {
+        return nullptr;
+    }
     const std::string file_path = (path + '/').append(name);
     return base.CreateFile(file_path, perms);
 }
 
 bool RealVfsDirectory::DeleteSubdirectory(std::string_view name) {
+    if (!IsChildPath(path, name)) {
+        return false;
+    }
     const std::string subdir_path = (path + '/').append(name);
     return FS::RemoveDir(subdir_path);
 }
 
 bool RealVfsDirectory::DeleteFile(std::string_view name) {
+    if (!IsChildPath(path, name)) {
+        return false;
+    }
     const std::string file_path = (path + '/').append(name);
     return base.DeleteFile(file_path);
 }
