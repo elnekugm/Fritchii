@@ -10,11 +10,7 @@
 #include <condition_variable>
 #include <optional>
 #include <set>
-
-#include <set>
 #include <span>
-#include <utility>
-
 #include <utility>
 #include <vector>
 #include <boost/container/small_vector.hpp>
@@ -261,11 +257,6 @@ public:
     std::condition_variable sync_cv;
 
     VideoCore::RasterizerInterface* rasterizer = nullptr;
-
-    /// GPU-written command entries that needed a flush (FlushGpuWrittenCommands batches them).
-
-
-
 
     /// GPU-written command entries that needed a flush (FlushGpuWrittenCommands batches them).
     std::set<std::pair<GPUVAddr, size_t>> flushed_command_entries;

@@ -29,6 +29,7 @@
 #include "video_core/gpu_split.h"
 #include "video_core/gpu_wait_site.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
+#include "video_core/renderer_vulkan/fragment_barrier_state.h"
 #include "video_core/renderer_vulkan/vk_hitch_diagnostic.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 

@@ -152,6 +152,24 @@ inline u64 Ticks() {
 #endif
 }
 
+/// What a front macro memory read (MME DMA) had to wait for: the newest unexecuted writer.
+enum class DmaWaitCause : u32 {
+    ComputeCopy, HostSync, ConstBufferUpload, InlineUpload, Macro3D, Report, DmaLaunch,
+    SyncInfo, WaitForIdle, Other3D, OtherEngine, Deferred, AvoidedByRange, Count,
+};
+inline constexpr std::array<const char*, static_cast<size_t>(DmaWaitCause::Count)>
+    dma_wait_cause_names{"compute/copy", "host sync", "cbuf upload", "inline upload",
+                         "3D macro", "report", "dma launch", "sync info", "wait for idle",
+                         "other 3D", "other engine", "deferred", "avoided (range)"};
+
+enum class FineCounter : u32 {
+    UniformRebinds, UniformStreamed, UniformCached, UniformOther, UniformBytes, StorageBinds,
+    TextureHandles, Count,
+};
+inline constexpr std::array<const char*, static_cast<size_t>(FineCounter::Count)> fine_counter_names{
+    "uniform rebinds", "uniform streamed", "uniform cached", "uniform other", "uniform bytes",
+    "storage binds", "texture handles",
+};
 struct ThreadData {
     std::array<u64, static_cast<size_t>(FineCounter::Count)> fine_counters{}; ///< TEST
     std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ns{};
@@ -468,6 +486,12 @@ inline void Add(Counter counter, u64 amount) {
     }
 }
 
+/// TEST: EDEN_NX2_GPU_PROFILE=2 only.
+inline void AddFine(FineCounter counter, u64 amount) {
+    if (Fine()) {
+        t_data.fine_counters[static_cast<size_t>(counter)] += amount;
+    }
+}
 /// The front waited for the back since `start` (Ticks) for `site`.
 inline void AddDrain(DrainSite site, u64 start) {
     if (Enabled()) {

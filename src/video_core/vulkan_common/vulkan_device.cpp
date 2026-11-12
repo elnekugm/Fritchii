@@ -1455,10 +1455,10 @@ bool Device::GetSuitability(bool requires_swapchain) {
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_PROPERTIES_EXT;
         SetNext(next, properties.custom_border_color);
     }
-    if (extensions.cooperative_matrix) {
-        properties.cooperative_matrix.sType =
+    if (extensions.cooperative_matrix_khr) {
+        properties.cooperative_matrix_khr.sType =
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
-        SetNext(next, properties.cooperative_matrix);
+        SetNext(next, properties.cooperative_matrix_khr);
     }
     if (supported_extensions.contains(VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME)) {
         properties.integer_dot_product.sType =

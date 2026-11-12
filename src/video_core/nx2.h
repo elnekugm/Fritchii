@@ -20,6 +20,13 @@ namespace Tegra {
 // Set once a Switch 2 (Ampere, NVN2) driver is talking to the GPU. Its command streams use
 // Ampere classes and the Turing+ macro ISA, which Eden's Maxwell engines don't implement.
 inline std::atomic<bool> g_nx2_ampere{false};
+// The running title, for the few places that must behave differently per game.
+inline std::atomic<u64> g_nx2_program_id{0};
+
+// Pokopia reads GPU-written buffer data through a path the buffer cache does not observe.
+inline bool Nx2NeedsBufferDownloads() {
+    return g_nx2_program_id.load(std::memory_order_relaxed) == 0x0400A3A01EE4C000ULL;
+}
 
 // Device pages the GPU has written through the buffer cache (shader stores, copies), ever. Title 1
 // runs command lists the GPU writes each frame (20-byte entries its culling fills in); read

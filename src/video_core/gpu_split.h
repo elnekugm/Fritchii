@@ -18,6 +18,7 @@ namespace VideoCommon {
 
 /// Why the split's front waited for its back (EDEN_NX2_GPU_PROFILE counts each).
 enum class DrainSite : u32 {
+    Other,
     FetchDrain,     ///< EDEN_NX2_FETCH_DRAIN: before every entry
     Acquire,        ///< A semaphore acquire reads the value the back may release
     SemaphoreFlush, ///< The acquired semaphore is in the buffer cache
@@ -41,11 +42,6 @@ inline constexpr std::array<const char*, static_cast<size_t>(DrainSite::Count)> 
     "gp sync fence", "map",           "front start", "front verify",  "macro dma check",
 };
 
-enum class Effect : u8 {
-    Unknown,
-    Gpu,
-    None,
-};
 
 // Splits the GPU thread in two (NX2_GPU_THREAD_SPLIT.md). The GPU thread (the front) takes the
 // CPU's commands, parses command lists and runs the puller; engine method calls and everything
@@ -58,6 +54,12 @@ enum class Effect : u8 {
 // EDEN_NX2_SPLIT=1 keeps the macros on the back; EDEN_NX2_SPLIT=0 runs everything on one thread.
 class GpuSplit {
 public:
+    enum class Effect : u8 {
+        Unknown,
+        Gpu,
+        None,
+    };
+
     static GpuSplit& Get() {
         return instance;
     }
