@@ -121,8 +121,7 @@ HostFeature DetectHostFeatures() {
         if (cpu_info.has(Cpu::tAVX512VL)) f |= HostFeature::AVX512VL;
         if (cpu_info.has(Cpu::tAVX512BW)) f |= HostFeature::AVX512BW;
         if (cpu_info.has(Cpu::tAVX512DQ)) f |= HostFeature::AVX512DQ;
-        if (cpu_info.has(Cpu::tAVX512BITALG)) f |= HostFeature::AVX512BITALG;
-        if (cpu_info.has(Cpu::tAVX512VBMI)) f |= HostFeature::AVX512VBMI;
+        if (cpu_info.has(Cpu::tAVX512_VBMI)) f |= HostFeature::AVX512VBMI;
     }
     if (cpu_info.has(Cpu::tPCLMULQDQ)) f |= HostFeature::PCLMULQDQ;
     if (cpu_info.has(Cpu::tF16C)) f |= HostFeature::F16C;
