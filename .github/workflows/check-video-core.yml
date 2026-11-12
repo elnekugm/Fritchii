@@ -2,6 +2,12 @@ name: check-video-core
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - integration/forks
+    paths:
+      - src/video_core/**
+      - .github/workflows/check-video-core.yml
 
 jobs:
   linux:
