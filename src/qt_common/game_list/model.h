@@ -80,6 +80,7 @@ private:
     void RemoveFavorite(u64 program_id);
     void Repopulate();
     void StopWorker();
+    void ShowCover(const QString& slug);
 
     bool m_flat = false;
     bool scan_enabled = true;

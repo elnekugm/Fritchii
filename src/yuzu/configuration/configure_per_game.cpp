@@ -60,6 +60,7 @@
 #include "qt_common/abstract/frontend.h"
 #include "qt_common/config/uisettings.h"
 #include "qt_common/qt_common.h"
+#include "qt_common/util/boxart.h"
 #include "qt_common/util/vk.h"
 #include "ui_configure_per_game.h"
 #include "yuzu/configuration/configuration_shared.h"
@@ -598,6 +599,19 @@ void ConfigurePerGame::LoadConfiguration() {
                 UpdateIconPreview(map);
             }
         }
+    }
+    // Dumps without control data, such as loose ones, have no icon: show the box art the game
+    // list shows for them, and fetch it if this is the first time it is needed.
+    if (!is_nup_file && scene->items().isEmpty()) {
+        const std::string cover_name = ui->display_name->text().trimmed().toStdString();
+        QImage cover = QtCommon::Boxart::LoadCachedCover(title_id, cover_name);
+        if (cover.isNull()) {
+            cover.load(QStringLiteral(":/icons/default/256x256/lichii.png"));
+        }
+        if (!cover.isNull()) {
+            UpdateIconPreview(QPixmap::fromImage(cover));
+        }
+        QtCommon::Boxart::Prefetch(title_id, cover_name);
     }
 
     ui->display_filename->setText(QString::fromStdString(file->GetName()));

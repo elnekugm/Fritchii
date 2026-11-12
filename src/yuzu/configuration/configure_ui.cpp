@@ -158,6 +158,8 @@ void ConfigureUi::ApplyConfiguration() {
     UISettings::values.folder_icon_size = ui->folder_icon_size_combobox->currentData().toUInt();
     UISettings::values.row_1_text_id = ui->row_1_text_combobox->currentData().toUInt();
     UISettings::values.row_2_text_id = ui->row_2_text_combobox->currentData().toUInt();
+    UISettings::values.use_boxart = ui->use_boxart->isChecked();
+    UISettings::values.boxart_url = ui->boxart_url_edit->text().trimmed().toStdString();
 
     UISettings::values.enable_screenshot_save_as = ui->enable_screenshot_save_as->isChecked();
     Common::FS::SetEdenPath(Common::FS::EdenPath::ScreenshotsDir,
@@ -185,6 +187,8 @@ void ConfigureUi::SetConfiguration() {
     ui->show_play_time->setChecked(UISettings::values.show_play_time.GetValue());
     ui->folder_icon_size_combobox->setCurrentIndex(
         ui->folder_icon_size_combobox->findData(UISettings::values.folder_icon_size.GetValue()));
+    ui->use_boxart->setChecked(UISettings::values.use_boxart.GetValue());
+    ui->boxart_url_edit->setText(QString::fromStdString(UISettings::values.boxart_url.GetValue()));
 
     ui->enable_screenshot_save_as->setChecked(
         UISettings::values.enable_screenshot_save_as.GetValue());

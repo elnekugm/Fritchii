@@ -2,12 +2,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <QDir>
+#include <QFile>
 #include <QIcon>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QThreadPool>
 
+#include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/settings.h"
 #include "core/core.h"
@@ -16,11 +18,39 @@
 #include "core/hle/service/filesystem/filesystem.h"
 #include "qt_common/config/uisettings.h"
 #include "qt_common/qt_common.h"
+#include "qt_common/util/boxart.h"
 #include "qt_common/util/game.h"
 
 #include "qt_common/game_list/game_list_p.h"
 #include "qt_common/game_list/model.h"
 #include "qt_common/game_list/worker.h"
+
+namespace {
+
+// The box art named slug at the game list's icon size, or a null pixmap if it is not on disk.
+QPixmap LoadCover(const QString& slug) {
+    const auto path = QtCommon::Boxart::GetCachePath(slug.toStdString());
+    QPixmap picture;
+    if (path.empty() || !picture.load(QString::fromStdString(Common::FS::PathToUTF8String(path)))) {
+        return {};
+    }
+    const u32 size = UISettings::values.game_icon_size.GetValue();
+    return picture.scaled(size, size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+}
+
+void SetCover(QStandardItem* game, const QPixmap& picture, const QString& slug) {
+    game->setData(picture, Qt::DecorationRole);
+    game->setData(QVariant{}, GameListItemPath::CoverSlugRole);
+
+    // The Fritchii home reads the icon from its own role, so keep it in step with the cover.
+    const auto path = QtCommon::Boxart::GetCachePath(slug.toStdString());
+    QFile file(QString::fromStdString(Common::FS::PathToUTF8String(path)));
+    if (!path.empty() && file.open(QIODevice::ReadOnly)) {
+        game->setData(file.readAll(), GameListItemPath::IconDataRole);
+    }
+}
+
+} // Anonymous namespace
 
 GameListModel::GameListModel(std::shared_ptr<FileSys::VfsFilesystem> vfs_,
                              FileSys::ManualContentProvider* provider_,
@@ -42,9 +72,13 @@ GameListModel::GameListModel(std::shared_ptr<FileSys::VfsFilesystem> vfs_,
     RetranslateUI();
 
     setSortRole(GameListItemPath::SortRole);
+
+    QtCommon::Boxart::OnSaved(
+        this, [this](const std::string& slug) { ShowCover(QString::fromStdString(slug)); });
 }
 
 GameListModel::~GameListModel() {
+    QtCommon::Boxart::OnSaved(this, {});
     StopWorker();
 }
 
@@ -88,6 +122,13 @@ void GameListModel::AddDirEntry(GameListDir* entry_items) {
 }
 
 void GameListModel::AddEntry(const QList<QStandardItem*>& entry_items, GameListDir* parent) {
+    // The box art may have been saved while the entry was on its way here.
+    if (const QString slug = entry_items.first()->data(GameListItemPath::CoverSlugRole).toString();
+        !slug.isEmpty()) {
+        if (const QPixmap picture = LoadCover(slug); !picture.isNull()) {
+            SetCover(entry_items.first(), picture, slug);
+        }
+    }
     if (m_flat) {
         invisibleRootItem()->appendRow(entry_items);
     } else {
@@ -238,4 +279,24 @@ QFileSystemWatcher* GameListModel::GetWatcher() const {
 
 void GameListModel::SetFlat(bool flat) {
     m_flat = flat;
+}
+
+void GameListModel::ShowCover(const QString& slug) {
+    const QPixmap picture = LoadCover(slug);
+    if (picture.isNull()) {
+        return;
+    }
+    // Games sit under their directory and in favorites, or at the top of the flat list.
+    const auto update = [&slug, &picture](QStandardItem* game) {
+        if (game->data(GameListItemPath::CoverSlugRole).toString() == slug) {
+            SetCover(game, picture, slug);
+        }
+    };
+    for (int i = 0; i < rowCount(); ++i) {
+        QStandardItem* top = item(i);
+        update(top);
+        for (int j = 0; j < top->rowCount(); ++j) {
+            update(top->child(j));
+        }
+    }
 }

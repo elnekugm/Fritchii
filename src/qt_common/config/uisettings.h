@@ -166,6 +166,11 @@ struct Values {
     // Discord RPC
     Setting<bool> enable_discord_presence{linkage, false, "enable_discord_presence", Category::Ui};
 
+    // Box art
+    Setting<std::string> boxart_url{
+        linkage, "https://gitlab.com/nemyu-emulator/boxart/-/raw/main/img/", "boxart_url",
+        Category::Ui};
+
     // logging
     Setting<bool> show_console{linkage, false, "showConsole", Category::Ui};
 
@@ -217,6 +222,7 @@ struct Values {
 
     // Game List
     Setting<bool> show_add_ons{linkage, true, "show_add_ons", Category::UiGameList};
+    Setting<bool> use_boxart{linkage, true, "use_boxart", Category::UiGameList};
     Setting<u32, true> game_icon_size{linkage, 64, 0, 512, "game_icon_size", Category::UiGameList};
     Setting<u32, true> folder_icon_size{linkage, 48, 8, 512, "folder_icon_size", Category::UiGameList};
     Setting<u8> row_1_text_id{linkage, 3, "row_1_text_id", Category::UiGameList};

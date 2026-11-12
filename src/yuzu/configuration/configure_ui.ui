@@ -228,6 +228,42 @@
     </widget>
    </item>
    <item>
+    <widget class="QGroupBox" name="boxart_GroupBox">
+     <property name="title">
+      <string>Box Art</string>
+     </property>
+     <layout class="QVBoxLayout" name="boxartVerticalLayout">
+      <item>
+       <widget class="QCheckBox" name="use_boxart">
+        <property name="text">
+         <string>Always Use Box Art Instead Of Game Icons</string>
+        </property>
+        <property name="toolTip">
+         <string>Games with their own icon will show their box art too, once it has been downloaded.</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="boxartHorizontalLayout">
+        <item>
+         <widget class="QLabel" name="boxart_url_label">
+          <property name="text">
+           <string>Box Art URL:</string>
+          </property>
+          <property name="toolTip">
+           <string>Where box art is downloaded from. It is used before Eden's repository.</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLineEdit" name="boxart_url_edit"/>
+        </item>
+       </layout>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
     <spacer name="verticalSpacer">
      <property name="orientation">
       <enum>Qt::Orientation::Vertical</enum>

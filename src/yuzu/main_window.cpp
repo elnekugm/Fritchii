@@ -114,6 +114,7 @@
 
 #include "qt_common/util/content.h"
 #include "qt_common/util/fs.h"
+#include "qt_common/util/boxart.h"
 #include "qt_common/util/meta.h"
 #include "qt_common/util/mod.h"
 #include "qt_common/util/path.h"
@@ -699,6 +700,7 @@ void MainWindow::AskOotFrameRate() {
 }
 
 MainWindow::~MainWindow() {
+    QtCommon::Boxart::Shutdown();
     if (nup_cancel) {
         nup_cancel->store(true);
     }

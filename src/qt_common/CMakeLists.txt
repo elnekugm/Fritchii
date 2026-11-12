@@ -19,6 +19,7 @@ add_library(qt_common STATIC
 
     util/path.h util/path.cpp
     util/game.h util/game.cpp
+    util/boxart.h util/boxart.cpp
     util/meta.h util/meta.cpp
     util/content.h util/content.cpp
     util/rom.h util/rom.cpp
@@ -85,6 +86,7 @@ target_compile_definitions(qt_common PUBLIC
 )
 
 target_link_libraries(qt_common PRIVATE core Qt6::Core Qt6::Concurrent SimpleIni::SimpleIni QuaZip::QuaZip)
+target_link_libraries(qt_common PRIVATE httplib::httplib)
 target_link_libraries(qt_common PUBLIC frozen::frozen-headers Vulkan::Headers)
 target_link_libraries(qt_common PRIVATE gamemode::headers frontend_common)
 

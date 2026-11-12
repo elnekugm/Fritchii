@@ -35,6 +35,7 @@
 
 #include "qt_common/config/uisettings.h"
 #include "qt_common/qt_common.h"
+#include "qt_common/util/boxart.h"
 
 #include "qt_common/game_list/game_list_p.h"
 
@@ -228,6 +229,41 @@ QString LooseExeFSName(const std::string& physical_name) {
     return name;
 }
 
+std::vector<u8> ReadIconFile(const QString& path) {
+    QFile file{path};
+    if (!file.open(QFile::ReadOnly)) {
+        return {};
+    }
+    const QByteArray data = file.readAll();
+    return std::vector<u8>(data.cbegin(), data.cend());
+}
+
+// Games without an icon, and every game when the user prefers covers, show the title's downloaded
+// or user provided box art (<data dir>/boxart/<name>.png). awaited_slug then names the box art
+// that replaces the current picture once its download finishes.
+void ApplyBoxart(u64 program_id, const std::string& name, std::vector<u8>& icon,
+                 std::string& awaited_slug) {
+    if (!UISettings::values.use_boxart.GetValue() && !icon.empty()) {
+        return;
+    }
+
+    const std::string slug = QtCommon::Boxart::GetSlug(program_id, name);
+    const auto boxart = QtCommon::Boxart::GetCachePath(slug);
+    if (!boxart.empty() && Common::FS::IsFile(boxart)) {
+        if (auto boxart_icon =
+                ReadIconFile(QString::fromStdString(Common::FS::PathToUTF8String(boxart)));
+            !boxart_icon.empty()) {
+            icon = std::move(boxart_icon);
+        }
+        return;
+    }
+
+    awaited_slug = slug;
+    if (icon.empty()) {
+        icon = ReadIconFile(QStringLiteral(":/icons/default/256x256/lichii.png"));
+    }
+}
+
 QString FormatPatchNameVersions(const FileSys::PatchManager& patch_manager,
                                 Loader::AppLoader& loader, bool updatable = true) {
     QString out;
@@ -407,8 +443,16 @@ void GameListWorker::AddTitlesToGameList(GameListDir* parent_dir, GameListItemTy
             GetMetadataFromControlNCA(patch, *control, icon, name);
         }
 
+        std::string awaited_slug;
+        ApplyBoxart(program_id, name, icon, awaited_slug);
+        QtCommon::Boxart::Prefetch(program_id, name);
+
         auto entry = MakeGameListEntry(file->GetFullPath(), name, file->GetSize(), icon, *loader,
                                        program_id, play_time_manager, patch);
+        if (!awaited_slug.empty()) {
+            entry.first()->setData(QString::fromStdString(awaited_slug),
+                                   GameListItemPath::CoverSlugRole);
+        }
         auto pending = std::make_shared<PendingRow>(std::move(entry));
         RecordEvent([=](GameListModel* model) { model->AddEntry(pending->Release(), parent_dir); });
     }
@@ -487,6 +531,10 @@ void GameListWorker::ScanFileSystem(ScanTarget target, const std::vector<std::fi
                                .toStdString();
                 }
 
+                std::string awaited_slug;
+                ApplyBoxart(id, name, icon, awaited_slug);
+                QtCommon::Boxart::Prefetch(id, name);
+
                 const FileSys::PatchManager patch{id, system.GetFileSystemController(),
                                                   system.GetContentProvider()};
 
@@ -495,6 +543,10 @@ void GameListWorker::ScanFileSystem(ScanTarget target, const std::vector<std::fi
 
                 auto entry = MakeGameListEntry(physical_name, name, size, icon, *app_loader, id,
                                                play_time_manager, patch);
+                if (!awaited_slug.empty()) {
+                    entry.first()->setData(QString::fromStdString(awaited_slug),
+                                           GameListItemPath::CoverSlugRole);
+                }
 
                 if (loose_dump) {
                     entry[GameListModel::COLUMN_SIZE]->setText(tr("Not scanned"));

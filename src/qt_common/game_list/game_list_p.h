@@ -82,6 +82,8 @@ public:
     static constexpr int FileTypeRole = SortRole + 4;
     /// The game's icon file as read, before scaling (the Fritchii home cover).
     static constexpr int IconDataRole = SortRole + 5;
+    /// Box art name that replaces the placeholder once its download finishes.
+    static constexpr int CoverSlugRole = SortRole + 6;
 
     GameListItemPath() = default;
     GameListItemPath(const QString& game_path, const std::vector<u8>& picture_data,
