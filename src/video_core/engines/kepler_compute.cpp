@@ -365,6 +365,9 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             },
             [&](u64 address, u32 payload, u32 flags) {
                 if (!memory_manager.IsFullyMappedRange(address, sizeof(payload))) return false;
+                if (const auto device = memory_manager.GpuToCpuAddress(address)) {
+                    Tegra::Nx2NoteQmdReleaseTarget(*device);
+                }
                 if (const auto device = memory_manager.GpuToCpuAddress(address)) {
                     Tegra::Nx2NoteQmdReleaseTarget(*device);
                 }

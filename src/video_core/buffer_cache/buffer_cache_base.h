@@ -247,6 +247,11 @@ public:
 
     void DownloadMemory(DAddr device_addr, u64 size);
 
+    /// Downloads until EndDownloadBatch share one wait for the GPU; their words land in guest
+    /// memory at EndDownloadBatch.
+    void BeginDownloadBatch();
+    void EndDownloadBatch();
+
     /// Downloads until EndDownloadBatch share one wait for the GPU; their words land in guest
     /// memory at EndDownloadBatch.
     void BeginDownloadBatch();
@@ -583,6 +588,13 @@ private:
 
     Common::RangeSet<DAddr> read_trapped_ranges;
     Common::RangeSet<DAddr> gpu_modified_ranges;
+    struct BatchedDownload {
+        DAddr device_addr;
+        const u8* staging;
+        u64 size;
+    };
+    bool download_batch{};
+    std::vector<BatchedDownload> batched_downloads;
     struct BatchedDownload {
         DAddr device_addr;
         const u8* staging;

@@ -136,6 +136,8 @@ struct System::Impl {
         device_memory.emplace();
 
         is_multicore = Settings::values.use_multi_core.GetValue();
+        memory_layout = Settings::values.memory_layout_mode.GetValue();
+        memory_layout = Settings::values.memory_layout_mode.GetValue();
         memory_layout = Settings::values.memory_layout_mode.GetValue();
 
         core_timing.SetMulticore(is_multicore);
@@ -163,6 +165,9 @@ struct System::Impl {
         const bool must_reinitialize =
             !device_memory.has_value() ||
             is_multicore != Settings::values.use_multi_core.GetValue() ||
+            // Any change of size: the device memory was made for the old one. Switch 2 titles force
+            // 12 GiB, and with 6-10 GiB configured the kernel handed out memory past its end.
+            memory_layout != Settings::values.memory_layout_mode.GetValue();
             // Any change of size: the device memory was made for the old one. Switch 2 titles force
             // 12 GiB, and with 6-10 GiB configured the kernel handed out memory past its end.
             memory_layout != Settings::values.memory_layout_mode.GetValue();
@@ -563,6 +568,7 @@ struct System::Impl {
     std::atomic_bool is_shutting_down{};
     std::atomic_bool is_powered_on{};
     bool is_multicore : 1 = false;
+    Settings::MemoryLayout memory_layout{Settings::MemoryLayout::Memory_4Gb};
     Settings::MemoryLayout memory_layout{Settings::MemoryLayout::Memory_4Gb};
     bool exit_locked : 1 = false;
     bool exit_requested : 1 = false;

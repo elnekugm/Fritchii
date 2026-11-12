@@ -21,6 +21,7 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu.h"
 #include "video_core/gpu_split.h"
+#include "video_core/nx2.h"
 #include "video_core/nx2.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_profile.h"
@@ -996,6 +997,21 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
     } else {
         split.Method(this, method, argument, is_last_call, nullptr);
     }
+    // A payload release (ProcessQueryGet) is now queued: acquires it meets need not drain.
+    if (method == MAXWELL3D_REG_INDEX(report_semaphore.query) && Nx2AcquireQueuedEnabled()) {
+        Regs::ReportSemaphore report{};
+        report.address_high = fs.regs[MAXWELL3D_REG_INDEX(report_semaphore.address_high)];
+        report.address_low = fs.regs[MAXWELL3D_REG_INDEX(report_semaphore.address_low)];
+        report.payload = fs.regs[MAXWELL3D_REG_INDEX(report_semaphore.payload)];
+        report.query.raw = value;
+        if (report.query.operation == Regs::ReportSemaphore::Operation::Release &&
+            report.query.report.Value() == Regs::ReportSemaphore::Report::Payload &&
+            report.query.reduction_enable == 0) {
+            if (const auto device = memory_manager.GpuToCpuAddress(report.Address())) {
+                split.NoteQueuedRelease(*device, report.payload);
+            }
+        }
+    }
     // A payload release (ProcessQueryGet) is now queued: acquires it meets need not drain.
     if (method == MAXWELL3D_REG_INDEX(report_semaphore.query) && Nx2AcquireQueuedEnabled()) {
         Regs::ReportSemaphore report{};

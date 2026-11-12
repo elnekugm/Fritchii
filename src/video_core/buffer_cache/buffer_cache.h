@@ -32,6 +32,24 @@ namespace VideoCommon {
 
 using Core::DEVICE_PAGESIZE;
 
+template <class P>
+void BufferCache<P>::BeginDownloadBatch() {
+    download_batch = true;
+}
+
+template <class P>
+void BufferCache<P>::EndDownloadBatch() {
+    download_batch = false;
+    if (batched_downloads.empty()) {
+        return;
+    }
+    runtime.Finish();
+    for (const BatchedDownload& download : batched_downloads) {
+        device_memory.WriteBlockUnsafe(download.device_addr, download.staging, download.size);
+    }
+    batched_downloads.clear();
+}
+
 template <class P>
 BufferCache<P>::BufferCache(Tegra::MaxwellDeviceMemoryManager& device_memory_, Runtime& runtime_)
     : runtime{runtime_}, device_memory{device_memory_}, memory_tracker{device_memory} {
@@ -2898,6 +2916,14 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
     if constexpr (requires { buffer.Mapped(); }) {
         if (const auto mapped = buffer.Mapped(); !mapped.empty()) {
             runtime.Wait(buffer.LastUsageTick());
+        if (download_batch) {
+            for (const BufferCopy& copy : copies) {
+                batched_downloads.push_back({buffer.CpuAddr() + copy.src_offset,
+                                             mapped_memory + (copy.dst_offset - download_staging.offset),
+                                             copy.size});
+            }
+            return;
+        }
             for (const BufferCopy& copy : copies) {
                 device_memory.WriteBlockUnsafe(buffer.CpuAddr() + copy.src_offset,
                                                mapped.data() + copy.src_offset, copy.size);
