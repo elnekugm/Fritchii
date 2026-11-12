@@ -41,6 +41,7 @@
 #include "video_core/texture_cache/texture_cache_base.h"
 #include "video_core/texture_cache/util.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_debug_control.h"
 #include "video_core/churn_counters.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/render_trace.h"

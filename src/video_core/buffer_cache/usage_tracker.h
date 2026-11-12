@@ -140,7 +140,7 @@ private:
         const size_t end_in_page = std::min<size_t>(
             offset_in_page + std::min<u64>(size, BUFFER_PAGE_BYTES), BUFFER_PAGE_BYTES);
         if (end_in_page <= offset_in_page) {
-            return 0;
+            return;
         }
         const size_t first_bit = offset_in_page >> BUFFER_BYTES_PER_BITSHIFT;
         const size_t bytes = std::min<size_t>(size, BUFFER_PAGE_BYTES - offset_in_page);
