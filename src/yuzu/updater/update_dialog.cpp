@@ -16,7 +16,7 @@
 #include <QRadioButton>
 #include <QSaveFile>
 #include <QStandardPaths>
-#include <QUrl>
+#include <qdesktopservices.h>
 #include "common/logging.h"
 #include "common/scm_rev.h"
 #include "frontend_common/update_checker.h"
@@ -36,6 +36,8 @@
 #ifdef YUZU_BUNDLED_OPENSSL
 #include <openssl/cert.h>
 #endif
+
+#include <QDesktopServices>
 
 #undef GetSaveFileName
 
@@ -110,36 +112,15 @@ UpdateDialog::UpdateDialog(const Common::Net::Release& release,
       m_fritchii(fritchii_asset.has_value()) {
     ui->setupUi(this);
 
-    const auto& release = update.release;
-    ui->version->setText(tr("%1 is available. You are running %2.")
-                             .arg(QString::fromStdString(release.title),
-                                  QString::fromUtf8(Common::g_build_version)));
+    ui->version->setText(
+        tr("%1 is available for download.").arg(QString::fromStdString(release.title)));
     ui->url->setText(
         tr("<a href=\"%1\">View on GitHub</a>").arg(QString::fromStdString(release.html_url)));
 
-    const auto count = static_cast<int>(update.changes.size());
-    QString changelog = QStringLiteral("### %1\n\n").arg(tr("What's new"));
-    if (update.changes_complete) {
-        changelog += tr("%n change(s) since your build:", "", count);
-    } else if (count > 0) {
-        changelog += tr("Your build is more than %n change(s) behind. The newest ones:", "", count);
-    } else {
-        changelog += tr("The list of changes could not be loaded.");
+    std::string text{release.body};
+    if (auto pos = text.find("# Packages"); pos != std::string::npos) {
+        text = text.substr(0, pos);
     }
-    changelog += QStringLiteral("\n\n");
-    for (const Common::Net::Commit& commit : update.changes) {
-        changelog += QStringLiteral("- %1 (%2, [%3](https://github.com/%4/commit/%5))\n")
-                         .arg(QString::fromStdString(commit.summary),
-                              QString::fromStdString(commit.author),
-                              QString::fromStdString(commit.sha.substr(0, 7)),
-                              QString::fromUtf8(Common::g_build_auto_update_repo),
-                              QString::fromStdString(commit.sha));
-    }
-    changelog += QStringLiteral("\n[%1](%2)\n\n---\n\n%3")
-                     .arg(tr("Compare your build with this release on GitHub"),
-                          QString::fromStdString(update.compare_url),
-                          QString::fromStdString(release.body));
-    ui->body->setMarkdown(changelog);
 
     ui->body->setMarkdown(QString::fromStdString(text));
     if (FritchiiUi::Enabled()) {
@@ -207,10 +188,22 @@ UpdateDialog::UpdateDialog(const Common::Net::Release& release,
 
         connect(this, &QDialog::accepted, this, &UpdateDialog::Download);
     } else {
-        ui->prompt->setText(tr("Open the release page to download it?"));
-        connect(this, &QDialog::accepted, this, [url = release.html_url] {
-            QDesktopServices::openUrl(QUrl{QString::fromStdString(url)});
-        });
+        u32 i = 0;
+        for (const Common::Net::Asset& a : assets) {
+            QRadioButton* r = new QRadioButton(tr(a.name.c_str()), this);
+            connect(r, &QRadioButton::toggled, this, [a, this](bool checked) {
+                if (checked)
+                    m_asset = a;
+            });
+
+            if (i == 0)
+                r->setChecked(true);
+            ++i;
+
+            ui->radioButtons->addWidget(r);
+        }
+
+        connect(this, &QDialog::accepted, this, &UpdateDialog::Download);
     }
 }
 
@@ -365,15 +358,10 @@ bool UpdateDialog::DownloadTo(const QString& filename) {
         return false;
     }
 
-    // GitHub serves release files through a redirect to its file host.
-    const QUrl url{QString::fromStdString(m_asset.url)};
-    const auto host = QStringLiteral("%1://%2").arg(url.scheme(), url.host()).toStdString();
-    const auto path = url.path(QUrl::FullyEncoded).toStdString();
-
     // TODO(crueter): Move to net.cpp
     constexpr std::size_t timeout_seconds = 15;
 
-    std::unique_ptr<httplib::Client> client = std::make_unique<httplib::Client>(host);
+    std::unique_ptr<httplib::Client> client = std::make_unique<httplib::Client>(m_asset.url);
     client->set_connection_timeout(timeout_seconds);
     client->set_read_timeout(timeout_seconds);
     client->set_write_timeout(timeout_seconds);
@@ -468,7 +456,7 @@ bool UpdateDialog::DownloadTo(const QString& filename) {
 
     const auto& response = result.value();
     if (response.status >= 400) {
-        LOG_ERROR(Frontend, "GET to {}{} returned error status code: {}", host, path,
+        LOG_ERROR(Frontend, "GET to {}{} returned error status code: {}", m_asset.url, m_asset.path,
                   response.status);
         Notify(parentWidget(), QMessageBox::Critical, tr("Failed to download file"),
                tr("Could not download from %1%2\nError code: %3")

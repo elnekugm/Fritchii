@@ -116,7 +116,8 @@ static inline u64 ParseIsoTimestamp(const std::string& iso) {
 #endif
 }
 
-std::optional<Release> Release::FromJson(const nlohmann::json& json) {
+std::optional<Release> Release::FromJson(const nlohmann::json& json, const std::string& host,
+                                         const std::string& repo) {
     Release rel;
     if (!json.is_object())
         return std::nullopt;
@@ -130,7 +131,6 @@ std::optional<Release> Release::FromJson(const nlohmann::json& json) {
     rel.title = json.contains("name") && json["name"].is_string()
                     ? json["name"].get<std::string>() : rel.tag;
     rel.id = json.value("id", std::hash<std::string>{}(rel.title));
-    rel.commit = json.value("target_commitish", std::string{});
 
     rel.published = ParseIsoTimestamp(json.value("published_at", std::string{}));
     rel.prerelease = json.value("prerelease", false);
@@ -141,9 +141,7 @@ std::optional<Release> Release::FromJson(const nlohmann::json& json) {
     boost::replace_all(body, "\\n", "\n");
     rel.body = body;
 
-    rel.html_url = json.value(
-        "html_url", fmt::format("https://github.com/{}/releases/tag/{}",
-                                Common::g_build_auto_update_repo, rel.tag));
+    rel.host = host;
 
     const auto release_base =
         fmt::format("{}/{}/releases", Common::g_build_auto_update_website, repo);
@@ -172,22 +170,35 @@ std::optional<Release> Release::FromJson(const nlohmann::json& json) {
     return rel;
 }
 
-std::vector<Release> Release::ListFromJson(const nlohmann::json& json) {
+std::optional<Release> Release::FromJson(const std::string_view& json, const std::string& host,
+                                         const std::string& repo) {
+    try {
+        return FromJson(nlohmann::json::parse(json), host, repo);
+    } catch (std::exception& e) {
+        LOG_WARNING(Common, "Failed to parse JSON: {}", e.what());
+    }
+
+    return {};
+}
+
+std::vector<Release> Release::ListFromJson(const nlohmann::json& json, const std::string& host,
+                                           const std::string& repo) {
     if (!json.is_array())
         return {};
 
     std::vector<Release> releases;
     for (const auto& obj : json) {
-        auto rel = Release::FromJson(obj);
+        auto rel = Release::FromJson(obj, host, repo);
         if (rel)
             releases.emplace_back(rel.value());
     }
     return releases;
 }
 
-std::vector<Release> Release::ListFromJson(const std::string_view& json) {
+std::vector<Release> Release::ListFromJson(const std::string_view& json, const std::string& host,
+                                           const std::string& repo) {
     try {
-        return ListFromJson(nlohmann::json::parse(json));
+        return ListFromJson(nlohmann::json::parse(json), host, repo);
     } catch (std::exception& e) {
         LOG_WARNING(Common, "Failed to parse JSON: {}", e.what());
     }
@@ -220,8 +231,6 @@ RequestResult Fetch(const std::string& url, const std::string& path) {
         };
 
         client->set_follow_location(true);
-        client->set_default_headers({{"Accept", "application/vnd.github+json"},
-                                     {"User-Agent", "Eglantine"}});
         httplib::Result result = client->send(request);
 
         if (!result) {
@@ -270,29 +279,7 @@ std::optional<std::string> GetReleasesBody() {
     const auto releases_path = Common::g_build_auto_update_api_path;
     const auto url = fmt::format("https://{}", Common::g_build_auto_update_stable_api);
 
-    try {
-        const auto json = nlohmann::json::parse(body.value());
-        std::vector<Commit> commits;
-        for (const auto& obj : json) {
-            const auto& commit = obj.at("commit");
-            const auto message = commit.value("message", std::string{});
-            commits.push_back({
-                .sha = obj.value("sha", std::string{}),
-                .summary = message.substr(0, message.find('\n')),
-                .author = commit.at("author").value("name", std::string{}),
-            });
-        }
-        return commits;
-    } catch (std::exception& e) {
-        LOG_WARNING(Common, "Failed to parse commits of {}: {}", head, e.what());
-    }
-
-    return std::nullopt;
-}
-
-std::string GetCompareUrl(const std::string& base, const std::string& head) {
-    return fmt::format("https://github.com/{}/compare/{}...{}", Common::g_build_auto_update_repo,
-                       base, head);
+    return MakeRequest(url, releases_path);
 }
 
 } // namespace Common::Net

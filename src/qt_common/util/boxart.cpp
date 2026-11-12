@@ -570,7 +570,8 @@ std::string FindGamePage(const std::string& title, std::stop_token stop_token) {
         }
         const std::string slug = page.substr(slug_start, slug_end - slug_start);
 
-        // The name of the game is in the alt text of the picture of the card.
+        // The name of the game is in the alt text of the picture of the card, right after the
+        // link to the page of the game.
         std::string name;
         const auto alt = page.find("alt=\"", slug_end);
         if (alt != std::string::npos && alt < slug_end + 400) {
