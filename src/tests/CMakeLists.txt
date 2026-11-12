@@ -162,6 +162,8 @@ add_executable(tests
     core/internal_network/network.cpp
     video_core/shader_object_pool.cpp
     video_core/aftermath_dump.cpp
+    video_core/stall_diagnostics.cpp
+    video_core/oot_visual_workaround.cpp
     video_core/storage_buffer_pointer_tracking.cpp
     video_core/storage_buffer_control_flow.cpp
     video_core/memory_tracker.cpp
@@ -174,6 +176,7 @@ add_executable(tests
     video_core/query_copy.cpp
     video_core/shader_reuse_environment.cpp
     video_core/ampere_lowering.cpp
+    video_core/ampere_matrix.cpp
     video_core/ampere_returns.cpp
     video_core/ampere_f2i.cpp
     video_core/ampere_i2f64.cpp

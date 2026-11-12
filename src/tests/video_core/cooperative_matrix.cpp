@@ -27,16 +27,18 @@ struct TensorProgram {
     IR::Program program;
     Profile profile;
 
-    explicit TensorProgram(u32 count = 1) {
+    explicit TensorProgram(u32 count = 1, bool store_result = false, bool mixed_sign = false,
+                           bool canonical_address = false) {
         program.stage = Stage::Compute;
         program.workgroup_size = {64, 1, 1};
         program.blocks = {&block};
         program.post_order_blocks = {&block};
         program.syntax_list = {{{.block = &block}, IR::AbstractSyntaxNode::Type::Block},
                                {{}, IR::AbstractSyntaxNode::Type::Return}};
-        program.info.uses_tensor_mul_add = count != 0;
+        program.info.uses_tensor_mul_add = count != 0 && software_depth == 0;
         program.info.uses_subgroup_invocation_id = count != 0;
-        profile.support_cooperative_matrix = true;
+        program.info.uses_subgroup_shuffles = software_depth != 0;
+        profile.support_cooperative_matrix = software_depth == 0;
         profile.supported_spirv = 0x00010500;
         profile.max_compute_shared_memory_size = 49152;
         profile.max_tensor_workgroup_size = 1024;
@@ -60,6 +62,7 @@ struct TensorProgram {
             const auto result = ir.Inst(IR::Opcode::TensorMulAdd, inputs[0], inputs[1],
                                        inputs[2], inputs[3], inputs[4], inputs[5],
                                        inputs[6], inputs[7]);
+            result.Inst()->SetFlags<u32>(software_depth);
             inputs[6] = IR::U32{ir.CompositeExtract(result, 0)};
             inputs[7] = IR::U32{ir.CompositeExtract(result, 1)};
         }
@@ -267,18 +270,110 @@ TEST_CASE("NV tensor shape requires the exact scope and all four half types", "[
     REQUIRE_FALSE(Vulkan::IsTensorMatrixShape(wrong));
 }
 
+TEST_CASE("Software tensor emits portable arithmetic without native matrix resources",
+          "[video_core][tensor]") {
+    TensorProgram fixture;
+    fixture.profile.support_cooperative_matrix = false;
+    fixture.profile.support_software_tensor = true;
+    // This path must not reserve the 1280 bytes per guest warp of native scratch.
+    fixture.profile.max_compute_shared_memory_size = 0;
+    const auto code = fixture.Emit("tensor-software");
+    REQUIRE_FALSE(HasCapability(code, 5357)); // CooperativeMatrixNV
+    REQUIRE_FALSE(HasCapability(code, 9)); // Float16
+    REQUIRE(HasCapability(code, 65)); // GroupNonUniformShuffle
+    REQUIRE(HasCapability(code, 64)); // GroupNonUniformBallot
+    REQUIRE(Instructions(code, 224).empty()); // No scratch-memory barriers
+    const auto variables = Instructions(code, 59);
+    REQUIRE(std::ranges::none_of(variables, [](const auto& words) { return words[2] == 4; }));
+    REQUIRE_FALSE(Instructions(code, 345).empty()); // OpGroupNonUniformShuffle
+    TensorProgram dispatch_fixture{1, true};
+    dispatch_fixture.profile.support_cooperative_matrix = false;
+    dispatch_fixture.profile.support_software_tensor = true;
+    REQUIRE_NOTHROW(dispatch_fixture.Emit("tensor-software-dispatch"));
+    TensorProgram mixed_fixture{1, true, true};
+    mixed_fixture.profile.support_cooperative_matrix = false;
+    mixed_fixture.profile.support_software_tensor = true;
+    REQUIRE_NOTHROW(mixed_fixture.Emit("tensor-software-mixed-dispatch"));
+    // Partial hardware subgroups cannot implement a guest 32-lane warp.
+    fixture.program.workgroup_size = {33, 1, 1};
+    REQUIRE_THROWS_AS(fixture.Emit(), TensorRejected);
+}
+
+TEST_CASE("Software tensor checks participation at each dynamic collective",
+          "[video_core][tensor]") {
+    for (bool partial : {false, true}) {
+        TensorProgram fixture{1, true};
+        fixture.profile.support_cooperative_matrix = false;
+        fixture.profile.support_software_tensor = true;
+        IR::Block entry{fixture.pool}, merge{fixture.pool};
+        IR::IREmitter ir{entry};
+        const auto condition = ir.ILessThan(ir.LaneId(), ir.Imm32(partial ? 16U : 32U), false);
+        fixture.program.blocks = {&entry, &fixture.block, &merge};
+        fixture.program.post_order_blocks = {&merge, &fixture.block, &entry};
+        fixture.program.syntax_list = {
+            {{.block = &entry}, IR::AbstractSyntaxNode::Type::Block},
+            {{.if_node = {condition, &fixture.block, &merge}}, IR::AbstractSyntaxNode::Type::If},
+            {{.block = &fixture.block}, IR::AbstractSyntaxNode::Type::Block},
+            {{.end_if = {&merge}}, IR::AbstractSyntaxNode::Type::EndIf},
+            {{.block = &merge}, IR::AbstractSyntaxNode::Type::Block},
+            {{}, IR::AbstractSyntaxNode::Type::Return},
+        };
+        const auto code = fixture.Emit(partial ? "tensor-software-partial-dispatch"
+                                               : "tensor-software-full-if-dispatch");
+        REQUIRE(HasCapability(code, 64)); // GroupNonUniformBallot
+        REQUIRE(Instructions(code, 339).size() == 1); // Ballot of active invocations
+        REQUIRE(Instructions(code, 169).size() == 1); // Select safe zero for a partial warp
+        REQUIRE(Instructions(code, 224).empty()); // No barriers inside divergent control flow
+        // Native scratch barriers still require straight-line participation.
+        fixture.profile.support_software_tensor = false;
+        fixture.profile.support_cooperative_matrix = true;
+        REQUIRE_THROWS_AS(fixture.Emit(), TensorRejected);
+    }
+}
+
+TEST_CASE("Software tensor local IDs preserve guest warp and lane grouping",
+          "[video_core][tensor]") {
+    TensorProgram fixture{1, true, false, true};
+    fixture.profile.support_cooperative_matrix = false;
+    fixture.profile.support_software_tensor = true;
+    const auto code = fixture.Emit("tensor-software-canonical-local-id-dispatch");
+    const auto decorations = Instructions(code, 71);
+    const auto has_builtin = [&](u32 builtin) {
+        return std::ranges::any_of(decorations, [=](const auto& words) {
+            return words.size() == 3 && words[1] == 11 && words[2] == builtin;
+        });
+    };
+    REQUIRE_FALSE(has_builtin(27)); // Native LocalInvocationId has no prescribed subgroup mapping
+    REQUIRE(has_builtin(40)); // SubgroupId
+    REQUIRE(has_builtin(41)); // SubgroupLocalInvocationId
+    REQUIRE(Instructions(code, 132).size() >= 2); // subgroup * 32 and storage offset
+    REQUIRE(Instructions(code, 128).size() >= 1); // + lane
+}
+
 TEST_CASE("Native tensor lowering remains opt-in and preserves fallback errors", "[video_core][tensor]") {
     TensorMode mode{nullptr};
     std::array<Ampere::Instruction, 2> code{{
         {{0x0810723c, 12, 0x8ff, 0}}, {{0x0000794d, 0, 0x03800000, 0}}}};
-    REQUIRE_FALSE(static_cast<bool>(Ampere::LowerToMaxwell(code, false, true)));
+    // The cooperative-matrix TENSOR_MUL_ADD (0x5d3 without the software bit 48) only with
+    // EDEN_NX2_TENSOR=fast and device support; otherwise the software expansion.
+    const auto cooperative = [](const Ampere::LoweredProgram& lowered) {
+        return std::any_of(lowered.instructions.begin(), lowered.instructions.end(), [](u64 word) {
+            return (word >> 52) == 0x5d3 && !((word >> 48) & 1);
+        });
+    };
+    const auto off = Ampere::LowerToMaxwell(code, false, true);
+    REQUIRE(static_cast<bool>(off));
+    REQUIRE_FALSE(cooperative(off));
     TensorMode::Set("fast");
     const auto unsupported = Ampere::LowerToMaxwell(code, false, false);
     REQUIRE_FALSE(static_cast<bool>(unsupported));
     REQUIRE(unsupported.error.find("matrix multiply") != std::string_view::npos);
+    TensorMode::Set("software");
+    REQUIRE_FALSE(static_cast<bool>(Ampere::LowerToMaxwell(code, false, false)));
     const auto supported = Ampere::LowerToMaxwell(code, false, true);
     REQUIRE(static_cast<bool>(supported));
     REQUIRE(supported.instructions[0] >> 52 == 0x5d3);
+    REQUIRE(cooperative(supported));
     REQUIRE(Maxwell::Decode(supported.instructions[0]) == Maxwell::Opcode::TENSOR_MUL_ADD);
     code[0].words[0] &= ~0x7000U;
     REQUIRE_FALSE(static_cast<bool>(Ampere::LowerToMaxwell(code, false, true)));

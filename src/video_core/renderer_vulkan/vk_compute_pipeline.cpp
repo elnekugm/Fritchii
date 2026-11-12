@@ -409,14 +409,21 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     shadow.reset();
     guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
 
-    buffer_cache.SetComputeUniformBufferState(info.constant_buffer_mask, &uniform_buffer_sizes);
-    buffer_cache.UnbindComputeStorageBuffers();
-    size_t ssbo_index{};
-    for (const auto& desc : info.storage_buffers_descriptors) {
-        ASSERT(desc.count == 1);
-        buffer_cache.BindComputeStorageBuffer(ssbo_index, desc.cbuf_index, desc.cbuf_offset,
-                                              desc.is_written);
-        ++ssbo_index;
+    namespace Profile = VideoCommon::Nx2Profile;
+    {
+        const Profile::Scope pointers_scope{Profile::Zone::ComputePointers};
+        buffer_cache.SetComputeUniformBufferState(info.constant_buffer_mask, &uniform_buffer_sizes);
+        buffer_cache.UnbindComputeStorageBuffers();
+        buffer_cache.SetComputeShaderHash(shader_hash);
+        size_t ssbo_index{};
+        for (const auto& desc : info.storage_buffers_descriptors) {
+            ASSERT(desc.count == 1);
+            buffer_cache.BindComputeStorageBuffer(ssbo_index, desc.cbuf_index, desc.cbuf_offset,
+                                                  desc.is_written, desc.indirect_offset,
+
+                                                  desc.write_extent);
+            ++ssbo_index;
+        }
     }
 
     // Ends after FillImageViews (views_scope.reset() below).

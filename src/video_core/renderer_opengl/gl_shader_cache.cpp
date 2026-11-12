@@ -55,7 +55,7 @@ using VideoCommon::LoadPipelines;
 using VideoCommon::SerializePipeline;
 using Context = ShaderContext::Context;
 
-constexpr u32 CACHE_VERSION = 0x4e4f0001; // Isolated no-OOT test cache.
+constexpr u32 CACHE_VERSION = 0x4e4f0002; // Dynamic texture tables with fixed samplers; capture fresh environments.
 
 template <typename Container>
 auto MakeSpan(Container& container) {

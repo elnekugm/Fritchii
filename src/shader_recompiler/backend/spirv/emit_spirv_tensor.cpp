@@ -6,7 +6,6 @@
 #include "common/common_types.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
-#include "common/common_types.h"
 
 namespace Shader::Backend::SPIRV {
 namespace {
@@ -23,10 +22,224 @@ constexpr u32 B_BASE = 256; // 16x8 f16
 constexpr u32 C_BASE = 384; // 16x8 f16
 constexpr u32 D_BASE = 512; // 16x8 f16
 
+// Reconstruct each lane's four output elements from the PTX fragment layout above.
+// Half inputs are exact in FP32; accumulate the dot product in FP32 and round to half
+// only when writing the destination fragments. No native matrix extension is required.
+Id EmitSoftwareTensorMulAdd(EmitContext& ctx, const std::array<Id, 8>& inputs) {
+    ctx.AddCapability(spv::Capability::GroupNonUniformShuffle);
+    ctx.AddCapability(spv::Capability::GroupNonUniformBallot);
+    const Id u32ty{ctx.U32[1]};
+    const Id f32ty{ctx.F32[1]};
+    const auto imm = [&](u32 v) { return ctx.Const(v); };
+    const auto add = [&](Id a, Id b) { return ctx.OpIAdd(u32ty, a, b); };
+    const auto shl = [&](Id a, u32 b) { return ctx.OpShiftLeftLogical(u32ty, a, imm(b)); };
+    const Id active{ctx.OpGroupNonUniformBallot(ctx.U32[4], imm(3), ctx.true_value)};
+    const Id full_warp{
+        ctx.OpIEqual(ctx.U1, ctx.OpCompositeExtract(u32ty, active, 0U), imm(0xffffffffU))};
+    const Id lane{ctx.OpLoad(u32ty, ctx.subgroup_local_invocation_id)};
+    const Id row_group{ctx.OpShiftRightLogical(u32ty, lane, imm(2))};
+    const Id column_pair{shl(ctx.OpBitwiseAnd(u32ty, lane, imm(3)), 1)};
+    const auto half = [&](Id packed, u32 component) {
+        return ctx.OpCompositeExtract(f32ty, ctx.OpUnpackHalf2x16(ctx.F32[2], packed), component);
+    };
+    std::array<Id, 2> results;
+    for (u32 row_half = 0; row_half < 2; ++row_half) {
+        std::array<Id, 2> accumulators{half(inputs[6 + row_half], 0),
+                                       half(inputs[6 + row_half], 1)};
+        for (u32 k = 0; k < 16; ++k) {
+            const Id a_lane{add(shl(row_group, 2), imm((k % 8) / 2))};
+            const Id a_packed{ctx.OpGroupNonUniformShuffle(
+                u32ty, imm(3), inputs[row_half + (k >= 8 ? 2 : 0)], a_lane)};
+            const Id a{half(a_packed, k % 2)};
+            for (u32 column_half = 0; column_half < 2; ++column_half) {
+                const Id b_lane{add(shl(add(column_pair, imm(column_half)), 2), imm((k % 8) / 2))};
+                const Id b_packed{
+                    ctx.OpGroupNonUniformShuffle(u32ty, imm(3), inputs[k >= 8 ? 5 : 4], b_lane)};
+                const Id b{half(b_packed, k % 2)};
+                accumulators[column_half] = ctx.OpFma(f32ty, a, b, accumulators[column_half]);
+            }
+        }
+        results[row_half] = ctx.OpPackHalf2x16(
+            u32ty, ctx.OpCompositeConstruct(ctx.F32[2], accumulators[0], accumulators[1]));
+    }
+    // An inactive shuffle source produces an undefined value, not undefined execution.
+    // SPIR-V OpSelect explicitly discards poison from its unselected object:
+    // https://registry.khronos.org/SPIR-V/specs/unified1/SPIRV.html#OpSelect
+    // Select discards those pure arithmetic results for partial warps, where guest MMA
+    // has undefined participation. Full warps retain the complete matrix computation.
+    const Id result{ctx.OpCompositeConstruct(ctx.U32[2], results[0], results[1])};
+    const Id zero{ctx.ConstantComposite(ctx.U32[2], imm(0), imm(0))};
+    return ctx.OpSelect(ctx.U32[2], full_warp, result, zero);
+}
+
+// A cooperative matrix needs its whole subgroup: every row of the workgroup fills whole warps and
+// the pipeline is created with full subgroups. Cooperative matrices also need the Vulkan memory
+// model, which has no Coherent decoration, so a program that needs coherent memory keeps the
+// emulation.
+bool SupportsCooperativeHmma(const IR::Program& program) {
+    return program.stage == Stage::Compute && program.workgroup_size[0] != 0 &&
+           program.workgroup_size[0] % GUEST_WARP_LANES == 0 &&
+           !program.info.requires_coherent_global_memory &&
+           !program.info.requires_coherent_image_memory;
+}
+
+// Sirit lacks the cooperative matrix instructions. They are emitted as instructions with the same
+// word layout, and PatchCooperativeHmma replaces the opcodes after assembly: OpTypeStruct for the
+// types, OpSelect for the multiply-add, OpBitFieldUExtract for a load and a 5-word OpStore of a
+// multiply-add result for a store. The type operands are constants that no real structure has as
+// members. A is the given rows by 16, B 16 by the given columns and the accumulator rows by columns.
+CooperativeHmmaTypes DefineCooperativeHmmaTypes(Sirit::Module& module, Id u32_type, u32 rows,
+                                                u32 columns, u32 spirv_version) {
+    module.AddExtension("SPV_KHR_cooperative_matrix");
+    module.AddCapability(spv::Capability::CooperativeMatrixKHR);
+    module.AddCapability(spv::Capability::Float16);
+    if (spirv_version < 0x00010500) {
+        module.AddExtension("SPV_KHR_vulkan_memory_model");
+    }
+    module.AddCapability(spv::Capability::VulkanMemoryModel);
+    module.AddCapability(spv::Capability::VulkanMemoryModelDeviceScope);
+    module.SetMemoryModel(spv::AddressingModel::Logical, spv::MemoryModel::Vulkan);
+    const Id float16{module.TypeFloat(16)};
+    const auto constant{[&](u32 value) { return module.Constant(u32_type, value); }};
+    const Id scope{constant(static_cast<u32>(spv::Scope::Subgroup))};
+    const auto matrix{[&](u32 matrix_rows, u32 matrix_columns, spv::CooperativeMatrixUse use) {
+        return module.TypeStruct(float16, scope, constant(matrix_rows), constant(matrix_columns),
+                                 constant(static_cast<u32>(use)));
+    }};
+    return CooperativeHmmaTypes{
+        .float16 = float16,
+        .float16x2 = module.TypeVector(float16, 2),
+        .matrix_a = matrix(rows, 16, spv::CooperativeMatrixUse::MatrixAKHR),
+        .matrix_b = matrix(16, columns, spv::CooperativeMatrixUse::MatrixBKHR),
+        .matrix_c = matrix(rows, columns, spv::CooperativeMatrixUse::MatrixAccumulatorKHR),
+        .rows = rows,
+    };
+}
+
+// HMMA.16816.F16 on a cooperative matrix. Each lane already holds its share of the matrices in
+// registers, so no data moves between lanes or through memory: the lane's halves become the
+// matrix's local elements. Vulkan leaves their order to the driver; NVIDIA's is the guest's except
+// that A's middle registers swap (see the self-test in vk_cooperative_hmma_test.cpp).
+Id EmitCooperativeHmma(Sirit::Module& module, const CooperativeHmmaTypes& types, Id u32_type,
+                       Id u32x2_type, Id a, Id b, Id c) {
+    const auto insert_word{[&](Id matrix_type, Id matrix, Id vector, u32 word, u32 slot) {
+        const Id halves{module.OpBitcast(types.float16x2,
+                                         module.OpCompositeExtract(u32_type, vector, word))};
+        for (u32 half = 0; half < 2; ++half) {
+            matrix = module.OpCompositeInsert(
+                matrix_type, module.OpCompositeExtract(types.float16, halves, half), matrix,
+                slot * 2 + half);
+        }
+        return matrix;
+    }};
+    constexpr std::array<u32, 4> a_words{0, 2, 1, 3};
+    Id matrix_a{module.OpUndef(types.matrix_a)};
+    for (u32 slot = 0; slot < a_words.size(); ++slot) {
+        matrix_a = insert_word(types.matrix_a, matrix_a, a, a_words[slot], slot);
+    }
+    Id matrix_b{module.OpUndef(types.matrix_b)};
+    Id matrix_c{module.OpUndef(types.matrix_c)};
+    for (u32 slot = 0; slot < 2; ++slot) {
+        matrix_b = insert_word(types.matrix_b, matrix_b, b, slot, slot);
+        matrix_c = insert_word(types.matrix_c, matrix_c, c, slot, slot);
+    }
+    // OpCooperativeMatrixMulAddKHR after PatchCooperativeHmma.
+    const Id matrix_d{module.OpSelect(types.matrix_c, matrix_a, matrix_b, matrix_c)};
+    const auto extract_word{[&](u32 word) {
+        return module.OpBitcast(
+            u32_type,
+            module.OpCompositeConstruct(
+                types.float16x2, module.OpCompositeExtract(types.float16, matrix_d, word * 2),
+                module.OpCompositeExtract(types.float16, matrix_d, word * 2 + 1)));
+    }};
+    return module.OpCompositeConstruct(u32x2_type, extract_word(0), extract_word(1));
+}
+
+Id SharedWord(EmitContext& ctx, Id index) {
+    if (ctx.uses_explicit_workgroup_layout) {
+        return ctx.OpAccessChain(ctx.shared_u32, ctx.shared_memory_u32, ctx.u32_zero_value, index);
+    }
+    return ctx.OpAccessChain(ctx.shared_u32, ctx.shared_memory_u32, index);
+}
+
+void SubgroupBarrier(EmitContext& ctx) {
+    const Id scope{ctx.Const(static_cast<u32>(spv::Scope::Subgroup))};
+    ctx.OpControlBarrier(scope, scope, ctx.Const(SubgroupBarrierSemantics));
+}
+
+// One HMMA.16816.F16 (or .1688 with zero upper halves) of a 32-lane warp on 16x16x16 matrices: the
+// NVIDIA fragments go to row-major A, column-major B (columns 8-15 zero) and row-major C tiles in
+// shared memory, one cooperative-matrix multiply-add replaces the per-lane emulation, and each lane
+// reads its two D words back from where it wrote C. With 8-row matrices (Intel Xe2's 8x16x16) the
+// top and bottom halves of A and C are two products with the same B.
+Id EmitCooperativeTensorMulAdd(EmitContext& ctx, const CooperativeHmmaTypes& types,
+                               u32 scratch_word, Id a, Id b, Id c) {
+    const Id u32ty = ctx.U32[1];
+    const auto imm = [&](u32 value) { return ctx.Const(value); };
+    const auto add = [&](Id lhs, Id rhs) { return ctx.OpIAdd(u32ty, lhs, rhs); };
+    const Id lane = ctx.OpBitwiseAnd(u32ty, ctx.OpLoad(u32ty, ctx.subgroup_local_invocation_id),
+                                     imm(31));
+    const Id subgroup = ctx.OpLoad(u32ty, ctx.tensor_subgroup_id);
+    const Id base = add(imm(scratch_word), ctx.OpIMul(u32ty, subgroup, imm(384)));
+    const Id tile_a = base;
+    const Id tile_b = add(base, imm(128));
+    const Id tile_c = add(base, imm(256));
+    const Id g = ctx.OpShiftRightLogical(u32ty, lane, imm(2));
+    const Id t = ctx.OpBitwiseAnd(u32ty, lane, imm(3));
+    // Word of (row, first column pair) in a 16x16 fp16 tile with 8 words a row/column.
+    const Id row_lo = add(ctx.OpShiftLeftLogical(u32ty, g, imm(3)), t);  // row g,   cols 2t
+    const Id row_hi = add(row_lo, imm(64));                                // row g+8, cols 2t
+    const auto store = [&](Id tile, Id word, Id value) {
+        ctx.OpStore(SharedWord(ctx, add(tile, word)), value);
+    };
+    store(tile_a, row_lo, ctx.OpCompositeExtract(u32ty, a, 0));
+    store(tile_a, row_hi, ctx.OpCompositeExtract(u32ty, a, 1));
+    store(tile_a, add(row_lo, imm(4)), ctx.OpCompositeExtract(u32ty, a, 2));
+    store(tile_a, add(row_hi, imm(4)), ctx.OpCompositeExtract(u32ty, a, 3));
+    // B column g holds k pairs t (b0) and t+4 (b1); columns 8-15 (words 64-127) are zero.
+    store(tile_b, row_lo, ctx.OpCompositeExtract(u32ty, b, 0));
+    store(tile_b, add(row_lo, imm(4)), ctx.OpCompositeExtract(u32ty, b, 1));
+    store(tile_b, add(lane, imm(64)), ctx.u32_zero_value);
+    store(tile_b, add(lane, imm(96)), ctx.u32_zero_value);
+    store(tile_c, row_lo, ctx.OpCompositeExtract(u32ty, c, 0));
+    store(tile_c, row_hi, ctx.OpCompositeExtract(u32ty, c, 1));
+    SubgroupBarrier(ctx);
+    const Id stride = imm(8);
+    // OpCooperativeMatrixLoadKHR %type %pointer %layout %stride after PatchCooperativeHmma.
+    const auto load = [&](Id type, Id tile, u32 layout) {
+        return ctx.OpBitFieldUExtract(type, SharedWord(ctx, tile), imm(layout), stride);
+    };
+    // Eight rows of a tile are 64 words. The first product emits what the 16-row path always did,
+    // in the same order (A, B, C), so its SPIR-V is unchanged on NVIDIA and AMD.
+    std::optional<Id> matrix_b;
+    for (u32 row = 0; row < 16; row += types.rows) {
+        const Id rows_a = row == 0 ? tile_a : add(tile_a, imm(row * 8));
+        const Id rows_c = row == 0 ? tile_c : add(tile_c, imm(row * 8));
+        const Id matrix_a = load(types.matrix_a, rows_a, LayoutRowMajor);
+        if (!matrix_b) {
+            matrix_b = load(types.matrix_b, tile_b, LayoutColumnMajor);
+        }
+        const Id matrix_c = load(types.matrix_c, rows_c, LayoutRowMajor);
+        // OpCooperativeMatrixMulAddKHR and OpCooperativeMatrixStoreKHR %pointer %object %layout
+        // %stride after PatchCooperativeHmma.
+        const Id matrix_d = ctx.OpSelect(types.matrix_c, matrix_a, *matrix_b, matrix_c);
+        const std::array<Sirit::MemoryAccessLiteral, 2> store_operands{imm(LayoutRowMajor).value,
+                                                                       stride.value};
+        ctx.OpStore(SharedWord(ctx, rows_c), matrix_d,
+                    std::span<const Sirit::MemoryAccessLiteral>(store_operands));
+    }
+    SubgroupBarrier(ctx);
+    const Id d0 = ctx.OpLoad(u32ty, SharedWord(ctx, add(tile_c, row_lo)));
+    const Id d1 = ctx.OpLoad(u32ty, SharedWord(ctx, add(tile_c, row_hi)));
+    return ctx.OpCompositeConstruct(ctx.U32[2], d0, d1);
+}
 } // Anonymous namespace
 
 Id EmitTensorMulAdd(EmitContext& ctx, IR::Inst* inst, Id a0, Id a1, Id a2, Id a3, Id b0, Id b1,
                     Id c0, Id c1) {
+    if (ctx.profile.support_software_tensor) {
+        return EmitSoftwareTensorMulAdd(ctx, {a0, a1, a2, a3, b0, b1, c0, c1});
+    }
     const Id u32ty{ctx.U32[1]};
     const Id f16{ctx.F16[1]};
     const Id f16x2{ctx.F16[2]};

@@ -528,7 +528,13 @@ void VisitUsages(Info& info, IR::Inst& inst) {
         info.uses_subgroup_invocation_id = true;
         break;
     case IR::Opcode::TensorMulAdd:
-        info.uses_tensor_mul_add = true;
+        if (inst.Flags<u32>() == 0) {
+            info.uses_tensor_mul_add = true;
+        } else {
+            // Software HMMA: shuffles, and half subnormals must survive the f32 sums.
+            info.uses_subgroup_shuffles = true;
+            info.uses_fp32_denorms_preserve = true;
+        }
         info.uses_subgroup_invocation_id = true;
         break;
     case IR::Opcode::ShuffleIndex:

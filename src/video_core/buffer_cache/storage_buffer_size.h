@@ -9,10 +9,15 @@
 
 namespace VideoCommon {
 
-// Native compute pointers have no following size word.
+// Native compute pointers have no following size word. A pointer-table entry is also bare;
+// read-only tables may address larger pools, while written bindings keep the smaller limit.
 [[nodiscard]] constexpr u32 StorageBufferSizeLimit(u64 kind_extent, u64 next_word,
-                                                   bool native_compute) {
+                                                   bool table_pointer, bool native_compute,
+                                                   bool is_written) {
     constexpr u32 mib = 1024 * 1024;
+    if (table_pointer) {
+        return static_cast<u32>((std::min)(kind_extent, u64{(is_written ? 8U : 64U) * mib}));
+    }
     if (native_compute) {
         return static_cast<u32>((std::min)(kind_extent, u64{8U * mib}));
     }
