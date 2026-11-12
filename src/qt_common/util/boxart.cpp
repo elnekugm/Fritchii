@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <deque>
 #include <exception>
 #include <functional>
@@ -286,6 +287,17 @@ void CleanTitle(std::string& title) {
             }
             noise = noise || id;
         }
+        // A bare number is the build of the dump ("mkw-180"), not part of the name.
+        if (lower.size() > 0) {
+            bool number = true;
+            for (char c : lower) {
+                if (c < '0' || c > '9') {
+                    number = false;
+                    break;
+                }
+            }
+            noise = noise || number;
+        }
         for (const auto& word_noise : Noise) {
             if (lower == word_noise) {
                 noise = true;
@@ -438,9 +450,18 @@ float Score(const std::string& candidate, const std::vector<std::string>& wanted
             }
         }
     }
-    const float matched = static_cast<float>(hits) / static_cast<float>(wanted.size());
-    const float extra = static_cast<float>(words.size() - hits) / static_cast<float>(words.size());
-    return matched - extra * 0.5f;
+    const float covered = static_cast<float>(hits) / static_cast<float>(wanted.size());
+
+    // The words of the candidate that the game does not name count against it a little: a title
+    // with a subtitle ("Nintendo Switch 2 Edition") still names the game.
+    std::size_t extra = 0;
+    for (const auto& word : words) {
+        if (std::find(wanted.begin(), wanted.end(), word) == wanted.end()) {
+            ++extra;
+        }
+    }
+    const float extra_ratio = static_cast<float>(extra) / static_cast<float>(words.size());
+    return covered - extra_ratio * 0.25f;
 }
 
 // Fetches a page of the LaunchBox site. Returns the HTTP status.
@@ -505,49 +526,63 @@ std::string FindGamePage(const std::string& title, std::stop_token stop_token) {
         return {};
     }
 
-    std::string page;
-    const std::string url =
-        fmt::format("{}/games/results/{}", LAUNCHBOX_HOST, UrlEncode(query));
-    if (FetchPage(url, page, stop_token) != 200) {
-        return {};
-    }
+    // The name of the file may name the game and something else ("Drag x Drive Global Jam Racing"),
+    // and the database knows it under the shorter name. The search is repeated without its last
+    // word when the first one finds nothing that matches.
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        std::string page;
+        const std::string url =
+            fmt::format("{}/games/results/{}", LAUNCHBOX_HOST, UrlEncode(query));
+        if (FetchPage(url, page, stop_token) != 200) {
+            return {};
+        }
 
-    // Every result links to its page and names the game in the alt text of its picture.
-    const auto wanted = Words(query);
-    std::string best_page;
-    float best_score = 0.0f;
-    std::size_t pos = 0;
-    while ((pos = page.find("/games/details/", pos)) != std::string::npos) {
-        const auto slug_start = pos + std::string_view{"/games/details/"}.size();
-        const auto slug_end = page.find('"', slug_start);
-        if (slug_end == std::string::npos) {
+        // Every result links to its page and names the game in the alt text of its picture.
+        const auto wanted = Words(query);
+        std::string best_page;
+        float best_score = 0.0f;
+        std::size_t pos = 0;
+        while ((pos = page.find("/games/details/", pos)) != std::string::npos) {
+            const auto slug_start = pos + std::string_view{"/games/details/"}.size();
+            const auto slug_end = page.find('"', slug_start);
+            if (slug_end == std::string::npos) {
+                break;
+            }
+            const std::string slug = page.substr(slug_start, slug_end - slug_start);
+
+            // The name of the game is in the alt text of the picture of the card, right after the
+            // link to the page of the game.
+            std::string name;
+            const auto alt = page.find("alt=\"", slug_end);
+            if (alt != std::string::npos && alt < slug_end + 400) {
+                const auto alt_end = page.find('"', alt + 5);
+                if (alt_end != std::string::npos) {
+                    name = page.substr(alt + 5, alt_end - alt - 5);
+                }
+            }
+
+            const float score = Score(name, wanted);
+            if (score > best_score) {
+                best_score = score;
+                best_page = fmt::format("{}/games/details/{}", LAUNCHBOX_HOST, slug);
+            }
+            pos = slug_end;
+        }
+
+        if (best_score >= 0.34f) {
+            return best_page;
+        }
+        if (attempt > 0) {
             break;
         }
-        const std::string slug = page.substr(slug_start, slug_end - slug_start);
-
-        // The name of the game is in the alt text of the picture of the card, right after the
-        // link to the page of the game.
-        std::string name;
-        const auto alt = page.find("alt=\"", slug_end);
-        if (alt != std::string::npos && alt < slug_end + 400) {
-            const auto alt_end = page.find('"', alt + 5);
-            if (alt_end != std::string::npos) {
-                name = page.substr(alt + 5, alt_end - alt - 5);
-            }
+        // The last word goes, and the search is repeated without it.
+        const auto space = query.rfind(' ');
+        if (space == std::string::npos) {
+            break;
         }
-
-        const float score = Score(name, wanted);
-        if (score > best_score) {
-            best_score = score;
-            best_page = fmt::format("{}/games/details/{}", LAUNCHBOX_HOST, slug);
-        }
-        pos = slug_end;
+        query = query.substr(0, space);
     }
-
-    if (best_score < 0.34f) {
-        return {};
-    }
-    return best_page;
+    return {};
 }
 
 // The URL of the front cover of the game on its LaunchBox page.
