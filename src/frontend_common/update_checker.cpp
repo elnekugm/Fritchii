@@ -34,10 +34,10 @@ std::optional<u64> ParseBuildNumber(std::string_view tag) {
 }
 
 // The updates come from the releases of this fork.
-constexpr std::string_view ReleaseRepo = "elnekugm/Fritchii";
+constexpr std::string_view ReleaseRepo = "elnekugm/banachii";
 // Download URLs name the repository by its current name; GitHub redirects the old one.
-constexpr std::array RepoNames{std::string_view{"Fritchii"}, std::string_view{"Lichii"},
-                               std::string_view{"Frizti/Lichii"}};
+constexpr std::array RepoNames{std::string_view{"banachii"}, std::string_view{"Fritchii"},
+                               std::string_view{"Lichii"}, std::string_view{"Frizti/Lichii"}};
 
 std::optional<u32> ParseNumber(std::string_view text) {
     if (text.empty() || (text.size() > 1 && text.front() == '0') ||
@@ -208,7 +208,7 @@ std::optional<FritchiiVersion> RunningVersion() {
 }
 
 std::optional<FritchiiVersion> ParseFritchiiTag(std::string_view tag) {
-    for (const std::string_view prefix : {"fritchii-v", "frizti-v"}) {
+    for (const std::string_view prefix : {"banachii-v", "fritchii-v", "frizti-v"}) {
         if (tag.starts_with(prefix)) {
             return ParseFritchiiVersion(tag.substr(prefix.size()));
         }
