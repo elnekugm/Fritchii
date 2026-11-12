@@ -23,6 +23,7 @@
 #include <QToolButton>
 
 #include "qt_common/game_list/game_list_p.h"
+#include "yuzu/fritchii/aero_background.h"
 #include "yuzu/fritchii/fritchii_ui.h"
 #include "yuzu/fritchii/saves_window.h"
 
@@ -264,7 +265,11 @@ QWidget* Home::MakePage() {
     auto* layout = new QVBoxLayout(page);
     layout->setContentsMargins(56, 24, 56, 36);
     layout->setSpacing(0);
-
+    // The sky of Frutiger Aero behind the glass of the home page.
+    auto* background = new AeroBackground(page);
+    background->setGeometry(page->rect());
+    background->lower();
+    page->installEventFilter(this);
     // Discord and Donate in plain sight at the top right, with their names (2026-11-10: the
     // rail's bare icons were easy to miss).
     auto* links = new QHBoxLayout;
@@ -474,6 +479,13 @@ bool Home::eventFilter(QObject* watched, QEvent* event) {
     // home page instead, unless the player asked for the full list.
     if (event->type() == QEvent::Show && (watched == game_list || watched == placeholder)) {
         QTimer::singleShot(0, this, &Home::Restore);
+    }
+    // The sky of the home page is drawn over the whole page, so it follows its size.
+    if (event->type() == QEvent::Resize && watched == page) {
+        if (auto* background = page->findChild<AeroBackground*>()) {
+            background->setGeometry(page->rect());
+            background->update();
+        }
     }
     return QObject::eventFilter(watched, event);
 }

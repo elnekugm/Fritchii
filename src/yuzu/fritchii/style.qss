@@ -1,229 +1,330 @@
-/* Fritchii "Graphite": near-black, one violet accent, Inter. Colours live in the palette
+/* Banachii "Frutiger Aero": the sky behind the glass. The panels are translucent, the edges are
+   rounded, the gloss of the glass is drawn with the gradients. The colours live in the palette
    (fritchii_ui.cpp); this file shapes the widgets. */
 
 QToolTip {
-    background: #1f1f24;
-    color: #ececf1;
-    border: 1px solid #2a2a30;
-    border-radius: 6px;
-    padding: 6px 8px;
-}
-
-QMenuBar { background: #111113; }
-QMenuBar::item { padding: 6px 10px; background: transparent; border-radius: 6px; }
-QMenuBar::item:selected { background: #1f1f24; }
-
-QMenu {
-    background: #1b1b1f;
-    border: 1px solid #2a2a30;
-    border-radius: 10px;
-    padding: 6px;
-}
-QMenu::item { padding: 7px 30px 7px 14px; border-radius: 6px; }
-QMenu::item:selected { background: #2b2640; color: #ececf1; }
-QMenu::item:disabled { color: #55555f; }
-QMenu::separator { height: 1px; background: #2a2a30; margin: 5px 8px; }
-QMenu::indicator { width: 14px; height: 14px; left: 6px; }
-
-QPushButton {
-    background: #1f1f24;
-    border: 1px solid #2a2a30;
-    border-radius: 8px;
-    padding: 7px 18px;
-}
-QPushButton:hover { background: #26262c; }
-QPushButton:pressed { background: #2b2b32; }
-QPushButton:default { background: #a78bfa; color: #1c1433; border: 1px solid #a78bfa; }
-QPushButton:default:hover { background: #b59dfb; }
-QPushButton:disabled { color: #55555f; background: #18181b; }
-
-QLineEdit, QComboBox, QPlainTextEdit, QTextEdit {
-    background: #18181b;
-    border: 1px solid #2a2a30;
+    background: rgba(255, 255, 255, 235);
+    color: #0a2a43;
+    border: 1px solid rgba(169, 212, 234, 220);
     border-radius: 8px;
     padding: 6px 10px;
 }
-QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus, QTextEdit:focus { border-color: #a78bfa; }
-QComboBox:hover, QLineEdit:hover { border-color: #3a3a42; }
-QComboBox::drop-down { border: none; width: 26px; }
+
+QMenuBar { background: transparent; }
+QMenuBar::item { padding: 6px 12px; background: transparent; border-radius: 8px; }
+QMenuBar::item:selected { background: rgba(0, 156, 219, 90); color: #0a2a43; }
+
+QMenu {
+    background: rgba(255, 255, 255, 240);
+    border: 1px solid rgba(169, 212, 234, 200);
+    border-radius: 14px;
+    padding: 8px;
+}
+QMenu::item { padding: 7px 32px 7px 16px; border-radius: 8px; }
+QMenu::item:selected {
+    background: qlineargradient(x1: 0, y1: 0, x2: 1, y2: 0,
+                                stop: 0 rgba(0, 156, 219, 200), stop: 1 rgba(0, 140, 220, 150));
+    color: #06334f;
+}
+QMenu::item:disabled { color: #8aa8bd; }
+QMenu::separator { height: 1px; background: rgba(169, 212, 234, 180); margin: 6px 10px; }
+QMenu::indicator { width: 14px; height: 14px; left: 6px; }
+
+/* The buttons are glass: a light top, a deeper bottom, a white gloss on top of it. */
+QPushButton {
+    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                stop: 0 rgba(255, 255, 255, 250), stop: 0.5 rgba(230, 244, 253, 235),
+                                stop: 0.5 rgba(214, 235, 249, 235), stop: 1 rgba(184, 220, 243, 235));
+    border: 1px solid rgba(140, 195, 226, 200);
+    border-radius: 12px;
+    padding: 7px 20px;
+    color: #0a2a43;
+}
+QPushButton:hover {
+    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                stop: 0 rgba(255, 255, 255, 255), stop: 0.5 rgba(240, 250, 255, 245),
+                                stop: 0.5 rgba(224, 244, 255, 245), stop: 1 rgba(196, 230, 250, 245));
+    border: 1px solid rgba(0, 156, 219, 220);
+}
+QPushButton:pressed {
+    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                stop: 0 rgba(180, 220, 244, 235), stop: 1 rgba(230, 246, 255, 235));
+}
+QPushButton:default {
+    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                stop: 0 rgba(120, 214, 246, 255), stop: 0.5 rgba(0, 178, 230, 255),
+                                stop: 0.5 rgba(0, 156, 219, 255), stop: 1 rgba(0, 130, 200, 255));
+    color: #ffffff;
+    border: 1px solid rgba(0, 120, 190, 230);
+}
+QPushButton:default:hover {
+    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                stop: 0 rgba(160, 230, 250, 255), stop: 0.5 rgba(20, 195, 240, 255),
+                                stop: 0.5 rgba(0, 168, 225, 255), stop: 1 rgba(0, 145, 210, 255));
+}
+QPushButton:disabled { color: #8aa8bd; background: rgba(230, 244, 253, 160); }
+
+/* The fields are glass too, with a blue line when they have the focus. */
+QLineEdit, QComboBox, QPlainTextEdit, QTextEdit {
+    background: rgba(255, 255, 255, 240);
+    border: 1px solid rgba(140, 195, 226, 190);
+    border-radius: 10px;
+    padding: 6px 10px;
+    color: #0a2a43;
+    selection-background-color: rgba(0, 156, 219, 180);
+    selection-color: #06334f;
+}
+QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus, QTextEdit:focus {
+    border: 1px solid rgba(0, 156, 219, 220);
+}
+QComboBox:hover, QLineEdit:hover { border: 1px solid rgba(0, 156, 219, 180); }
+QComboBox::drop-down { border: none; width: 28px; }
 QComboBox::down-arrow { image: url(:/fritchii/icons/chevron-down.svg); width: 12px; height: 12px; }
 QComboBox QAbstractItemView {
-    background: #1b1b1f;
-    border: 1px solid #2a2a30;
+    background: rgba(255, 255, 255, 245);
+    border: 1px solid rgba(169, 212, 234, 200);
+    border-radius: 12px;
     padding: 4px;
     outline: none;
-    selection-background-color: #2b2640;
-    selection-color: #ececf1;
+    selection-background-color: rgba(0, 156, 219, 200);
+    selection-color: #06334f;
 }
 
-QCheckBox, QRadioButton { spacing: 10px; }
+QCheckBox, QRadioButton { spacing: 10px; color: #0a2a43; }
 QCheckBox::indicator {
-    width: 16px;
-    height: 16px;
-    border-radius: 5px;
-    border: 1px solid #3a3a42;
-    background: #18181b;
+    width: 18px;
+    height: 18px;
+    border-radius: 6px;
+    border: 1px solid rgba(140, 195, 226, 210);
+    background: rgba(255, 255, 255, 240);
 }
-QCheckBox::indicator:hover { border-color: #a78bfa; }
+QCheckBox::indicator:hover { border: 1px solid rgba(0, 156, 219, 220); }
 QCheckBox::indicator:checked {
-    background: #a78bfa;
-    border-color: #a78bfa;
+    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                stop: 0 rgba(120, 214, 246, 255), stop: 1 rgba(0, 156, 219, 255));
+    border: 1px solid rgba(0, 130, 200, 220);
     image: url(:/fritchii/icons/check.svg);
 }
-QCheckBox::indicator:disabled { background: #141416; border-color: #26262c; }
+QCheckBox::indicator:disabled { background: rgba(230, 244, 253, 160); border-color: rgba(169, 212, 234, 160); }
 
 QGroupBox {
-    border: 1px solid #222227;
-    border-radius: 12px;
-    margin-top: 26px;
-    padding: 14px 12px 10px 12px;
+    border: 1px solid rgba(169, 212, 234, 170);
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 120);
+    margin-top: 28px;
+    padding: 16px 14px 12px 14px;
 }
 QGroupBox::title {
     subcontrol-origin: margin;
     subcontrol-position: top left;
-    left: 6px;
-    color: #9a9aa8;
+    left: 8px;
+    color: #2e5f82;
 }
 
 QTabWidget::pane { border: none; }
 QTabBar::tab {
     background: transparent;
-    color: #9a9aa8;
-    padding: 8px 14px;
+    color: #2e5f82;
+    padding: 9px 16px;
     border: none;
-    border-bottom: 2px solid transparent;
+    border-radius: 10px;
 }
-QTabBar::tab:hover { color: #ececf1; }
-QTabBar::tab:selected { color: #ececf1; border-bottom: 2px solid #a78bfa; }
+QTabBar::tab:hover { color: #0a2a43; background: rgba(255, 255, 255, 140); }
+QTabBar::tab:selected {
+    color: #06334f;
+    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                stop: 0 rgba(255, 255, 255, 250), stop: 1 rgba(210, 236, 250, 240));
+    border-bottom: 2px solid rgba(0, 156, 219, 220);
+}
 
-QScrollBar:vertical { background: transparent; width: 10px; margin: 0; }
-QScrollBar:horizontal { background: transparent; height: 10px; margin: 0; }
-QScrollBar::handle:vertical { background: #2e2e35; border-radius: 4px; min-height: 32px; margin: 2px; }
-QScrollBar::handle:horizontal { background: #2e2e35; border-radius: 4px; min-width: 32px; margin: 2px; }
-QScrollBar::handle:hover { background: #3a3a42; }
+QScrollBar:vertical { background: transparent; width: 12px; margin: 0; }
+QScrollBar:horizontal { background: transparent; height: 12px; margin: 0; }
+QScrollBar::handle:vertical {
+    background: rgba(120, 195, 226, 170);
+    border-radius: 6px;
+    min-height: 32px;
+    margin: 2px;
+}
+QScrollBar::handle:horizontal {
+    background: rgba(120, 195, 226, 170);
+    border-radius: 6px;
+    min-width: 32px;
+    margin: 2px;
+}
+QScrollBar::handle:hover { background: rgba(0, 156, 219, 200); }
 QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
 QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 
 QHeaderView::section {
-    background: #111113;
-    color: #9a9aa8;
+    background: rgba(214, 238, 250, 200);
+    color: #2e5f82;
     border: none;
-    border-bottom: 1px solid #222227;
-    padding: 6px 10px;
+    border-bottom: 1px solid rgba(169, 212, 234, 200);
+    padding: 7px 10px;
 }
-QTreeView, QListView, QTableView { border: none; outline: none; }
-QTreeView::item, QListView::item { padding: 4px; }
+QTreeView, QListView, QTableView {
+    border: none;
+    outline: none;
+    background: rgba(255, 255, 255, 170);
+    alternate-background-color: rgba(240, 250, 255, 170);
+}
+QTreeView::item, QListView::item { padding: 5px; border-radius: 6px; }
 QTreeView::item:selected, QListView::item:selected, QTableView::item:selected {
-    background: #2b2640;
-    color: #ececf1;
+    background: rgba(0, 156, 219, 170);
+    color: #06334f;
 }
 
-QSlider::groove:horizontal { height: 4px; background: #2a2a30; border-radius: 2px; }
-QSlider::sub-page:horizontal { background: #a78bfa; border-radius: 2px; }
+QSlider::groove:horizontal {
+    height: 6px;
+    background: rgba(169, 212, 234, 170);
+    border-radius: 3px;
+}
+QSlider::sub-page:horizontal {
+    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                stop: 0 rgba(120, 214, 246, 255), stop: 1 rgba(0, 156, 219, 255));
+    border-radius: 3px;
+}
 QSlider::handle:horizontal {
-    background: #ececf1;
-    width: 14px;
-    height: 14px;
+    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                stop: 0 #ffffff, stop: 1 #cfeaf8);
+    border: 1px solid rgba(0, 156, 219, 220);
+    width: 16px;
+    height: 16px;
     margin: -5px 0;
-    border-radius: 7px;
+    border-radius: 8px;
 }
 
 QProgressBar {
-    background: #1f1f24;
-    border: none;
-    border-radius: 4px;
+    background: rgba(169, 212, 234, 150);
+    border: 1px solid rgba(140, 195, 226, 160);
+    border-radius: 8px;
     text-align: center;
-    color: #ececf1;
+    color: #0a2a43;
 }
-QProgressBar::chunk { background: #a78bfa; border-radius: 4px; }
+QProgressBar::chunk {
+    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                stop: 0 rgba(120, 214, 246, 255), stop: 1 rgba(0, 156, 219, 255));
+    border-radius: 8px;
+}
 
-QStatusBar { background: #0c0c0e; color: #9a9aa8; }
+QStatusBar { background: rgba(214, 238, 250, 170); color: #2e5f82; }
 QStatusBar::item { border: none; }
-QStatusBar QLabel { color: #9a9aa8; padding: 0 6px; }
+QStatusBar QLabel { color: #2e5f82; padding: 0 6px; }
 QPushButton#TogglableStatusBarButton, QPushButton#DockingStatusBarButton,
 QPushButton#OotFpsStatusBarButton, QPushButton#GPUStatusBarButton,
 QPushButton#RendererStatusBarButton, QPushButton#RefreshButton {
     background: transparent;
     border: none;
-    color: #9a9aa8;
-    padding: 3px 10px;
-    border-radius: 6px;
+    color: #2e5f82;
+    padding: 3px 12px;
+    border-radius: 8px;
 }
 QPushButton#TogglableStatusBarButton:hover, QPushButton#DockingStatusBarButton:hover,
 QPushButton#OotFpsStatusBarButton:hover, QPushButton#GPUStatusBarButton:hover,
 QPushButton#RendererStatusBarButton:hover, QPushButton#RefreshButton:hover {
-    background: #1f1f24;
-    color: #ececf1;
+    background: rgba(255, 255, 255, 190);
+    color: #0a2a43;
 }
-QPushButton#OotFpsStatusBarButton { color: #a78bfa; }
+QPushButton#OotFpsStatusBarButton { color: #0079b5; }
 
 /* Settings sidebar */
 QListWidget#selectorList { background: transparent; border: none; outline: none; }
-QListWidget#selectorList::item { padding: 9px 14px; border-radius: 8px; margin: 1px 0; }
-QListWidget#selectorList::item:hover { background: #1b1b1f; }
-QListWidget#selectorList::item:selected { background: #2b2640; color: #ececf1; }
+QListWidget#selectorList::item {
+    padding: 10px 16px;
+    border-radius: 12px;
+    margin: 2px 0;
+    color: #2e5f82;
+}
+QListWidget#selectorList::item:hover { background: rgba(255, 255, 255, 170); }
+QListWidget#selectorList::item:selected {
+    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                stop: 0 rgba(255, 255, 255, 245), stop: 1 rgba(206, 234, 250, 240));
+    color: #06334f;
+    border: 1px solid rgba(0, 156, 219, 160);
+}
 
 /* What's New and the update dialog */
-QLabel#FritchiiDialogTitle { font-size: 24px; font-weight: 500; color: #ececf1; }
-QTextBrowser#FritchiiNotes { background: transparent; border: none; font-size: 15px; }
+QLabel#FritchiiDialogTitle { font-size: 24px; font-weight: 500; color: #0a2a43; }
+QTextBrowser#FritchiiNotes { background: transparent; border: none; font-size: 15px; color: #0a2a43; }
 
 /* Preparing shaders (fritchii/precompile_gate.cpp) */
-QDialog#FritchiiPrepare { background: #111113; }
-QLabel#FritchiiLead { font-size: 16px; color: #c9c9d3; }
-QProgressBar#FritchiiPrepareBar { background: #1f1f24; border: none; border-radius: 6px; }
-QProgressBar#FritchiiPrepareBar::chunk { background: #a78bfa; border-radius: 6px; }
-QLabel#FritchiiStatusNote { color: #a78bfa; padding: 0 10px; }
+QDialog#FritchiiPrepare { background: rgba(214, 236, 251, 245); }
+QLabel#FritchiiLead { font-size: 16px; color: #12496f; }
+QProgressBar#FritchiiPrepareBar {
+    background: rgba(169, 212, 234, 150);
+    border: 1px solid rgba(140, 195, 226, 160);
+    border-radius: 8px;
+}
+QProgressBar#FritchiiPrepareBar::chunk {
+    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                stop: 0 rgba(120, 214, 246, 255), stop: 1 rgba(0, 156, 219, 255));
+    border-radius: 8px;
+}
+QLabel#FritchiiStatusNote { color: #0079b5; padding: 0 10px; }
 
 /* In-game control strip (fritchii/game_controls.cpp) */
-QToolButton#FritchiiStripButton { background: transparent; border: none; border-radius: 10px; }
-QToolButton#FritchiiStripButton:hover { background: #2b2640; }
-QToolButton#FritchiiStripButton:pressed { background: #3a3156; }
+QToolButton#FritchiiStripButton {
+    background: rgba(255, 255, 255, 140);
+    border: 1px solid rgba(169, 212, 234, 140);
+    border-radius: 12px;
+}
+QToolButton#FritchiiStripButton:hover { background: rgba(0, 156, 219, 120); }
+QToolButton#FritchiiStripButton:pressed { background: rgba(0, 156, 219, 170); }
 
 /* Home and rail (fritchii/home.cpp) */
-QWidget#FritchiiRail { background: #0c0c0e; }
+QWidget#FritchiiRail { background: rgba(190, 226, 246, 200); }
 QToolButton#FritchiiRailButton {
     background: transparent;
     border: none;
-    border-radius: 12px;
-    padding: 10px;
+    border-radius: 14px;
+    padding: 11px;
 }
-QToolButton#FritchiiRailButton:hover { background: #1b1b1f; }
-QToolButton#FritchiiRailButton:checked { background: #1f1b2e; }
-QWidget#FritchiiHome { background: #111113; }
-QLabel#FritchiiHeroTitle { font-size: 30px; font-weight: 500; color: #ececf1; }
-QLabel#FritchiiSection { font-size: 14px; color: #9a9aa8; }
+QToolButton#FritchiiRailButton:hover { background: rgba(255, 255, 255, 170); }
+QToolButton#FritchiiRailButton:checked { background: rgba(255, 255, 255, 220); }
+QWidget#FritchiiHome { background: transparent; }
+QLabel#FritchiiHeroTitle { font-size: 30px; font-weight: 500; color: #0a2a43; }
+QLabel#FritchiiSection { font-size: 14px; color: #2e5f82; }
 QPushButton#FritchiiPlay {
-    background: #a78bfa;
-    color: #1c1433;
-    border: none;
-    border-radius: 8px;
-    min-height: 44px;
-    max-height: 44px;
-    padding: 0 30px;
+    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                stop: 0 rgba(120, 214, 246, 255), stop: 0.5 rgba(0, 178, 230, 255),
+                                stop: 0.5 rgba(0, 156, 219, 255), stop: 1 rgba(0, 130, 200, 255));
+    color: #ffffff;
+    border: 1px solid rgba(0, 120, 190, 220);
+    border-radius: 12px;
+    min-height: 46px;
+    max-height: 46px;
+    padding: 0 32px;
     font-size: 16px;
     font-weight: 500;
 }
 QPushButton#FritchiiLink {
-    background: #1b1b1f;
-    color: #ececf1;
-    border: none;
-    border-radius: 8px;
-    min-height: 38px;
-    max-height: 38px;
-    padding: 0 18px;
+    background: rgba(255, 255, 255, 190);
+    color: #0a2a43;
+    border: 1px solid rgba(169, 212, 234, 190);
+    border-radius: 12px;
+    min-height: 40px;
+    max-height: 40px;
+    padding: 0 20px;
     font-size: 15px;
     font-weight: 500;
 }
-QPushButton#FritchiiLink:hover { background: #26222f; }
-QPushButton#FritchiiLink:pressed { background: #1f1b2e; }
-QPushButton#FritchiiPlay:hover { background: #b59dfb; }
-QPushButton#FritchiiPlay:pressed { background: #9a7cf5; }
+QPushButton#FritchiiLink:hover { background: rgba(255, 255, 255, 240); }
+QPushButton#FritchiiLink:pressed { background: rgba(210, 236, 250, 220); }
+QPushButton#FritchiiPlay:hover {
+    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                stop: 0 rgba(160, 230, 250, 255), stop: 0.5 rgba(20, 195, 240, 255),
+                                stop: 0.5 rgba(0, 168, 225, 255), stop: 1 rgba(0, 145, 210, 255));
+}
+QPushButton#FritchiiPlay:pressed {
+    background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                stop: 0 rgba(0, 140, 205, 255), stop: 1 rgba(0, 168, 225, 255));
+}
 QToolButton#FritchiiTile {
-    background: transparent;
-    border: none;
-    border-radius: 12px;
-    padding: 8px;
-    color: #c9c9d3;
+    background: rgba(255, 255, 255, 120);
+    border: 1px solid rgba(169, 212, 234, 120);
+    border-radius: 14px;
+    padding: 9px;
+    color: #12496f;
     font-size: 13px;
 }
-QToolButton#FritchiiTile:hover { background: #1b1b1f; color: #ececf1; }
+QToolButton#FritchiiTile:hover { background: rgba(255, 255, 255, 210); color: #06334f; }

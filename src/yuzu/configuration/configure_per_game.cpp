@@ -606,7 +606,7 @@ void ConfigurePerGame::LoadConfiguration() {
         const std::string cover_name = ui->display_name->text().trimmed().toStdString();
         QImage cover = QtCommon::Boxart::LoadCachedCover(title_id, cover_name);
         if (cover.isNull()) {
-            cover.load(QStringLiteral(":/icons/default/256x256/lichii.png"));
+            cover.load(QStringLiteral(":/fritchii/banachii.png"));
         }
         if (!cover.isNull()) {
             UpdateIconPreview(QPixmap::fromImage(cover));

@@ -2181,7 +2181,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     if (close_pending) {
         return;
     }
-    LOG_INFO(Frontend, "Lichii starting...");
+    LOG_INFO(Frontend, "Banachii starting...");
 
     if (params.program_id == 0 ||
         params.program_id > static_cast<u64>(Service::AM::AppletProgramId::MaxProgramId)) {
@@ -6023,7 +6023,7 @@ bool MainWindow::ConfirmClose() {
         return true;
 
     const auto text = tr("Are you sure you want to close Lichii?");
-    return question(this, tr("Lichii"), text);
+    return question(this, tr("Banachii"), text);
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
@@ -6129,7 +6129,7 @@ bool MainWindow::ConfirmChangeGame() {
 
     // Use custom question to link controller navigation
     return question(
-        this, tr("Lichii"),
+        this, tr("Banachii"),
         tr("Are you sure you want to stop the emulation? Any unsaved progress will be lost."),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
 }
@@ -6141,7 +6141,7 @@ bool MainWindow::ConfirmForceLockedExit() {
     const auto text = tr("The currently running application has requested Lichii to not exit.\n\n"
                          "Would you like to bypass this and exit anyway?");
 
-    return question(this, tr("Lichii"), text);
+    return question(this, tr("Banachii"), text);
 }
 
 void MainWindow::RequestGameExit() {

@@ -268,7 +268,7 @@ void ApplyBoxart(u64 program_id, const std::string& name, std::vector<u8>& icon,
 
     awaited_slug = slug;
     if (icon.empty()) {
-        icon = ReadIconFile(QStringLiteral(":/icons/default/256x256/lichii.png"));
+        icon = ReadIconFile(QStringLiteral(":/fritchii/banachii.png"));
     }
 }
 

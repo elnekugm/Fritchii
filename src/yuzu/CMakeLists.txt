@@ -211,6 +211,8 @@ add_executable(yuzu
     fritchii/fritchii.qrc
     fritchii/fritchii_ui.cpp
     fritchii/fritchii_ui.h
+    fritchii/aero_background.cpp
+    fritchii/aero_background.h
     fritchii/home.cpp
     fritchii/home.h
     fritchii/game_controls.cpp
@@ -407,12 +409,12 @@ target_sources(yuzu
 if (APPLE)
     target_sources(yuzu PRIVATE util/macos_sleep.cpp util/macos_sleep.h)
 
-    # Use the supplied Lichii artwork for all macOS generators.
+    # Use the supplied Banachii artwork for all macOS generators.
     set(_dist "${CMAKE_SOURCE_DIR}/dist")
-    set(_icons "${_dist}/lichii.icns")
+    set(_icons "${_dist}/banachii.icns")
     if (CMAKE_GENERATOR MATCHES "Xcode")
         set_target_properties(yuzu PROPERTIES
-            MACOSX_BUNDLE_ICON_FILE lichii.icns
+            MACOSX_BUNDLE_ICON_FILE banachii.icns
             # Also force xcode to manage signing for us.
             XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED ON
             XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED ON)

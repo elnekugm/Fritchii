@@ -81,9 +81,6 @@ void PositionPass(Environment& env, IR::Program& program) {
             position_inst.inst->SetArg(
                 1,
                 ir.FPFma(value, ir.FPMul(ir.FPRecip(ir.RenderAreaWidth()), scale), negative_one));
-        if (!root_tables) {
-            break;
-        }
             break;
         }
         case IR::Attribute::PositionY: {

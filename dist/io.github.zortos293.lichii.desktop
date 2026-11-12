@@ -1,7 +1,7 @@
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=Lichii
+Name=Banachii
 GenericName=Switch Emulator
 Comment=Experimental Nintendo Switch and Switch 2 emulator
 Icon=io.github.zortos293.lichii
@@ -9,5 +9,5 @@ TryExec=lichii
 Exec=lichii %f
 Categories=Game;Emulator;Qt;
 MimeType=application/x-nx-nro;application/x-nx-nso;application/x-nx-nsp;application/x-nx-xci;
-Keywords=Nintendo;Switch;Lichii;
+Keywords=Nintendo;Switch;Banachii;
 StartupWMClass=lichii

@@ -145,7 +145,7 @@ void ConfigureGeneral::ResetDefaults() {
             : tr("This reset all settings and remove all per-game configurations. This will not "
                  "delete game directories, profiles, or input profiles. Proceed?");
     QMessageBox::StandardButton answer = QMessageBox::question(
-        this, FritchiiUi::Enabled() ? tr("Reset to Defaults") : tr("Lichii"), text,
+        this, FritchiiUi::Enabled() ? tr("Reset to Defaults") : tr("Banachii"), text,
         QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
     if (answer == QMessageBox::No) {
         return;

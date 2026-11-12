@@ -122,7 +122,7 @@ GRenderWindow::GRenderWindow(MainWindow* parent,
     if (std::string_view{Common::g_build_name} == "Fritchii") {
         setWindowTitle(QStringLiteral("Fritchii %1").arg(QString::fromUtf8(Common::g_build_version)));
     } else {
-        setWindowTitle(QStringLiteral("Lichii %1 | %2-%3")
+        setWindowTitle(QStringLiteral("Banachii %1 | %2-%3")
                            .arg(QString::fromUtf8(Common::g_build_name),
                                 QString::fromUtf8(Common::g_scm_branch),
                                 QString::fromUtf8(Common::g_scm_desc)));
@@ -868,7 +868,7 @@ bool GRenderWindow::InitializeOpenGL() {
     return true;
 #else
     QMessageBox::warning(this, tr("OpenGL not available!"),
-                         tr("Lichii has not been compiled with OpenGL support."));
+                         tr("Banachii has not been compiled with OpenGL support."));
     return false;
 #endif
 }

@@ -108,7 +108,7 @@ static const constexpr frozen::map<StringKey, frozen::string, 29> strings = {
     // migrator
     // 17-22
     {MigrationPromptPrefix,
-     QT_TR_NOOP("Lichii has detected user data for the following emulators:")},
+     QT_TR_NOOP("Banachii has detected user data for the following emulators:")},
     {MigrationPrompt,
      QT_TR_NOOP("Would you like to migrate your data for use in Lichii?\n"
                 "Select the corresponding button to migrate data from that emulator.\n"

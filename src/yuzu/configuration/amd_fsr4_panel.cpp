@@ -199,7 +199,7 @@ void AmdFsr4Panel::Download() {
     dialog.setWindowTitle(Tr("Download AMD FSR 4"));
     QVBoxLayout* layout = new QVBoxLayout(&dialog);
     QLabel* intro = new QLabel(
-        Tr("Lichii will download amd_fidelityfx_loader_vk.dll and amd_fidelityfx_upscaler_vk.dll "
+        Tr("Banachii will download amd_fidelityfx_loader_vk.dll and amd_fidelityfx_upscaler_vk.dll "
            "from AMD's FidelityFX SDK %1 release on GitHub into %2.<br>These files are AMD's, under "
            "AMD's licence terms below. Lichii checks AMD's signature before using them.")
             .arg(QString::fromUtf8(FfxRuntime::SDK_VERSION.data(),

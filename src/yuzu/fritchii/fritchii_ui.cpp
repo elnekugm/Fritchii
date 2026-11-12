@@ -52,17 +52,20 @@
 namespace FritchiiUi {
 namespace {
 
-// Graphite
-const QColor Background{0x11, 0x11, 0x13};
-const QColor Raised{0x1b, 0x1b, 0x1f};
-const QColor Field{0x18, 0x18, 0x1b};
-const QColor Button{0x1f, 0x1f, 0x24};
-const QColor Text{0xec, 0xec, 0xf1};
-const QColor TextSecondary{0x9a, 0x9a, 0xa8};
-const QColor TextDisabled{0x55, 0x55, 0x5f};
-const QColor IconIdle{0x6b, 0x6b, 0x78};
-const QColor Accent{0xa7, 0x8b, 0xfa};
-const QColor OnAccent{0x1c, 0x14, 0x33};
+// Frutiger Aero: the sky and the water behind glass. The windows are translucent, so the colours
+// are light and the glass of the panels is a pale blue.
+const QColor Background{0xd6, 0xec, 0xfb};   ///< The sky behind the windows
+const QColor Raised{0xf2, 0xfb, 0xff};      ///< The glass of the panels
+const QColor Field{0xff, 0xff, 0xff};       ///< The fields, white and opaque
+const QColor Button{0xe6, 0xf4, 0xfd};      ///< The buttons, a pale blue
+const QColor Text{0x0a, 0x2a, 0x43};        ///< The text, a dark blue
+const QColor TextSecondary{0x2e, 0x5f, 0x82};
+const QColor TextDisabled{0x8a, 0xa8, 0xbd};
+const QColor IconIdle{0x4a, 0x8f, 0xb8};
+const QColor Accent{0x00, 0x9c, 0xdb};      ///< The water, the accent
+const QColor OnAccent{0xff, 0xff, 0xff};
+const QColor Glass{0xff, 0xff, 0xff};       ///< The white of the gloss
+const QColor GlassEdge{0xa9, 0xd4, 0xea};   ///< The border of the glass
 
 QPalette GraphitePalette() {
     QPalette p;
@@ -74,18 +77,18 @@ QPalette GraphitePalette() {
     p.setColor(QPalette::Button, Button);
     p.setColor(QPalette::ButtonText, Text);
     p.setColor(QPalette::BrightText, Text);
-    p.setColor(QPalette::ToolTipBase, Button);
+    p.setColor(QPalette::ToolTipBase, Raised);
     p.setColor(QPalette::ToolTipText, Text);
     p.setColor(QPalette::PlaceholderText, IconIdle);
     p.setColor(QPalette::Highlight, Accent);
     p.setColor(QPalette::HighlightedText, OnAccent);
     p.setColor(QPalette::Link, Accent);
     p.setColor(QPalette::LinkVisited, Accent);
-    p.setColor(QPalette::Light, QColor(0x2e, 0x2e, 0x35));
-    p.setColor(QPalette::Midlight, QColor(0x26, 0x26, 0x2c));
-    p.setColor(QPalette::Mid, QColor(0x22, 0x22, 0x27));
-    p.setColor(QPalette::Dark, QColor(0x0c, 0x0c, 0x0e));
-    p.setColor(QPalette::Shadow, QColor(0x05, 0x05, 0x06));
+    p.setColor(QPalette::Light, QColor(0xff, 0xff, 0xff));
+    p.setColor(QPalette::Midlight, QColor(0xe6, 0xf4, 0xfd));
+    p.setColor(QPalette::Mid, QColor(0xd0, 0xe8, 0xf7));
+    p.setColor(QPalette::Dark, QColor(0x8a, 0xb4, 0xd0));
+    p.setColor(QPalette::Shadow, QColor(0x4a, 0x74, 0x96));
     for (const auto role : {QPalette::WindowText, QPalette::Text, QPalette::ButtonText}) {
         p.setColor(QPalette::Disabled, role, TextDisabled);
     }

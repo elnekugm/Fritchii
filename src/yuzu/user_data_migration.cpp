@@ -176,7 +176,7 @@ void UserDataMigrator::ShowMigrationPrompt(QMainWindow* main_window) {
 
 void UserDataMigrator::ShowMigrationCancelledMessage(QMainWindow* main_window) {
     QMessageBox::information(main_window, QObject::tr("Migration"),
-                             QObject::tr("Lichii will use its own profile. Your old emulator "
+                             QObject::tr("Banachii will use its own profile. Your old emulator "
                                          "data has not been changed."),
                              QMessageBox::Ok);
 }

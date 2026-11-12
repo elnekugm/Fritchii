@@ -227,7 +227,7 @@ RequestResult Fetch(const std::string& url, const std::string& path) {
         httplib::Request request{
             .method = "GET",
             .path = path,
-            .headers = {{"Accept", "application/vnd.github+json"}, {"User-Agent", "Lichii"}},
+            .headers = {{"Accept", "application/vnd.github+json"}, {"User-Agent", "Banachii"}},
         };
 
         client->set_follow_location(true);

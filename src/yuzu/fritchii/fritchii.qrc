@@ -2,6 +2,7 @@
     <qresource prefix="fritchii">
         <file>style.qss</file>
         <file>whats-new.md</file>
+        <file>banachii.png</file>
         <file>fonts/Inter-Regular.ttf</file>
         <file>fonts/Inter-Medium.ttf</file>
         <file>icons/library.svg</file>

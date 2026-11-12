@@ -33,9 +33,11 @@ std::optional<u64> ParseBuildNumber(std::string_view tag) {
     return number;
 }
 
-constexpr std::string_view ReleaseRepo = "Frizti/Lichii";
+// The updates come from the releases of this fork.
+constexpr std::string_view ReleaseRepo = "elnekugm/Fritchii";
 // Download URLs name the repository by its current name; GitHub redirects the old one.
-constexpr std::array RepoNames{std::string_view{"Lichii"}, std::string_view{"Fritchii"}};
+constexpr std::array RepoNames{std::string_view{"Fritchii"}, std::string_view{"Lichii"},
+                               std::string_view{"Frizti/Lichii"}};
 
 std::optional<u32> ParseNumber(std::string_view text) {
     if (text.empty() || (text.size() > 1 && text.front() == '0') ||
@@ -215,7 +217,8 @@ std::optional<FritchiiVersion> ParseFritchiiTag(std::string_view tag) {
 }
 
 std::string FritchiiAssetName(const FritchiiVersion& version) {
-    return fmt::format("Fritchii-v{}-Windows-x64.zip", version.ToString());
+    // The release of this fork names its packages after the application and the platform.
+    return fmt::format("banachii-{}-Windows-x86_64-pgo.zip", version.ToString());
 }
 
 Source DefaultSource() {
@@ -273,7 +276,7 @@ std::optional<Common::Net::Asset> SelectFritchiiAsset(const Common::Net::Release
             }
         } else {
             for (const auto repo : RepoNames) {
-                if (url == fmt::format("https://github.com/Frizti/{}/releases/download/{}/{}", repo,
+                if (url == fmt::format("https://github.com/elnekugm/{}/releases/download/{}/{}", repo,
                                        release.tag, filename)) {
                     origin = "https://github.com";
                 }

@@ -60,17 +60,18 @@ endif()
 
 # Generate cpp with Git revision from template
 
-set(BUILD_AUTO_UPDATE_STABLE_REPO "zortos293/Lichii")
+# The updates come from the releases of this fork, not from the upstream project.
+set(BUILD_AUTO_UPDATE_STABLE_REPO "elnekugm/Fritchii")
 set(BUILD_AUTO_UPDATE_STABLE_API "api.github.com")
-set(BUILD_AUTO_UPDATE_API_PATH "/repos/zortos293/Lichii/releases?per_page=100")
+set(BUILD_AUTO_UPDATE_API_PATH "/repos/elnekugm/Fritchii/releases?per_page=100")
 set(BUILD_AUTO_UPDATE_WEBSITE "https://github.com")
-set(BUILD_AUTO_UPDATE_REPO "zortos293/Lichii")
+set(BUILD_AUTO_UPDATE_REPO "elnekugm/Fritchii")
 if (NIGHTLY_BUILD)
-    set(REPO_NAME "Lichii Nightly")
+    set(REPO_NAME "Banachii Nightly")
 elseif (FRIZTI_VERSION AND NOT LICHII_BUILD_TAG MATCHES "^build-[0-9]+$")
-    set(REPO_NAME "Fritchii")
+    set(REPO_NAME "Banachii")
 else()
-    set(REPO_NAME "Lichii")
+    set(REPO_NAME "Banachii")
 endif()
 
 set(BUILD_ID ${GIT_REFSPEC})
