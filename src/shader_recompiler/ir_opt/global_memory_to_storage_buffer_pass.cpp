@@ -2081,53 +2081,60 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
         return;
     }
     const size_t max_ssbos{StorageBufferLimit(host_info)};
-    TrackingConditions conditions{program};
-    StorageInfo info;
-    info.iterator_words = CollectIteratorWords(program);
-    info.atomic_pointers = CollectAtomicPointers(program);
-    const auto collect = [&] {
-        for (IR::Block* const block : program.post_order_blocks) {
-            for (IR::Inst& inst : block->Instructions()) {
-                if (!IsGlobalMemory(inst)) {
-                    continue;
-                }
-                conditions.current = block;
-                CollectStorageBuffers(*block, inst, info, env, conditions);
-            }
-        }
-    };
-    collect();
-    if (info.tables_seen && info.set.size() < Info::MAX_SSBOS) {
-        // Again with pointer table entries, in the bindings the first pass left free.
-        StorageInfo with_tables;
-        with_tables.iterator_words = std::move(info.iterator_words);
-        with_tables.atomic_pointers = std::move(info.atomic_pointers);
-        with_tables.tables_enabled = true;
-        with_tables.table_budget = Info::MAX_SSBOS - info.set.size();
-        info = std::move(with_tables);
-        collect();
-    }
-    program.info.native_global_bounds |= info.native_runtime_bounds;
     TrackingConditions conditions{program};
+
     StorageInfo info;
-    // Without 64-bit integers the backend cannot route global accesses among bound buffers.
-    info.bind_competing_loaded = host_info.support_int64;
+
     info.iterator_words = CollectIteratorWords(program);
+
     info.atomic_pointers = CollectAtomicPointers(program);
+
     const auto collect = [&] {
+
         for (IR::Block* const block : program.post_order_blocks) {
+
             for (IR::Inst& inst : block->Instructions()) {
+
                 if (!IsGlobalMemory(inst)) {
+
                     continue;
+
                 }
+
                 conditions.current = block;
-                const bool bound{CollectStorageBuffers(*block, inst, info, env, conditions)};
-                info.untracked_writes |= !bound && IsGlobalMemoryWrite(inst);
-                info.untracked_reads |= !bound && !IsGlobalMemoryWrite(inst);
+
+                CollectStorageBuffers(*block, inst, info, env, conditions);
+
             }
+
         }
+
     };
+
     collect();
+
+    if (info.tables_seen && info.set.size() < Info::MAX_SSBOS) {
+
+        // Again with pointer table entries, in the bindings the first pass left free.
+
+        StorageInfo with_tables;
+
+        with_tables.iterator_words = std::move(info.iterator_words);
+
+        with_tables.atomic_pointers = std::move(info.atomic_pointers);
+
+        with_tables.tables_enabled = true;
+
+        with_tables.table_budget = Info::MAX_SSBOS - info.set.size();
+
+        info = std::move(with_tables);
+
+        collect();
+
+    }
+
+    program.info.native_global_bounds |= info.native_runtime_bounds;
+
     if (info.competing_loaded_bound && info.set.size() > max_ssbos) {
         // Not enough bindings for the loaded pointers that compete with paired ones: keep the
         // pairs, as if no loaded pointer competed.
