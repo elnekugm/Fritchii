@@ -7,6 +7,7 @@ on:
   push:
     branches:
       - boxart-port
+      - integration/forks
 
 permissions:
   contents: read
