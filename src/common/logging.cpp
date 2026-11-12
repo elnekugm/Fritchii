@@ -11,7 +11,7 @@
 #include <deque>
 #include <mutex>
 #include <regex>
-#include <mutex>
+#include <string_view>
 #include <thread>
 
 #if defined(__ANDROID__)
@@ -37,7 +37,6 @@
 #include "common/thread.h"
 
 #include "common/logging.h"
-#include "common/memory_detect.h"
 #include "common/settings.h"
 #include "common/string_util.h"
 #include "common/bounded_threadsafe_queue.h"
@@ -246,7 +245,7 @@ struct ColorConsoleBackend final : public Backend {
 #ifndef __OPENORBIS__
 /// @brief Backend that writes to a file passed into the constructor
 struct FileBackend final : public Backend {
-    explicit FileBackend(const std::filesystem::path filename) noexcept : current_path(filename) {
+    explicit FileBackend(const std::filesystem::path filename) noexcept {
         auto old_filename = filename;
         old_filename += ".old.txt";
         // Existence checks are done within the functions themselves.
@@ -269,43 +268,10 @@ struct FileBackend final : public Backend {
     }
     ~FileBackend() noexcept override = default;
 
-    void SetGame(u64 program_id, std::string_view title) {
-        std::scoped_lock lock{mutex};
-        // ASCII initials are portable filename characters; the ID keeps titles unambiguous.
-        std::string short_name;
-        bool word_start = true;
-        for (unsigned char c : title) {
-            const bool alnum = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                               (c >= '0' && c <= '9');
-            if (alnum && word_start && short_name.size() < 12) {
-                short_name += static_cast<char>(c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c);
-            }
-            word_start = !alnum;
-        }
-        const auto filename = current_path.parent_path() /
-            fmt::format("orchid_{}{:016X}.txt", short_name.empty() ? "" : short_name + "_",
-                        program_id);
-        file->Flush();
-        // Retain startup diagnostics in each game's log, including version and host details.
-        const auto startup = current_path.parent_path() / LOG_FILE;
-        const auto header = FS::ReadStringFromFile(startup, FS::FileType::TextFile);
-        FS::IOFile next(filename, FS::FileAccessMode::Write, FS::FileType::TextFile);
-        if (!next.IsOpen()) {
-            return;
-        }
-        file.emplace(std::move(next));
-        current_path = filename;
-        bytes_written = file->WriteSpan(std::span<const char>{header.data(), header.size()});
-        enabled = true;
-    }
-
-    std::filesystem::path GetPath() {
-        std::scoped_lock lock{mutex};
-        return current_path;
-    }
+    std::filesystem::path path;
+    bool primary_locked = false;
 
     void Write(const Entry& entry) noexcept override {
-        std::scoped_lock lock{mutex};
         if (!enabled)
             return;
 
@@ -337,10 +303,7 @@ struct FileBackend final : public Backend {
             }
         }
 #endif
-        // Threads log without a shared lock; fwrite locks the stream, these counters are atomic.
-        const auto written = file->WriteSpan(std::span<const char>{message.begin(), message.end()});
-        const auto total_written =
-            bytes_written.fetch_add(written, std::memory_order_relaxed) + written;
+        bytes_written += file->WriteSpan(std::span<const char>{message.begin(), message.end()});
 
         // Option to log each line rather than 4k buffers
         if (Settings::values.log_flush_line.GetValue())
@@ -349,7 +312,7 @@ struct FileBackend final : public Backend {
         using namespace Common::Literals;
         // Prevent logs from exceeding a set maximum size in the event that log entries are spammed.
         const auto write_limit = Settings::values.extended_logging.GetValue() ? 1_GiB : 100_MiB;
-        const bool write_limit_exceeded = total_written > write_limit;
+        const bool write_limit_exceeded = bytes_written > write_limit;
         if (entry.log_level >= Level::Error || write_limit_exceeded) {
             // Stop writing after the write limit is exceeded.
             // Don't close the file so we can print a stacktrace if necessary
@@ -360,16 +323,12 @@ struct FileBackend final : public Backend {
     }
 
     void Flush() noexcept override {
-        std::scoped_lock lock{mutex};
         file->Flush();
     }
 private:
-    // Filesystem failures can themselves emit log messages on this thread.
-    std::recursive_mutex mutex;
-    std::filesystem::path current_path;
     std::optional<FS::IOFile> file;
-    std::atomic<std::size_t> bytes_written = 0;
-    std::atomic_bool enabled = true;
+    std::size_t bytes_written = 0;
+    bool enabled = true;
 };
 #endif
 /// @brief Backend that keeps the last lines in memory, off unless the debug server turns it on
@@ -506,27 +465,10 @@ void Initialize() {
     }
 }
 
-void SetGameLog(u64 program_id, std::string_view title) {
-#ifndef __OPENORBIS__
-    if (logging_instance && logging_instance->file_backend) {
-        logging_instance->file_backend->SetGame(program_id, title);
-    }
-#endif
-}
-
-std::filesystem::path GetLogFilePath() {
-#ifndef __OPENORBIS__
-    if (logging_instance && logging_instance->file_backend) {
-        return logging_instance->file_backend->GetPath();
-    }
-#endif
-    return FS::GetEdenPath(FS::EdenPath::LogDir) / LOG_FILE;
-}
-
 void Start() {
 }
 
-void Flush() {
+void Stop() {
     if (logging_instance)
         logging_instance->ForEachBackend([](Backend& backend) { backend.Flush(); });
 }
@@ -544,28 +486,6 @@ std::filesystem::path FilePath(bool* primary_locked) {
     }
 #endif
     return {};
-}
-
-std::string DescribeException(std::exception_ptr exception) {
-    if (!exception) {
-        return "no active exception";
-    }
-    try {
-        std::rethrow_exception(exception);
-    } catch (const std::exception& e) {
-        return e.what();
-    } catch (...) {
-        return "non-standard exception";
-    }
-}
-
-void InstallTerminateHandler() {
-    std::set_terminate([] {
-        // Critical entries flush the file backend before the abort below.
-        LOG_CRITICAL(Common, "std::terminate: {}", DescribeException(std::current_exception()));
-        LOG_CRITICAL(Common, "Host resources: {}", DescribeHostResources(QueryHostResources()));
-        std::abort();
-    });
 }
 
 void SetGlobalFilter(const Filter& filter) {

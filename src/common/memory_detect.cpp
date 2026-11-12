@@ -22,8 +22,12 @@
 #endif
 
 #include <chrono>
+#include <fstream>
 #include <mutex>
+#include <string>
 #include <vector>
+
+#include <fmt/format.h>
 
 #ifdef _MSC_VER
 #include <malloc.h>
@@ -202,6 +206,55 @@ std::optional<u64> GetSystemCommitRoom() {
     }
 #endif
     return std::nullopt;
+}
+
+HostResources QueryHostResources() {
+    HostResources resources{};
+#ifdef _WIN32
+    const HANDLE process = GetCurrentProcess();
+    PROCESS_MEMORY_COUNTERS_EX counters{};
+    counters.cb = sizeof(counters);
+    if (GetProcessMemoryInfo(process, reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters),
+                             sizeof(counters))) {
+        resources.process_commit = counters.PrivateUsage;
+        resources.process_resident = counters.WorkingSetSize;
+    }
+    MEMORYSTATUSEX status{};
+    status.dwLength = sizeof(status);
+    if (GlobalMemoryStatusEx(&status)) {
+        resources.host_commit_free = status.ullAvailPageFile;
+        resources.host_commit_limit = status.ullTotalPageFile;
+        resources.host_physical_free = status.ullAvailPhys;
+    }
+    resources.gdi_objects = GetGuiResources(process, GR_GDIOBJECTS);
+    resources.user_objects = GetGuiResources(process, GR_USEROBJECTS);
+    DWORD handles{};
+    if (GetProcessHandleCount(process, &handles)) {
+        resources.handles = handles;
+    }
+#elif defined(__linux__)
+    // Total size, then resident size, in pages. Linux has no commit charge: the data size
+    // counts the 512 GiB the guest address space reserves.
+    u64 size{}, resident{};
+    if (std::ifstream statm{"/proc/self/statm"}; statm >> size >> resident) {
+        resources.process_resident = resident * static_cast<u64>(sysconf(_SC_PAGE_SIZE));
+    }
+#endif
+    return resources;
+}
+
+std::string DescribeHostResources(const HostResources& resources) {
+    std::string text = fmt::format("process {} MiB resident", resources.process_resident >> 20);
+    if (resources.host_commit_limit != 0) {
+        text += fmt::format(", {} MiB committed; host {} of {} MiB commit free, {} MiB RAM free",
+                            resources.process_commit >> 20, resources.host_commit_free >> 20,
+                            resources.host_commit_limit >> 20, resources.host_physical_free >> 20);
+    }
+    if (resources.handles != 0) {
+        text += fmt::format("; {} GDI objects, {} USER objects, {} handles", resources.gdi_objects,
+                            resources.user_objects, resources.handles);
+    }
+    return text;
 }
 
 } // namespace Common

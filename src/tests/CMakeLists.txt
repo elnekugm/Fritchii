@@ -130,6 +130,7 @@ add_executable(tests
     common/game_presets.cpp
     common/hitch_diagnostic.cpp
     common/host_memory.cpp
+    common/host_resources.cpp
     common/multi_level_page_table.cpp
     common/page_table.cpp
     common/param_package.cpp
