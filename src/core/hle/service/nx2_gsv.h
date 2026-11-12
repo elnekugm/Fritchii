@@ -2934,11 +2934,16 @@ private:
             }
             if (input.end) {
                 // The client stops at the frame marked end of stream; give it one even when the
-                // last input held no picture. Only a picture from this input may carry the mark:
-                // marking an earlier one still waiting for an image hands out one frame fewer
-                // than the client counts, and its next 213 finds the ring empty (0x1c286f), which
-                // title 4 panics on as a video ends.
-                if (pictures.empty()) {
+                // last input held no picture. Only a picture from this input may carry the mark:
+
+                // marking an earlier one still waiting for an image hands out one frame fewer
+
+                // than the client counts, and its next 213 finds the ring empty (0x1c286f), which
+
+                // title 4 panics on as a video ends.
+
+                if (pictures.empty()) {
+
                 // last input held no picture. Only a picture from this input may carry the mark:
                 // marking an earlier one still waiting for an image hands out one frame fewer
                 // than the client counts, and its next 213 finds the ring empty (0x1c286f), which

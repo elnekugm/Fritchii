@@ -627,25 +627,44 @@ void KeplerCompute::DescribeNativeResources(const NativeQmdScheduler::Descriptor
                  static_cast<u32>(tic.g_type.Value()), static_cast<u32>(tic.b_type.Value()),
                  static_cast<u32>(tic.a_type.Value()));
     }
-    // Words in every bound constant buffer that name a real image of at least 256 pixels a side:
-    // where the program's inputs and output are when they are not at cbuf0+0x90/0xa0.
-    for (u32 slot = 0; slot < NumConstBuffers; ++slot) {
-        const auto& buffer = launch_description.const_buffer_config[slot];
-        if (!((launch_description.const_buffer_enable_mask.Value() >> slot) & 1)) continue;
-        const GPUVAddr address = (GPUVAddr{buffer.address_high} << 32) | buffer.address_low;
-        const u32 size = std::min<u32>(buffer.size.Value(), 0x800);
-        LOG_INFO(HW_GPU, "  cbuf{} {:#x} size {:#x}", slot, address, buffer.size.Value());
-        for (u32 offset = 0; offset + 4 <= size; offset += 4) {
-            const u32 handle = memory_manager.Read<u32>(address + offset);
-            const u32 tic_index = handle & 0xfffff;
-            if (handle == 0 || tic_index == 0 || tic_index > regs.tic.limit) continue;
-            const auto tic = GetTICEntry(tic_index);
-            if (tic.Address() == 0 || tic.Width() < 256 || tic.Height() < 256) continue;
-            LOG_INFO(HW_GPU, "    cbuf{}+{:#x} = {:#x}: tic {} address {:#x} {}x{} format {:#x} block {}",
-                     slot, offset, handle, tic_index, tic.Address(), tic.Width(), tic.Height(),
-                     static_cast<u32>(tic.format.Value()), tic.IsBlockLinear());
-        }
-    }
+    // Words in every bound constant buffer that name a real image of at least 256 pixels a side:
+
+    // where the program's inputs and output are when they are not at cbuf0+0x90/0xa0.
+
+    for (u32 slot = 0; slot < NumConstBuffers; ++slot) {
+
+        const auto& buffer = launch_description.const_buffer_config[slot];
+
+        if (!((launch_description.const_buffer_enable_mask.Value() >> slot) & 1)) continue;
+
+        const GPUVAddr address = (GPUVAddr{buffer.address_high} << 32) | buffer.address_low;
+
+        const u32 size = std::min<u32>(buffer.size.Value(), 0x800);
+
+        LOG_INFO(HW_GPU, "  cbuf{} {:#x} size {:#x}", slot, address, buffer.size.Value());
+
+        for (u32 offset = 0; offset + 4 <= size; offset += 4) {
+
+            const u32 handle = memory_manager.Read<u32>(address + offset);
+
+            const u32 tic_index = handle & 0xfffff;
+
+            if (handle == 0 || tic_index == 0 || tic_index > regs.tic.limit) continue;
+
+            const auto tic = GetTICEntry(tic_index);
+
+            if (tic.Address() == 0 || tic.Width() < 256 || tic.Height() < 256) continue;
+
+            LOG_INFO(HW_GPU, "    cbuf{}+{:#x} = {:#x}: tic {} address {:#x} {}x{} format {:#x} block {}",
+
+                     slot, offset, handle, tic_index, tic.Address(), tic.Width(), tic.Height(),
+
+                     static_cast<u32>(tic.format.Value()), tic.IsBlockLinear());
+
+        }
+
+    }
+
     // Words in every bound constant buffer that name a real image of at least 256 pixels a side:
     // where the program's inputs and output are when they are not at cbuf0+0x90/0xa0.
     for (u32 slot = 0; slot < NumConstBuffers; ++slot) {
@@ -709,21 +728,36 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
         if (tic_index > regs.tic.limit) return std::nullopt;
         return GetTICEntry(tic_index);
     };
-    const auto usable = [](const std::optional<Texture::TICEntry>& in,
-                           const std::optional<Texture::TICEntry>& out) {
-        return in && out && in->format == out->format && in->Address() != 0 &&
-               out->Address() != 0 && out->Width() > in->Width() && in->IsBlockLinear() &&
-               out->IsBlockLinear();
-    };
-    // Title 4's version 458752 keeps the pair at cbuf0+0x60 (1280x720) and +0x70 (1920x1080); the
-    // screen stayed the output's clear colour (blue) until camera mode skipped the pass.
-    std::optional<Texture::TICEntry> input, output;
-    for (const auto [in_offset, out_offset] : {std::pair{0x90U, 0xa0U}, std::pair{0x60U, 0x70U}}) {
-        input = image(in_offset);
-        output = image(out_offset);
-        if (usable(input, output)) break;
-    }
-    if (!usable(input, output))
+    const auto usable = [](const std::optional<Texture::TICEntry>& in,
+
+                           const std::optional<Texture::TICEntry>& out) {
+
+        return in && out && in->format == out->format && in->Address() != 0 &&
+
+               out->Address() != 0 && out->Width() > in->Width() && in->IsBlockLinear() &&
+
+               out->IsBlockLinear();
+
+    };
+
+    // Title 4's version 458752 keeps the pair at cbuf0+0x60 (1280x720) and +0x70 (1920x1080); the
+
+    // screen stayed the output's clear colour (blue) until camera mode skipped the pass.
+
+    std::optional<Texture::TICEntry> input, output;
+
+    for (const auto [in_offset, out_offset] : {std::pair{0x90U, 0xa0U}, std::pair{0x60U, 0x70U}}) {
+
+        input = image(in_offset);
+
+        output = image(out_offset);
+
+        if (usable(input, output)) break;
+
+    }
+
+    if (!usable(input, output))
+
     const auto usable = [](const std::optional<Texture::TICEntry>& in,
                            const std::optional<Texture::TICEntry>& out) {
         return in && out && in->format == out->format && in->Address() != 0 &&
@@ -776,15 +810,19 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
         .src_x1 = static_cast<s32>(input->Width()),
         .src_y1 = static_cast<s32>(input->Height()),
     };
+    // Debug (EDEN_NX2_SAMPLE_AT=<n>): at the n-th upscale, download the input, output and targets
+    // and count non-zero words. Off by default: the downloads froze title 4 for ~1.3 s.
     // Debug (EDEN_NX2_SAMPLE_AT=<n>): at the n-th upscale, download the input, output and targets
     // and count non-zero words. Off by default: the downloads froze title 4 for ~1.3 s.
     static const u32 sample_at = [] {
         const char* value = std::getenv("EDEN_NX2_SAMPLE_AT");
+        return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : ~0U;
         return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : ~0U;
     }();
     // EDEN_NX2_SAMPLE_EVERY=<n>: again every n upscales after that (the scene may come later).
     static const u32 sample_every = [] {
         const char* value = std::getenv("EDEN_NX2_SAMPLE_EVERY");
+        return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
         return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
     }();
     if (static u32 sampled{}; sampled++ == sample_at ||
@@ -918,6 +956,7 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
         const char* value = std::getenv("EDEN_NX2_TRACE_AFTER_UPSCALE");
         return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
     }();
+    if (static u32 count{}; trace_at != 0 && ++count == trace_at) g_nx2_trace_draws_after_upscale = 40;
     if (static u32 count{}; trace_at != 0 && ++count == trace_at) g_nx2_trace_draws_after_upscale = 40;
     static u32 logged{};
     if (logged++ < 4) {

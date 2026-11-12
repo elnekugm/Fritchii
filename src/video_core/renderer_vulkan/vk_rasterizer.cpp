@@ -1,56 +1,107 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
-
-// EDEN_NX2_SHADOW_SKIP=N: redraw depth-only passes into square depth targets (shadow maps) only
-// every N frames per target; in between the target keeps its last contents. Off when unset or
-// below 2. EDEN_NX2_SHADOW_MIN=<size> sets the smallest side counted (default 1024).
-std::atomic<u64> g_shadow_frame{0};
-
-bool SkipShadowPass(const Tegra::Engines::Maxwell3D& maxwell3d) {
-    static const u32 every = [] {
-        const char* value = std::getenv("EDEN_NX2_SHADOW_SKIP");
-        return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0u;
-    }();
-    static const u32 min_size = [] {
-        const char* value = std::getenv("EDEN_NX2_SHADOW_MIN");
-        return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 1024u;
-    }();
-    if (every < 2) {
-        return false;
-    }
-    const auto& regs = maxwell3d.regs;
-    if (!regs.zeta_enable) {
-        return false;
-    }
-    const bool depth_only = regs.rt_control.count == 0 || regs.color_mask[0].raw == 0;
-    if (!depth_only) {
-        return false;
-    }
-    const u32 width = regs.zeta_size.width;
-    const u32 height = regs.zeta_size.height;
-    const GPUVAddr address = regs.zeta.Address();
-    static std::set<std::tuple<GPUVAddr, u32, u32>> seen;
-    const bool counted = width == height && width >= min_size;
-    if (seen.size() < 48 && seen.emplace(address, width, height).second) {
-        LOG_INFO(HW_GPU, "nx2 shadow skip: depth-only target {:#x} {}x{} layers {} {}", address,
-                 width, height, regs.zeta_size.depth.Value(), counted ? "(redrawn every N frames)" : "(left alone)");
-    }
-    if (!counted) {
-        return false;
-    }
-    const u64 frame = g_shadow_frame.load(std::memory_order_relaxed);
-    static std::unordered_map<GPUVAddr, u64> last_drawn;
-    auto [entry, inserted] = last_drawn.try_emplace(address, frame);
-    if (inserted || entry->second == frame || frame - entry->second >= every) {
-        entry->second = frame;
-        return false;
-    }
-    static u64 skipped{};
-    if (++skipped % 20000 == 0) {
-        LOG_INFO(HW_GPU, "nx2 shadow skip: {} depth-only draws/clears skipped", skipped);
-    }
-    return true;
-}
+
+
+// EDEN_NX2_SHADOW_SKIP=N: redraw depth-only passes into square depth targets (shadow maps) only
+
+// every N frames per target; in between the target keeps its last contents. Off when unset or
+
+// below 2. EDEN_NX2_SHADOW_MIN=<size> sets the smallest side counted (default 1024).
+
+std::atomic<u64> g_shadow_frame{0};
+
+
+
+bool SkipShadowPass(const Tegra::Engines::Maxwell3D& maxwell3d) {
+
+    static const u32 every = [] {
+
+        const char* value = std::getenv("EDEN_NX2_SHADOW_SKIP");
+
+        return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0u;
+
+    }();
+
+    static const u32 min_size = [] {
+
+        const char* value = std::getenv("EDEN_NX2_SHADOW_MIN");
+
+        return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 1024u;
+
+    }();
+
+    if (every < 2) {
+
+        return false;
+
+    }
+
+    const auto& regs = maxwell3d.regs;
+
+    if (!regs.zeta_enable) {
+
+        return false;
+
+    }
+
+    const bool depth_only = regs.rt_control.count == 0 || regs.color_mask[0].raw == 0;
+
+    if (!depth_only) {
+
+        return false;
+
+    }
+
+    const u32 width = regs.zeta_size.width;
+
+    const u32 height = regs.zeta_size.height;
+
+    const GPUVAddr address = regs.zeta.Address();
+
+    static std::set<std::tuple<GPUVAddr, u32, u32>> seen;
+
+    const bool counted = width == height && width >= min_size;
+
+    if (seen.size() < 48 && seen.emplace(address, width, height).second) {
+
+        LOG_INFO(HW_GPU, "nx2 shadow skip: depth-only target {:#x} {}x{} layers {} {}", address,
+
+                 width, height, regs.zeta_size.depth.Value(), counted ? "(redrawn every N frames)" : "(left alone)");
+
+    }
+
+    if (!counted) {
+
+        return false;
+
+    }
+
+    const u64 frame = g_shadow_frame.load(std::memory_order_relaxed);
+
+    static std::unordered_map<GPUVAddr, u64> last_drawn;
+
+    auto [entry, inserted] = last_drawn.try_emplace(address, frame);
+
+    if (inserted || entry->second == frame || frame - entry->second >= every) {
+
+        entry->second = frame;
+
+        return false;
+
+    }
+
+    static u64 skipped{};
+
+    if (++skipped % 20000 == 0) {
+
+        LOG_INFO(HW_GPU, "nx2 shadow skip: {} depth-only draws/clears skipped", skipped);
+
+    }
+
+    return true;
+
+}
+
 
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
@@ -411,9 +462,12 @@ void RasterizerVulkan::NoteResolvedDraw(GraphicsPipeline* pipeline, bool is_inde
     }();
     if (ineligible) {
         ++fast_draw_stats.ineligible[static_cast<size_t>(*ineligible)];
-    if (!use_color && SkipShadowPass(*maxwell3d)) {
-        return;
-    }
+    if (!use_color && SkipShadowPass(*maxwell3d)) {
+
+        return;
+
+    }
+
         return;
     }
     reusable_draw = ReusableDraw{
@@ -654,14 +708,22 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     }
 
     SCOPE_EXIT {
-    if (SkipShadowPass(*maxwell3d)) {
-        gpu.TickWork();
-        return;
-    }
-    if (SkipShadowPass(*maxwell3d)) {
-        gpu.TickWork();
-        return;
-    }
+    if (SkipShadowPass(*maxwell3d)) {
+
+        gpu.TickWork();
+
+        return;
+
+    }
+
+    if (SkipShadowPass(*maxwell3d)) {
+
+        gpu.TickWork();
+
+        return;
+
+    }
+
         gpu.TickWork();
     };
     bool submitted = false;
@@ -1941,16 +2003,26 @@ void RasterizerVulkan::NoteGpuWrittenCommandListSynced(DAddr page) {
 
 void RasterizerVulkan::FlushGpuWrittenCommandListPages(std::span<const DAddr> pages) {
     gpu.InvalidateGPUCache();
-void RasterizerVulkan::BeginFlushBatch() {
-    std::scoped_lock lock{buffer_cache.mutex};
-    buffer_cache.BeginDownloadBatch();
-}
-
-void RasterizerVulkan::EndFlushBatch() {
-    std::scoped_lock lock{buffer_cache.mutex};
-    buffer_cache.EndDownloadBatch();
-}
-
+void RasterizerVulkan::BeginFlushBatch() {
+
+    std::scoped_lock lock{buffer_cache.mutex};
+
+    buffer_cache.BeginDownloadBatch();
+
+}
+
+
+
+void RasterizerVulkan::EndFlushBatch() {
+
+    std::scoped_lock lock{buffer_cache.mutex};
+
+    buffer_cache.EndDownloadBatch();
+
+}
+
+
+
     std::scoped_lock lock{buffer_cache.mutex};
     buffer_cache.Nx2FlushListPages(pages);
 }
