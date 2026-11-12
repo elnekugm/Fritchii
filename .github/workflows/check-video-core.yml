@@ -24,7 +24,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            autoconf cmake g++ gcc git \
+            autoconf cmake g++ gcc git libudev-dev \
             ccache
 
       - name: Cache compiler objects
