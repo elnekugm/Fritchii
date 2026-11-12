@@ -822,7 +822,10 @@ std::string Config::ReadStringSetting(const std::string& key,
             config->GetValue(GetSection().c_str(), full_key.c_str(), default_value.value().c_str());
     }
     boost::replace_all(result, "\"", "");
-    boost::replace_all(result, "//", "/");
+    // Collapse duplicated slashes in paths, but keep URLs such as "https://" intact.
+    if (result.find("://") == std::string::npos) {
+        boost::replace_all(result, "//", "/");
+    }
     return result;
 }
 
@@ -1008,6 +1011,11 @@ std::string Config::AdjustKey(const std::string& key) {
 std::string Config::AdjustOutputString(const std::string& string) {
     std::string adjusted_string(string);
     boost::replace_all(adjusted_string, "\\", "/");
+
+    // URLs (for example the box art base URL) must keep their "://" scheme separator.
+    if (adjusted_string.find("://") != std::string::npos) {
+        return adjusted_string;
+    }
 
     // Windows requires that two forward slashes are used at the start of a path for unmapped
     // network drives so we have to watch for that here

@@ -188,7 +188,13 @@ void ConfigureUi::SetConfiguration() {
     ui->folder_icon_size_combobox->setCurrentIndex(
         ui->folder_icon_size_combobox->findData(UISettings::values.folder_icon_size.GetValue()));
     ui->use_boxart->setChecked(UISettings::values.use_boxart.GetValue());
-    ui->boxart_url_edit->setText(QString::fromStdString(UISettings::values.boxart_url.GetValue()));
+    QString boxart_url = QString::fromStdString(UISettings::values.boxart_url.GetValue());
+    // Older configurations lost one slash of "https://"; show the repaired URL.
+    const int scheme = boxart_url.indexOf(QStringLiteral(":/"));
+    if (scheme != -1 && !boxart_url.mid(scheme, 3).startsWith(QStringLiteral("://"))) {
+        boxart_url.insert(scheme + 2, QLatin1Char('/'));
+    }
+    ui->boxart_url_edit->setText(boxart_url);
 
     ui->enable_screenshot_save_as->setChecked(
         UISettings::values.enable_screenshot_save_as.GetValue());
