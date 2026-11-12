@@ -9,10 +9,12 @@
 #include <array>
 #include <condition_variable>
 #include <optional>
-#include <set>
+#include <set>
+
 #include <set>
 #include <span>
-#include <utility>
+#include <utility>
+
 #include <utility>
 #include <vector>
 #include <boost/container/small_vector.hpp>
@@ -260,9 +262,11 @@ public:
 
     VideoCore::RasterizerInterface* rasterizer = nullptr;
 
-    /// GPU-written command entries that needed a flush (FlushGpuWrittenCommands batches them).
-    std::set<std::pair<GPUVAddr, size_t>> flushed_command_entries;
-
+    /// GPU-written command entries that needed a flush (FlushGpuWrittenCommands batches them).
+
+
+
+
     /// GPU-written command entries that needed a flush (FlushGpuWrittenCommands batches them).
     std::set<std::pair<GPUVAddr, size_t>> flushed_command_entries;
 
