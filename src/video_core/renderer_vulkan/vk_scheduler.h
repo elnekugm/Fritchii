@@ -494,7 +494,6 @@ private:
     std::unique_ptr<MasterSemaphore> master_semaphore;
     FragmentBarrierState fragment_barrier;
     bool render_pass_has_stores{};
-    u64 render_pass_serial{};
     bool compute_writes_pending{};
     bool graphics_pipeline_missing{};
     std::unique_ptr<CommandPool> command_pool;

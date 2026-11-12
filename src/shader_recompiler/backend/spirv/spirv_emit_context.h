@@ -374,8 +374,6 @@ public:
     Id decrement_cas_shared{};
     Id decrement_cas_ssbo{};
     Id f32_add_cas{};
-    /// A native float atomic add was emitted (its extension and capability are declared).
-    bool uses_native_float_add{};
     Id f16x2_add_cas{};
     Id f16x2_min_cas{};
     Id f16x2_max_cas{};
@@ -393,9 +391,10 @@ public:
     Id write_global_func_u32x4{};
     Id atomic_add_global_func_u32{};
     Id atomic_umax_global_func_u32{};
-    Id atomic_umin_global_func_u32{};
-    Id atomic_smin_global_func_u32{};
-    Id atomic_smax_global_func_u32{};
+    // Global 32-bit atomics routed through the storage buffers, (address, value) -> old value.
+    // Indexed like the operations table in DefineGlobalMemoryFunctions.
+    std::array<Id, 9> atomic_global_func_u32{};
+    Id atomic_cas_global_func_u32{};
 
     bool need_input_position_indirect{};
     Id input_position{};

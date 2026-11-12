@@ -76,12 +76,6 @@ void WriteStorageByCasLoop(EmitContext& ctx, const IR::Value& binding, const IR:
     ctx.OpFunctionCall(ctx.TypeVoid(), ctx.write_storage_cas_loop_func, pointer, value, bit_offset,
                        bit_count);
 }
-// A 64/128-bit view of a storage buffer indexes by offset >> 3/4: only an offset known to be aligned
-// may use it, any other is read and written word by word (a misaligned one read the wrong words).
-bool AlignedVectorAccess(EmitContext& ctx, const IR::Value& offset, u32 size) {
-    return ctx.profile.support_descriptor_aliasing && offset.IsImmediate() &&
-           offset.U32() % size == 0;
-}
 } // Anonymous namespace
 
 void EmitLoadGlobalU8(EmitContext&) {
@@ -230,7 +224,7 @@ static bool VectorViewIsExact(EmitContext& ctx, const IR::Value& offset, u32 siz
 }
 
 Id EmitLoadStorage64(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset) {
-    if (AlignedVectorAccess(ctx, offset, 8)) {
+    if (VectorViewIsExact(ctx, offset, sizeof(u32[2]))) {
         return LoadStorage(ctx, binding, offset, ctx.U32[2], ctx.storage_types.U32x2,
                            sizeof(u32[2]), &StorageDefinitions::U32x2);
     } else {
@@ -240,7 +234,7 @@ Id EmitLoadStorage64(EmitContext& ctx, const IR::Value& binding, const IR::Value
 }
 
 Id EmitLoadStorage128(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset) {
-    if (AlignedVectorAccess(ctx, offset, 16)) {
+    if (VectorViewIsExact(ctx, offset, sizeof(u32[4]))) {
         return LoadStorage(ctx, binding, offset, ctx.U32[4], ctx.storage_types.U32x4,
                            sizeof(u32[4]), &StorageDefinitions::U32x4);
     } else {
@@ -302,7 +296,7 @@ void EmitWriteStorage32(EmitContext& ctx, const IR::Value& binding, const IR::Va
 
 void EmitWriteStorage64(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset,
                         Id value) {
-    if (AlignedVectorAccess(ctx, offset, 8)) {
+    if (VectorViewIsExact(ctx, offset, sizeof(u32[2]))) {
         WriteStorage(ctx, binding, offset, value, ctx.storage_types.U32x2, sizeof(u32[2]),
                      &StorageDefinitions::U32x2);
     } else {
@@ -315,7 +309,7 @@ void EmitWriteStorage64(EmitContext& ctx, const IR::Value& binding, const IR::Va
 
 void EmitWriteStorage128(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset,
                          Id value) {
-    if (AlignedVectorAccess(ctx, offset, 16)) {
+    if (VectorViewIsExact(ctx, offset, sizeof(u32[4]))) {
         WriteStorage(ctx, binding, offset, value, ctx.storage_types.U32x4, sizeof(u32[4]),
                      &StorageDefinitions::U32x4);
     } else {

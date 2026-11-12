@@ -17,27 +17,10 @@ Id Decorate(EmitContext& ctx, IR::Inst* inst, Id op) {
     return op;
 }
 
-// Maxwell min/max/saturate return the non-NaN operand (a NaN saturates to 0). FMin/FMax/FClamp
-// leave NaN undefined: NVIDIA happens to match, AMD propagates the NaN (black screens in Ocarina).
-// NMin/NMax cost extra NaN tests on drivers that match already, so only those that don't use them.
-Id Min(EmitContext& ctx, Id type, Id a, Id b) {
-    return ctx.profile.has_nan_propagating_fminmax ? ctx.OpNMin(type, a, b)
-                                                   : ctx.OpFMin(type, a, b);
-}
-
-Id Max(EmitContext& ctx, Id type, Id a, Id b) {
-    return ctx.profile.has_nan_propagating_fminmax ? ctx.OpNMax(type, a, b)
-                                                   : ctx.OpFMax(type, a, b);
-}
-
+// Maxwell's FMNMX and .SAT return the non-NaN operand (NaN saturates to 0). FMin/FMax/FClamp leave
+// NaN undefined and AMD's Windows compiler passes it through, so use the NaN-defined N variants.
 Id Clamp(EmitContext& ctx, Id type, Id value, Id zero, Id one) {
-    if (ctx.profile.has_nan_propagating_fminmax) {
-        return ctx.OpNMin(type, ctx.OpNMax(type, value, zero), one);
-    }
-    if (ctx.profile.has_broken_spirv_clamp) {
-        return ctx.OpFMin(type, ctx.OpFMax(type, value, zero), one);
-    }
-    return ctx.OpFClamp(type, value, zero, one);
+    return ctx.OpNMin(type, ctx.OpNMax(type, value, zero), one);
 }
 
 Id FPOrdNotEqual(EmitContext& ctx, Id lhs, Id rhs) {
@@ -100,19 +83,19 @@ Id EmitFPFma64(EmitContext& ctx, IR::Inst* inst, Id a, Id b, Id c) {
 }
 
 Id EmitFPMax32(EmitContext& ctx, Id a, Id b) {
-    return Max(ctx, ctx.F32[1], a, b);
+    return ctx.OpNMax(ctx.F32[1], a, b);
 }
 
 Id EmitFPMax64(EmitContext& ctx, Id a, Id b) {
-    return Max(ctx, ctx.F64[1], a, b);
+    return ctx.OpNMax(ctx.F64[1], a, b);
 }
 
 Id EmitFPMin32(EmitContext& ctx, Id a, Id b) {
-    return Min(ctx, ctx.F32[1], a, b);
+    return ctx.OpNMin(ctx.F32[1], a, b);
 }
 
 Id EmitFPMin64(EmitContext& ctx, Id a, Id b) {
-    return Min(ctx, ctx.F64[1], a, b);
+    return ctx.OpNMin(ctx.F64[1], a, b);
 }
 
 Id EmitFPMul16(EmitContext& ctx, IR::Inst* inst, Id a, Id b) {

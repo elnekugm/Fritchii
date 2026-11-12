@@ -8,7 +8,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <limits>
-#include <string>
+#include <optional>
 #include <vector>
 
 #include <boost/container/small_vector.hpp>
@@ -41,11 +41,6 @@
 #include "shader_recompiler/exception.h"
 
 namespace Vulkan {
-static bool PipelineStatsEnv() {
-    static const bool enabled = std::getenv("EDEN_NX2_PIPELINE_STATS") != nullptr;
-    return enabled;
-}
-
 
 using Shader::ImageBufferDescriptor;
 using Shader::Backend::SPIRV::RESCALING_LAYOUT_WORDS_OFFSET;
@@ -300,8 +295,7 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
                                    info.uses_quad_shuffles || info.uses_fswzadd ||
                                    info.uses_cooperative_matrix;
         VkPipelineCreateFlags flags{};
-        if (device.IsKhrPipelineExecutablePropertiesEnabled() &&
-            (Settings::values.renderer_debug.GetValue() || PipelineStatsEnv())) {
+        if (device.IsKhrPipelineExecutablePropertiesEnabled() && Settings::values.renderer_debug.GetValue()) {
             flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
         }
         if (uses_descriptor_buffer) {
@@ -358,39 +352,6 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
             );
         }
 
-        if (PipelineStatsEnv() && device.IsKhrPipelineExecutablePropertiesEnabled()) {
-            // EDEN_NX2_PIPELINE_STATS=1: the driver's own numbers (registers, spills, waves)
-            // per compute shader, to see why a dispatch is slow on this GPU.
-            try {
-                const auto& logical = device.GetLogical();
-                const auto executables = logical.GetPipelineExecutablePropertiesKHR(*pipeline);
-                for (u32 index = 0; index < static_cast<u32>(executables.size()); ++index) {
-                    std::string text;
-                    for (const auto& statistic :
-                         logical.GetPipelineExecutableStatisticsKHR(*pipeline, index)) {
-                        text += fmt::format(" {}=", statistic.name);
-                        switch (statistic.format) {
-                        case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR:
-                            text += fmt::format("{}", statistic.value.i64);
-                            break;
-                        case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR:
-                            text += fmt::format("{}", statistic.value.u64);
-                            break;
-                        case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_FLOAT64_KHR:
-                            text += fmt::format("{:.2f}", statistic.value.f64);
-                            break;
-                        default:
-                            text += "?";
-                            break;
-                        }
-                    }
-                    LOG_INFO(Render_Vulkan, "nx2 compute stats {:016x} warp={} sg={}:{}",
-                             shader_hash, uses_warp_ops ? 1 : 0,
-                             executables[index].subgroupSize, text);
-                }
-            } catch (const vk::Exception&) {
-            }
-        }
         if (pipeline_statistics) {
             pipeline_statistics->Collect(device, *pipeline);
         }

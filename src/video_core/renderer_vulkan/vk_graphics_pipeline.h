@@ -10,7 +10,6 @@
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -150,9 +149,6 @@ public:
     static std::chrono::nanoseconds HoldTimeTotal() noexcept;
 
     bool HasDynamicVertexInput() const noexcept { return key.state.dynamic_vertex_input; }
-    // Image views of the last configured draw (frame dump input capture only).
-    std::vector<VideoCommon::ImageViewId> dump_views;
-
     const std::array<u64, 6>& ShaderHashes() const noexcept {
         return key.unique_hashes;
     }
@@ -313,57 +309,8 @@ public:
         return build->IsBuilt();
     }
 
-    /// Waits up to timeout for the build to finish; true when it is built (from Nemyu 22ef4693d1).
-    [[nodiscard]] bool WaitForBuild(std::chrono::microseconds timeout) {
-        std::unique_lock lock{build_mutex};
-        return build_condvar.wait_for(lock, timeout,
-                                      [this] { return is_built.load(std::memory_order::relaxed); });
-    }
-
-    /// EDEN_NX2_FAST_DRAW=2 (nx2_fast_draw.h): whether draws can keep this pipeline's resolved
-    /// image views and samplers after light changes. Handles computed at draw time are resolved
-    /// on every draw.
-    [[nodiscard]] bool TakesDeltaDraws() const noexcept {
-        return delta_blocker == DeltaBlocker::None && delta_views_valid;
-    }
-
-    /// Why TakesDeltaDraws is false (diagnostics).
-    enum class DeltaBlocker : u8 {
-        None,
-        WritesImages,
-        Mesh,
-        ComputedHandles,
-        NotConfigured,
-        Count,
-    };
-    [[nodiscard]] DeltaBlocker DeltaDrawBlocker() const noexcept {
-        return delta_blocker != DeltaBlocker::None ? delta_blocker
-               : delta_views_valid                 ? DeltaBlocker::None
-                                                   : DeltaBlocker::NotConfigured;
-    }
-
-    /// Constant buffer slots per stage the pipeline reads texture and image handles from.
-    [[nodiscard]] const std::array<u32, NUM_STAGES>& HandleConstantBuffers() const noexcept {
-        return handle_constant_buffers;
-    }
-
-    enum class DeltaResult { Configured, Failed, NeedsFull };
-    /// Binds the constant and storage buffers again (storage buffer addresses are read from
-    /// constant buffers) and records the draw's descriptors with the image views, samplers and
-    /// texture buffers the last full Configure resolved.
-    DeltaResult ConfigureDelta();
-
-    /// EDEN_NX2_FAST_DRAW_VERIFY: the next Configure compares what it resolves with the views
-    /// and samplers a delta draw would have kept; DeltaMismatch reports the result.
-    void VerifyNextDelta() noexcept {
-        verify_delta = true;
-    }
-    [[nodiscard]] bool DeltaMismatch() const noexcept {
-        return delta_mismatch;
-    }
-
     [[nodiscard]] bool Failed() const noexcept {
-        return IsBuilt() && !pipeline;
+        return build->Failed();
     }
 
     template <typename Spec>
@@ -479,7 +426,8 @@ private:
     std::vector<SampledImage> sampled_images;
     u32 num_textures{};
     bool fragment_has_color0_output{};
-    std::array<bool, 8> fragment_writes_color{};
+    u32 zero_texture_handles{};
+    u32 color_output_mask{};
     bool writes_storage{};
     TextureMemo texture_memo;
 

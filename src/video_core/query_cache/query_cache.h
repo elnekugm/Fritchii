@@ -340,57 +340,56 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         return std::make_pair<u64, u32>(cur_addr >> Core::DEVICE_PAGEBITS,
                                         static_cast<u32>(cur_addr & Core::DEVICE_PAGEMASK));
     };
-    u8* pointer = impl->device_memory.template GetPointer<u8>(cpu_addr);
-    u8* pointer_timestamp = impl->device_memory.template GetPointer<u8>(cpu_addr + 8);
-    // Switch 2 titles read fence-flagged reports back from the CPU as GPU progress. Written when
-    // the fence was signaled, before the GPU produced them, Ocarina's foliage flashed white; on a
-    // fence that did not wait for the host GPU, its tree leaves flickered under CPU load. They are
-    // written once the host GPU completed the work before them. Until then only conditional
-    // rendering sees them (delayed_reports); tracking them as pending made CPU reads wait.
-    const bool free_on_run = is_fence && Tegra::g_nx2_ampere.load(std::memory_order_relaxed);
-    bool is_synced = (free_on_run || (Settings::IsGPUFenceBehaviorDefault()
-                                          ? !Settings::IsGPULevelHigh()
-                                          : !Settings::IsGPUFenceBehaviorBalanced() &&
-                                                !Settings::IsGPUFenceBehaviorAccurate())) &&
-                     is_fence;
-    std::function<void()> operation([this, is_synced, free_on_run, new_query_id, streamer,
-                                     query_base = query, query_location, pointer, pointer_timestamp,
-                                     cpu_addr, addr, asid = gpu_memory->GetID(), counter_type] {
-        const auto retire = [&] {
-            if (free_on_run) {
-                std::scoped_lock lock(cache_mutex);
-                if (const auto it = delayed_reports.find(cpu_addr);
-                    it != delayed_reports.end() && it->second.raw == query_location.raw) {
-                    delayed_reports.erase(it);
-                }
-                streamer->Free(new_query_id);
-            } else if (!is_synced) [[likely]] {
-                impl->pending_unregister.push_back(query_location);
-            }
-        };
-        if (True(query_base->flags & QueryFlagBits::IsInvalidated)) {
-            if (const u64 trace = QueryTrace::Sample(QueryTrace::Event::Discard)) {
-                LOG_INFO(HW_GPU,
-                         "DKB_QUERY discard n={} as={} gpu={:#x} device={:#x} type={} "
-                         "reason=invalidated flags={:#x}",
-                         trace, asid, addr, cpu_addr, static_cast<u32>(counter_type),
-                         static_cast<u32>(query_base->flags));
-            }
-            retire();
-            return;
+    // EXP33 (zortos293/Lichii#337): a fence-flagged report stays registered until its fence runs
+    // (as Balanced already does), and its fence is made and waited for even when empty
+    // (g_signaling_query_report_fence). Both halves: the fence alone, with the query freed at
+    // once, left a stale operation behind (three channels waiting forever on a semaphore).
+    const bool keep_fence_report = is_fence && VideoCore::Nx2Debug::Experiment(33) != 0;
+    const bool is_synced = !keep_fence_report &&
+                           (Settings::IsGPUFenceBehaviorDefault()
+                                ? !VideoCore::Nx2Debug::AccuratePart(1)
+                                : !Settings::IsGPUFenceBehaviorBalanced() &&
+                                      !Settings::IsGPUFenceBehaviorAccurate()) &&
+                           is_fence;
+    // The report's operation, small enough for std::function to hold without allocating (a report
+    // per draw allocated one each, zortos293/Lichii#1161): at most 48 bytes and a nothrow move,
+    // or MSVC's std::function allocates whatever the size. Built only once the report is issued.
+    // It owes the report's completion, counted for Nx2AsyncReportsSettled (SEM_FAST) and
+    // FlushQueryResults' own-report wait (EXP30, zortos293/Lichii#559): completed on every way
+    // out of the operation, written or discarded, and when the operation is dropped without
+    // running (fences discarded when emulation stops), or the slot stays unequal and a later wait
+    // on it never ends. A copy or move takes the debt from its source: exactly one completes it.
+    struct ReportOperation {
+        enum : u8 { Synced = 1, Owed = 2 };
+
+        QueryCacheBase* cache;
+        QueryBase* query_base;
+        DAddr cpu_addr;
+        GPUVAddr addr;
+        QueryLocation query_location;
+        u8 type;         ///< QueryType
+        mutable u8 bits; ///< Synced, Owed
+        u16 asid;        ///< For traces only
+
+        ReportOperation(QueryCacheBase* cache_, QueryBase* query_base_, DAddr cpu_addr_,
+                        GPUVAddr addr_, QueryLocation query_location_, QueryType type_,
+                        bool synced_, size_t asid_) noexcept
+            : cache{cache_}, query_base{query_base_}, cpu_addr{cpu_addr_}, addr{addr_},
+              query_location{query_location_}, type{static_cast<u8>(type_)},
+              bits{static_cast<u8>((synced_ ? Synced : 0) | Owed)},
+              asid{static_cast<u16>(asid_)} {}
+        ReportOperation(const ReportOperation& other) noexcept
+            : cache{other.cache}, query_base{other.query_base}, cpu_addr{other.cpu_addr},
+              addr{other.addr}, query_location{other.query_location}, type{other.type},
+              bits{other.bits}, asid{other.asid} {
+            other.bits &= static_cast<u8>(~Owed);
         }
-        if (False(query_base->flags & QueryFlagBits::IsFinalValueSynced)) [[unlikely]] {
-            if (const u64 trace = QueryTrace::Sample(QueryTrace::Event::Discard)) {
-                LOG_INFO(HW_GPU,
-                         "DKB_QUERY discard n={} as={} gpu={:#x} device={:#x} type={} "
-                         "reason=unsynchronized flags={:#x}",
-                         trace, asid, addr, cpu_addr, static_cast<u32>(counter_type),
-                         static_cast<u32>(query_base->flags));
-            }
-            LOG_ERROR(HW_GPU,
-                      "Query report value not synchronized. Consider increasing GPU accuracy.");
-            retire();
-            return;
+        ReportOperation(ReportOperation&& other) noexcept
+            : ReportOperation(static_cast<const ReportOperation&>(other)) {}
+        ReportOperation& operator=(const ReportOperation&) = delete;
+        ReportOperation& operator=(ReportOperation&&) = delete;
+        ~ReportOperation() {
+            Settle();
         }
 
         void Settle() noexcept {
@@ -483,19 +482,21 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
                 state.pending_unregister.push_back(query_location);
             }
         }
-        retire();
-    });
-    if (free_on_run) {
-        {
-            std::scoped_lock lock(cache_mutex);
-            delayed_reports.insert_or_assign(cpu_addr, query_location);
-        }
-        // The fence carrying it must wait for the host GPU: a placeholder one runs the write as
-        // soon as the fencing thread reaches it, possibly before the GPU finished.
-        needs_real_fence.store(true, std::memory_order_relaxed);
-        impl->rasterizer.SyncOperation(std::move(operation));
-        impl->rasterizer.SignalFence([] {});
-    } else if (is_fence) {
+    };
+    static_assert(sizeof(ReportOperation) <= 48,
+                  "the report operation must fit std::function's own storage");
+    static_assert(std::is_nothrow_move_constructible_v<ReportOperation>,
+                  "MSVC's std::function allocates a callable without a nothrow move");
+    // Issues the report, then builds its operation (which completes it).
+    const auto issue_operation = [&] {
+        Tegra::Nx2IssueAsyncReport(cpu_addr);
+        return std::function<void()>(ReportOperation{this, query, cpu_addr, addr, query_location,
+                                                     counter_type, is_synced,
+                                                     gpu_memory->GetID()});
+    };
+    if (is_fence) {
+        std::function<void()> operation = issue_operation();
+        VideoCore::g_signaling_query_report_fence = keep_fence_report;
         impl->rasterizer.SignalFence(std::move(operation));
         VideoCore::g_signaling_query_report_fence = false;
     } else {
@@ -530,9 +531,7 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         impl->rasterizer.SyncOperation(issue_operation());
     }
     if (is_synced) {
-        if (!free_on_run) {
-            streamer->Free(new_query_id);
-        }
+        streamer->Free(new_query_id);
         return;
     }
     auto [cont_addr, base] = gen_caching_indexing(cpu_addr);
@@ -627,30 +626,27 @@ bool QueryCacheBase<Traits>::AccelerateHostConditionalRendering() {
         }
         VAddr cpu_addr = *cpu_addr_opt;
         std::scoped_lock lock(cache_mutex);
-        const auto found = [&]() -> std::optional<QueryLocation> {
-            for (const VAddr candidate : {cpu_addr, cpu_addr + 4}) {
-                if (const auto it1 = cached_queries.find(candidate >> Core::DEVICE_PAGEBITS);
-                    it1 != cached_queries.end()) {
-                    if (const auto it = it1->second.find(candidate & Core::DEVICE_PAGEMASK);
-                        it != it1->second.end()) {
-                        return it->second;
-                    }
-                }
-            }
-            for (const VAddr candidate : {cpu_addr, cpu_addr + 4}) {
-                if (const auto it = delayed_reports.find(candidate); it != delayed_reports.end()) {
-                    return it->second;
-                }
-            }
-            return std::nullopt;
-        }();
-        if (!found) {
+        auto it1 = cached_queries.find(cpu_addr >> Core::DEVICE_PAGEBITS);
+        if (it1 == cached_queries.end()) {
             return VideoCommon::LookupData{
                 .address = cpu_addr,
                 .found_query = nullptr,
             };
         }
-        auto* query = impl->ObtainQuery(*found);
+        auto& sub_container = it1->second;
+        auto it_current = sub_container.find(cpu_addr & Core::DEVICE_PAGEMASK);
+
+        if (it_current == sub_container.end()) {
+            auto it_current_2 = sub_container.find((cpu_addr & Core::DEVICE_PAGEMASK) + 4);
+            if (it_current_2 == sub_container.end()) {
+                return VideoCommon::LookupData{
+                    .address = cpu_addr,
+                    .found_query = nullptr,
+                };
+            }
+            it_current = it_current_2;
+        }
+        auto* query = impl->ObtainQuery(it_current->second);
         qc_dirty |= True(query->flags & QueryFlagBits::IsHostManaged) &&
                     False(query->flags & QueryFlagBits::IsGuestSynced);
         return VideoCommon::LookupData{
@@ -699,7 +695,6 @@ template <typename Traits>
 void QueryCacheBase<Traits>::CommitAsyncFlushes() {
     // Make sure to have the results synced in Host.
     NotifyWFI();
-    needs_real_fence.store(false, std::memory_order_relaxed);
 
     u64 mask{};
     {
@@ -734,7 +729,7 @@ void QueryCacheBase<Traits>::CommitAsyncFlushes() {
 
 template <typename Traits>
 bool QueryCacheBase<Traits>::HasUncommittedFlushes() const {
-    bool result = needs_real_fence.load(std::memory_order_relaxed);
+    bool result = false;
     impl->ForEachStreamer([&result](StreamerInterface* streamer) {
         result |= streamer->HasUnsyncedQueries();
         return result;
@@ -743,10 +738,13 @@ bool QueryCacheBase<Traits>::HasUncommittedFlushes() const {
 }
 
 template <typename Traits>
-bool QueryCacheBase<Traits>::HasPendingFenceWork() const {
-    bool result = needs_real_fence.load(std::memory_order_relaxed);
-    impl->ForEachStreamer([&result](StreamerInterface* streamer) {
-        result |= streamer->HasUnsyncedQueries() || streamer->HasPendingSync();
+bool QueryCacheBase<Traits>::HasPendingFenceWork(bool ignore_payload_sync) const {
+    bool result = false;
+    StreamerInterface* const payload =
+        ignore_payload_sync ? impl->streamers[static_cast<size_t>(QueryType::Payload)] : nullptr;
+    impl->ForEachStreamer([&result, payload](StreamerInterface* streamer) {
+        result |= streamer->HasUnsyncedQueries() ||
+                  (streamer != payload && streamer->HasPendingSync());
         return result;
     });
     return result;

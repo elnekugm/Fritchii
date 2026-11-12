@@ -49,21 +49,8 @@ constexpr std::array<const char*, 14> EXEFS_FILE_NAMES{
     "subsdk3", "subsdk4",   "subsdk5", "subsdk6", "subsdk7", "subsdk8", "subsdk9",
 };
 
-/// What a built-in patch's write expects to replace in the unpatched module.
-enum class BuiltinCheck : u8 {
-    Word,       ///< exactly `original` (a 4-byte write)
-    BranchLink, ///< any BL instruction (a hooked call; the game's target is not fixed)
-    Zero,       ///< all zero bytes (unused space a patch puts new code in)
-    LoadW8,     ///< a load into w8 (a switch the game reads; replaced by `mov w8, wzr`)
-};
-
-struct BuiltinWrite {
-    size_t module_offset;
-    std::span<const u8> bytes;
-    BuiltinCheck check;
-    u32 original{};
-};
-
+// Built-in patches behind Settings::fps30_patch, matched by NSO build ID (trailing zeros trimmed).
+// Offsets are module offsets of a 4-byte instruction, checked against `expected` before patching.
 struct BuiltinPatch {
     std::string_view name;
     u64 title_id;
@@ -92,65 +79,13 @@ constexpr std::array FPS30_PATCHES{
     BuiltinPatch{"E25C90C1C136638885659FD55BF8A03B3403489D", 0x204ac4, 0x1a89b10a, 0x5280004a},
 };
 
-// Ocarina of Time's community "Dynamic-fps" exefs patch: the call that returns the frame's time
-// step goes to a function that measures the real time since the last frame (CNTVCT_EL0), so the
-// game keeps its speed when frames take longer.
-constexpr std::array<u8, 4> OOT_DYNAMIC_FPS_HOOK{0x4F, 0x7D, 0xD5, 0x94}; // bl main+0x3c46200
-constexpr std::array<u8, 120> OOT_DYNAMIC_FPS_CODE{
-    0x28, 0x18, 0x20, 0x1e, 0xca, 0x92, 0x00, 0xb0, 0x4a, 0x01, 0x38, 0x91, 0x2b, 0xe0, 0x3b,
-    0xd5, 0x4c, 0x01, 0x40, 0xf9, 0x4b, 0x01, 0x00, 0xf9, 0xcc, 0x02, 0x00, 0xb4, 0x6b, 0x01,
-    0x0c, 0xcb, 0x0d, 0xe0, 0x3b, 0xd5, 0x8e, 0x02, 0x80, 0xd2, 0xae, 0x09, 0xce, 0x9a, 0x7f,
-    0x01, 0x0e, 0xeb, 0xcb, 0x81, 0x8b, 0x9a, 0x4c, 0x05, 0x40, 0xf9, 0x4c, 0x00, 0x00, 0xb5,
-    0xec, 0x03, 0x0b, 0xaa, 0x6e, 0x01, 0x0c, 0xcb, 0x8c, 0x0d, 0x8e, 0x8b, 0x4c, 0x05, 0x00,
-    0xf9, 0x82, 0x01, 0x23, 0x9e, 0xa3, 0x01, 0x23, 0x9e, 0x42, 0x18, 0x23, 0x1e, 0x42, 0x08,
-    0x21, 0x1e, 0xc3, 0x00, 0x00, 0x1c, 0x03, 0x09, 0x23, 0x1e, 0x40, 0x20, 0x23, 0x1e, 0x4d,
-    0x00, 0x00, 0x54, 0x48, 0x40, 0x20, 0x1e, 0xc0, 0x03, 0x5f, 0xd6, 0x0a, 0xd7, 0x83, 0x3f,
-};
-constexpr std::array OOT_DYNAMIC_FPS_WRITES{
-    BuiltinWrite{.module_offset = 0x6E6CC4,
-                 .bytes = OOT_DYNAMIC_FPS_HOOK,
-                 .check = BuiltinCheck::BranchLink},
-    BuiltinWrite{.module_offset = 0x3C46200,
-                 .bytes = OOT_DYNAMIC_FPS_CODE,
-                 .check = BuiltinCheck::Zero},
-};
-
-// Occlusion Off (cLohan's OcclusionOff_ZPrePassAndSamplesQuery mod, via sharkiix v2): `mov w8,
-// wzr` where the game reads its occlusion query, depth pre-pass and samples query switches, so it
-// skips that work (about +25% FPS in Kokiri village on sharkiix's RX 9060 XT).
-constexpr std::array<u8, 4> OOT_MOV_W8_WZR{0xE8, 0x03, 0x1F, 0x2A};
-constexpr std::array OOT_OCCLUSION_OFF_WRITES{
-    BuiltinWrite{.module_offset = 0x11ACF68, .bytes = OOT_MOV_W8_WZR, .check = BuiltinCheck::LoadW8},
-    BuiltinWrite{.module_offset = 0x11B838C, .bytes = OOT_MOV_W8_WZR, .check = BuiltinCheck::LoadW8},
-    BuiltinWrite{.module_offset = 0x11B83A4, .bytes = OOT_MOV_W8_WZR, .check = BuiltinCheck::LoadW8},
-    BuiltinWrite{.module_offset = 0x11ACFC8, .bytes = OOT_MOV_W8_WZR, .check = BuiltinCheck::LoadW8},
-    BuiltinWrite{.module_offset = 0x11B83DC, .bytes = OOT_MOV_W8_WZR, .check = BuiltinCheck::LoadW8},
-    BuiltinWrite{.module_offset = 0x11B83F4, .bytes = OOT_MOV_W8_WZR, .check = BuiltinCheck::LoadW8},
-};
-
-constexpr std::array BUILTIN_PATCHES{
-    BuiltinPatch{
-        .name = "Occlusion Off (built-in)",
-        .title_id = 0x0400486024DEC000,
-        .module = "main",
-        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
-        .writes = OOT_OCCLUSION_OFF_WRITES,
-    },
-    BuiltinPatch{
-        .name = "Max Resolution (built-in)",
-        .title_id = 0x0400486024DEC000,
-        .module = "main",
-        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
-        .writes = OOT_MAX_RES_WRITES,
-    },
-    BuiltinPatch{
-        .name = "Dynamic FPS (built-in)",
-        .title_id = 0x0400486024DEC000,
-        .module = "main",
-        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
-        .writes = OOT_DYNAMIC_FPS_WRITES,
-    },
-};
+const BuiltinPatch* FindFps30Patch(std::string_view build_id) {
+    if (!Settings::values.fps30_patch.GetValue()) {
+        return nullptr;
+    }
+    const auto it = std::ranges::find(FPS30_PATCHES, build_id, &BuiltinPatch::build_id);
+    return it != FPS30_PATCHES.end() ? &*it : nullptr;
+}
 
 enum class TitleVersionFormat : u8 {
     ThreeElements, ///< vX.Y.Z
@@ -749,15 +684,6 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
                     LOG_WARNING(Loader,
                                 "    - \"{}\": {}+{:#x} is not empty (first word {:#010x}); patching "
                                 "anyway",
-                                patch.name, name, write.module_offset, word);
-                }
-                break;
-            case BuiltinCheck::LoadW8:
-                // Loads and stores have bits 27-29 set; Rt (bits 0-4) is w8.
-                if ((word & 0x1FU) != 8 || ((word >> 27) & 7U) != 7U) {
-                    LOG_WARNING(Loader,
-                                "    - \"{}\": {}+{:#x} holds {:#010x}, not a load into w8; "
-                                "patching anyway",
                                 patch.name, name, write.module_offset, word);
                 }
                 break;

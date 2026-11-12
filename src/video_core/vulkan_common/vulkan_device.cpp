@@ -518,34 +518,12 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     // Get suitability and device properties.
     const bool is_suitable = GetSuitability(surface != VkSurfaceKHR{});
 
-    // EDEN_NX2_DRIVER_AMD=1: take the AMD proprietary driver's workarounds on another card, so a
-    // fault seen on AMD can be looked for there (EDEN_NX2_NO_NV_GEOMETRY=1 adds AMD's shader
-    // paths on NVIDIA).
-    if (std::getenv("EDEN_NX2_DRIVER_AMD") != nullptr) {
-        LOG_WARNING(Render_Vulkan, "EDEN_NX2_DRIVER_AMD: taking the AMD proprietary driver's paths");
-        properties.driver.driverID = VK_DRIVER_ID_AMD_PROPRIETARY;
-    }
-
     const VkDriverId driver_id = properties.driver.driverID;
 
     const bool is_radv = driver_id == VK_DRIVER_ID_MESA_RADV;
     const bool is_amd_driver =
         driver_id == VK_DRIVER_ID_AMD_PROPRIETARY || driver_id == VK_DRIVER_ID_AMD_OPEN_SOURCE;
     const bool is_amd = is_amd_driver || is_radv;
-
-    // AMD's proprietary Windows driver can crash compiling some pipelines concurrently (Donkey
-    // Kong Bananza on RDNA1/2, upstream issue #511; PokeDinner 57ffa55a8c serializes them too).
-    // The crashes were reported in Switch 2 titles; Switch 1 titles keep the faster parallel boot.
-    // EDEN_NX2_AMD_PARALLEL_PIPELINES=1 keeps the parallel workers.
-#ifdef _WIN32
-    if (driver_id == VK_DRIVER_ID_AMD_PROPRIETARY && Settings::CurrentProgramIsSwitch2()) {
-        const char* parallel = std::getenv("EDEN_NX2_AMD_PARALLEL_PIPELINES");
-        has_broken_parallel_compiling = parallel == nullptr || parallel[0] != '1';
-        if (has_broken_parallel_compiling) {
-            LOG_WARNING(Render_Vulkan, "AMD proprietary driver: serializing pipeline compilation");
-        }
-    }
-#endif
 
     const bool is_intel_windows = driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS;
 
@@ -1711,8 +1689,7 @@ void Device::RemoveUnsuitableExtensions() {
                                        VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME);
 
     // VK_EXT_robustness2
-    // Keep robustBufferAccess2: games read storage buffers out of bounds and AMD returns garbage
-    // without it (Ocarina's Hyrule Field fog volume turned the sky white).
+    features.robustness2.robustBufferAccess2 = VK_FALSE;
     features.robustness2.robustImageAccess2 = VK_FALSE;
     extensions.robustness_2 = features.robustness2.nullDescriptor;
 
@@ -1767,8 +1744,7 @@ void Device::RemoveUnsuitableExtensions() {
                                        VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
 
     // VK_KHR_pipeline_executable_properties
-    if (Settings::values.renderer_shader_feedback.GetValue() ||
-        (std::getenv("EDEN_NX2_PIPELINE_STATS") != nullptr)) {
+    if (Settings::values.renderer_shader_feedback.GetValue()) {
         extensions.pipeline_executable_properties =
             features.pipeline_executable_properties.pipelineExecutableInfo;
         RemoveExtensionFeatureIfUnsuitable(extensions.pipeline_executable_properties,

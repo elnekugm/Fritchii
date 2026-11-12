@@ -4861,6 +4861,16 @@ Sampler::VariantKey Sampler::MakeKey(const ImageView& image_view, bool is_depth)
     // Vulkan leaves it undefined and AMD returns the 0/1 compare result (Ocarina forest fog
     // composite read alpha 0 -> black screen). Use a variant without comparison.
     key.drop_compare = has_depth_comparison && !is_depth;
+    // The FSR bias is for the game's textures. Images the GPU wrote (render targets: bloom and
+    // blur chains, reflections, fog) keep the game's own bias, or they'd read a mip too sharp.
+    // So does every image in handheld mode (the console mode can change in-session), and after
+    // the upscaler failed this session (the game's pass runs again).
+    if (added_lod_bias != 0.0f) {
+        const Image* const image = image_view.BackingImage();
+        key.drop_lod_bias = !VideoCommon::KeepOcarinaFsrLodBias(
+            Settings::IsDockedMode(), *ocarina_fsr_failed,
+            image != nullptr && True(image->flags & ImageFlagBits::GpuModified));
+    }
     if (needs_swizzle_mapping && !key.drop_custom_border && !image_view.HasIdentitySwizzle()) {
         const VkComponentMapping& mapping = image_view.Swizzle();
         key.swizzle = {mapping.r, mapping.g, mapping.b, mapping.a};
@@ -4924,6 +4934,9 @@ VkSampler Sampler::Emplace(VariantKey key) {
     }
 
     VkSamplerCreateInfo create_info = base_ci;
+    if (key.drop_lod_bias) {
+        create_info.mipLodBias -= added_lod_bias;
+    }
     if (key.drop_compare) {
         create_info.compareEnable = VK_FALSE;
     }

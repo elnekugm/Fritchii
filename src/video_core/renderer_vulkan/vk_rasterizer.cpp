@@ -1762,40 +1762,6 @@ void RasterizerVulkan::DispatchCompute() {
 
     const auto& qmd{kepler_compute->launch_description};
     auto indirect_address = kepler_compute->GetIndirectComputeAddress();
-    // Earlier writes must be visible to the dispatch, including its indirect arguments.
-    static constexpr VkMemoryBarrier READ_BARRIER{
-        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-        .pNext = nullptr,
-        .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
-        .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
-    };
-    // EDEN_NX2_DISPATCH_OVERLAP=1 (after nxnative 5208584a25's dispatch_overlap): a dispatch
-    // right after another one, with no render pass and no guest wait-for-idle between them, only
-    // waits for graphics and transfer writes, so the two dispatches may run side by side. A
-    // dependency the game asked for comes with its own wait-for-idle barrier.
-    static const bool dispatch_overlap = [] {
-        const char* value = std::getenv("EDEN_NX2_DISPATCH_OVERLAP");
-        return value != nullptr && value[0] == '1';
-    }();
-    const auto record_read_barrier = [this] {
-        const bool overlap = dispatch_overlap && !overlap_wfi_since_dispatch &&
-                             overlap_dispatch_tick == scheduler.CurrentTick() &&
-                             overlap_render_pass_serial == scheduler.RenderPassSerial();
-        const VkPipelineStageFlags source =
-            overlap ? (vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER &
-                       ~VkPipelineStageFlags{VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT})
-                    : vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER;
-        scheduler.Record([source](vk::CommandBuffer cmdbuf) {
-            cmdbuf.PipelineBarrier(source,
-                                   VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT |
-                                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                   0, READ_BARRIER);
-        });
-        scheduler.NoteComputeWrites();
-        overlap_dispatch_tick = scheduler.CurrentTick();
-        overlap_render_pass_serial = scheduler.RenderPassSerial();
-        overlap_wfi_since_dispatch = false;
-    };
     if (indirect_address) {
         // DispatchIndirect
         static constexpr auto sync_info = VideoCommon::ObtainBufferSynchronize::FullSynchronize;
@@ -1803,7 +1769,6 @@ void RasterizerVulkan::DispatchCompute() {
         const auto [buffer, offset] =
             buffer_cache.ObtainBuffer(*indirect_address, 12, sync_info, post_op);
         scheduler.RequestOutsideRenderPassOperationContext();
-        record_read_barrier();
         scheduler.TraceComputePipeline(pipeline->ShaderHash());
         scheduler.Record([this, pipeline, indirect_buffer = buffer->Handle(),
                           indirect_offset = offset](vk::CommandBuffer cmdbuf) {
@@ -1823,7 +1788,14 @@ void RasterizerVulkan::DispatchCompute() {
         return;
     }
     scheduler.RequestOutsideRenderPassOperationContext();
-    record_read_barrier();
+    static constexpr VkMemoryBarrier READ_BARRIER{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .pNext = nullptr,
+        .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
+    };
+    scheduler.Record([](vk::CommandBuffer cmdbuf) { cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                               0, READ_BARRIER); });
     scheduler.TraceComputePipeline(pipeline->ShaderHash());
     scheduler.Record([this, pipeline, dim, byte_addressed_shadow](vk::CommandBuffer cmdbuf) {
         if (!pipeline->IsBound()) {
@@ -2215,7 +2187,6 @@ void RasterizerVulkan::WaitForIdle() {
     }
 
     query_cache.NotifyWFI();
-    overlap_wfi_since_dispatch = true;
 
     if (device.IsMoltenVK() && scheduler.IsRenderPassActive()) {
         scheduler.DeferFragmentBarrier();
@@ -2224,16 +2195,8 @@ void RasterizerVulkan::WaitForIdle() {
     }
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([event = *wfi_event, flags](vk::CommandBuffer cmdbuf) {
-        // TOP_OF_PIPE as the wait stage blocks nothing and an empty barrier list makes no writes
-        // visible: strict drivers (AMD) ran later draws against unfinished compute output.
-        static constexpr VkMemoryBarrier WFI_BARRIER{
-            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-            .pNext = nullptr,
-            .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
-            .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
-        };
         cmdbuf.SetEvent(event, flags);
-        cmdbuf.WaitEvents(event, flags, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, WFI_BARRIER, {}, {});
+        cmdbuf.WaitEvents(event, flags, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, {}, {}, {});
     });
     fence_manager.SignalOrdering();
 }
@@ -2447,27 +2410,6 @@ bool RasterizerVulkan::UsesNvidiaDlss() const {
     return texture_cache_runtime.UsesNvidiaDlss();
 }
 
-bool RasterizerVulkan::EmulatesNativeTensorPrograms() const {
-    // Mesa's Intel driver takes minutes to compile an emulated network (Ocarina of Time's has 768
-    // matrix multiplies) and then runs it at about 8 FPS. The upscale stand-in draws instead.
-    // EDEN_NX2_UPSCALER_STANDIN=1 uses the stand-in on every driver (as nxnative c1527492b0
-    // replaces the network with MetalFX's spatial scaler): the emulated network is costly.
-    // Unset: Ocarina of Time takes the stand-in on AMD and Intel, as Nemyu does on every GPU
-    // (8b614e4fbf): AMD's driver compiled the network for minutes as the intro movie started (an
-    // RX 580 never got past it). NVIDIA runs it well and keeps it. Only the network's ten programs
-    // are rejected (IsOcarinaUpscalerNetwork); the game's other matrix programs still run.
-    // EDEN_NX2_UPSCALER_STANDIN=1/0 forces the stand-in on/off on every GPU.
-    static const int forced = [] {
-        const char* value = std::getenv("EDEN_NX2_UPSCALER_STANDIN");
-        return value == nullptr ? -1 : (value[0] == '1' ? 1 : 0);
-    }();
-    constexpr u64 OcarinaOfTimeProgramId = 0x0400486024DEC000ULL;
-    const bool standin = forced >= 0 ? forced == 1
-                                     : Settings::GetCurrentProgramID() == OcarinaOfTimeProgramId &&
-                                           !device.IsNvidia();
-    return !standin && device.GetDriverID() != VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA;
-}
-
 bool RasterizerVulkan::SupportsGameDlssNetwork() const {
     // Compute pipelines are created 32 threads wide where the device can be told to.
     return device.IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT);
@@ -2598,7 +2540,9 @@ void RasterizerVulkan::FlushWork() {
     static constexpr bool android = false;
 #endif // __ANDROID__
     const bool native = gpu_memory->UsesNativeTiling();
-    u32 budget = SubmissionPolicy::DefaultNativeBudget;
+    const u32 default_native_budget =
+        device.IsMoltenVK() ? SubmissionPolicy::DefaultNativeBudget : 4096U;
+    u32 budget = default_native_budget;
     if (native && !android) {
         static const std::optional<u32> configured_budget = []() -> std::optional<u32> {
             if (const char* value = std::getenv("EDEN_NX2_FLUSH_DRAWS")) {
@@ -2611,7 +2555,7 @@ void RasterizerVulkan::FlushWork() {
             }
             return std::nullopt;
         }();
-        budget = configured_budget.value_or(SubmissionPolicy::DefaultNativeBudget);
+        budget = configured_budget.value_or(default_native_budget);
     }
     u32 legacy_budget = 4096;
     if (!native && !android) {

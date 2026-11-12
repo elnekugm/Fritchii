@@ -7,18 +7,13 @@
 #pragma once
 
 #include <array>
-#include <optional>
-#include <string_view>
 
 #include <boost/container/static_vector.hpp>
 
 #include "common/common_types.h"
-#include "common/dkb_cpu_trace.h"
-#include "common/dkb_frame_trace.h"
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/engines/maxwell_dma.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
-#include "video_core/nx2_clean_pages.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_vulkan/blit_image.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
@@ -28,7 +23,6 @@
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_query_cache.h"
 #include "video_core/renderer_vulkan/vk_render_pass_cache.h"
-#include "video_core/renderer_vulkan/vk_frame_dump.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
@@ -100,25 +94,22 @@ public:
     void ResetCounter(VideoCommon::QueryType type) override;
     void Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
                VideoCommon::QueryPropertiesFlags flags, u32 payload, u32 subreport) override;
+    std::optional<u32> PendingSemaphoreRelease(DAddr addr) override;
     void BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr gpu_addr, u32 size) override;
     void DisableGraphicsUniformBuffer(size_t stage, u32 index) override;
     void FlushAll() override;
     void FlushRegion(DAddr addr, u64 size,
                      VideoCommon::CacheType which = VideoCommon::CacheType::All) override;
-    GpuWrittenList ReadGpuWrittenCommandList(DAddr addr, std::span<u8> out,
-                                             bool past_sync) override;
-    void NoteGpuWrittenCommandListSynced(DAddr page) override;
-    void FlushGpuWrittenCommandListPages(std::span<const DAddr> pages) override;
+    void BeginFlushBatch() override;
+    void EndFlushBatch() override;
     bool MustFlushRegion(DAddr addr, u64 size,
                          VideoCommon::CacheType which = VideoCommon::CacheType::All) override;
     VideoCore::RasterizerDownloadArea GetFlushArea(DAddr addr, u64 size) override;
-    bool HasPendingQueries(DAddr addr, u64 size) override;
-    void WaitForQueries() override;
     void InvalidateRegion(DAddr addr, u64 size,
                           VideoCommon::CacheType which = VideoCommon::CacheType::All) override;
-    void PrepareRegionWrite(DAddr addr, u64 size, VideoCommon::CacheType which) override;
     void InnerInvalidation(std::span<const std::pair<DAddr, std::size_t>> sequences) override;
     void OnCacheInvalidation(DAddr addr, u64 size) override;
+    void OnCachedWrite(DAddr addr, u64 size) override;
     bool TryCacheInvalidation(DAddr addr, u64 size) override;
     bool OnCPUWrite(DAddr addr, u64 size) override;
     void InvalidateGPUCache() override;
@@ -141,21 +132,6 @@ public:
     bool AccelerateSurfaceCopy(const Tegra::Engines::Fermi2D::Surface& src,
                                const Tegra::Engines::Fermi2D::Surface& dst,
                                const Tegra::Engines::Fermi2D::Config& copy_config) override;
-    bool SupportsGameDlssNetwork() const override;
-    bool UsesNvidiaDlss() const override;
-    bool EmulatesNativeTensorPrograms() const override;
-    bool CanProbeGameDlssOutput() const override {
-        return true;
-    }
-    std::optional<VideoCore::GameDlssProbe> ProbeGameDlssOutput(
-        const Tegra::Engines::Fermi2D::Surface& src,
-        const Tegra::Engines::Fermi2D::Surface& dst) override;
-    bool AccelerateTemporalUpscale(const Tegra::Engines::Fermi2D::Surface& src,
-                                   const Tegra::Engines::Fermi2D::Surface& dst,
-                                   const Tegra::Engines::Fermi2D::Surface& motion_vectors,
-                                   const Tegra::Texture::TICEntry* depth,
-                                   std::array<f32, 2> jitter,
-                                   std::array<f32, 2> motion_scale, bool use_history = true) override;
     Tegra::Engines::AccelerateDMAInterface& AccessAccelerateDMA() override;
     void AccelerateInlineToMemory(GPUVAddr address, size_t copy_size,
                                   std::span<const u8> memory) override;
@@ -184,29 +160,11 @@ private:
     static constexpr VkDeviceSize DEFAULT_BUFFER_SIZE = 4 * sizeof(float);
 
     template <typename Func>
-    void PrepareDraw(bool is_indexed, Func&&, bool is_indirect = false);
-
-    void CaptureIndirectTrace();
-    void CollectIndirectTrace();
-    void TraceDrawFailure(std::string_view reason);
-    bool TryNx2IndirectReset(bool is_indexed, u32 instance_count);
+    void PrepareDraw(bool is_indexed, Func&&);
 
     void FlushWork();
 
-    void TraceRenderState(bool is_indexed, const char* outcome, const Framebuffer* framebuffer);
-
-    /// Records the copies of the command list pages the work just recorded wrote and submits, so
-    /// the GPU makes them now (BufferCache::Nx2CopyListPages).
-    void SubmitNx2ListCopies();
-
-    /// EDEN_NX2_DYNAMIC_SKIP: pipeline is the draw's (null: look it up).
-    void UpdateDynamicStates(GraphicsPipeline* pipeline = nullptr);
-    void UpdateFixedDynamicStates(Tegra::Engines::Maxwell3D::Regs& regs,
-                                  Maxwell::PrimitiveTopology topology, bool topology_changed);
-    /// The dirty flags that make UpdateFixedDynamicStates record anything on this device.
-    Tegra::Engines::Maxwell3D::DirtyState::Flags DynamicStateFlags() const;
-    /// EDEN_NX2_INLINE_INVALIDATE
-    void FilteredInvalidation(std::span<const std::pair<DAddr, std::size_t>> sequences);
+    void UpdateDynamicStates();
 
     void HandleTransformFeedback();
 
@@ -243,8 +201,6 @@ private:
 
     void UpdateVertexInput(Tegra::Engines::Maxwell3D::Regs& regs);
 
-    void FrameDumpPass(const Framebuffer* framebuffer);
-
     Tegra::GPU& gpu;
     Tegra::MaxwellDeviceMemoryManager& device_memory;
 
@@ -270,142 +226,14 @@ private:
     PipelineCache pipeline_cache;
     AccelerateDMA accelerate_dma;
     FenceManager fence_manager;
-    FrameDump frame_dump;
 
     vk::Event wfi_event;
-    /// EDEN_NX2_DISPATCH_OVERLAP: where the last dispatch was recorded (command buffer tick and
-    /// render pass serial), and whether a guest wait-for-idle came after it.
-    u64 overlap_dispatch_tick = ~0ULL;
-    u64 overlap_render_pass_serial = ~0ULL;
-    bool overlap_wfi_since_dispatch = true;
 
     boost::container::static_vector<u32, MAX_IMAGE_VIEWS> image_view_indices;
     std::array<VideoCommon::ImageViewId, MAX_IMAGE_VIEWS> image_view_ids;
     boost::container::static_vector<VkSampler, MAX_TEXTURES> sampler_handles;
 
     u32 draw_counter = 0;
-    u64 render_trace_frame = 0;
-    u32 render_trace_draws = 0;
-    u32 render_trace_clears = 0;
-    bool pending_native_work{};
-    bool mesh_draw{}; ///< the draw being prepared uses a task/mesh pipeline
-
-    /// EDEN_NX2_FAST_DRAW: what the last fully resolved draw left bound (nx2_fast_draw.h).
-    struct ReusableDraw {
-        GraphicsPipeline* pipeline{};
-        const Tegra::Engines::Maxwell3D* maxwell3d{};
-        u64 serial{};
-        u64 tick{};
-        u64 render_pass{};
-        Maxwell::PrimitiveTopology topology{};
-        bool is_indexed{};
-    };
-    enum class FullDraw : u8 {
-        NoCandidate,
-        Kind,
-        StateChanged,
-        Submitted,
-        RenderPass,
-        IndexBuffers,
-        DeltaPipeline,
-        HandleBind,
-        HandleData,
-        DeltaBuffers,
-        Count,
-    };
-    /// Why a fully resolved draw can't be reused by the next one.
-    enum class Ineligible : u8 {
-        Indirect,
-        Mesh,
-        NotBuilt,
-        WritesImages,
-        TransformFeedback,
-        InlineIndex,
-        Quads,
-        Repacked,
-        NoRenderPass,
-        PipelineNotBound,
-        OffBackThread,
-        Count,
-    };
-    enum class DrawPath : u8 { Full, Reused, Delta, Count };
-    struct FastDrawStats {
-        u64 reused{};
-        u64 delta{};
-        std::array<u64, static_cast<size_t>(FullDraw::Count)> full{};
-        std::array<u64, static_cast<size_t>(Ineligible::Count)> ineligible{};
-        /// PrepareDraw time and draws per path.
-        std::array<u64, static_cast<size_t>(DrawPath::Count)> prepare_ns{};
-        std::array<u64, static_cast<size_t>(DrawPath::Count)> prepare_draws{};
-        /// EDEN_NX2_FAST_DRAW_VERIFY
-        u64 verified{};
-        u64 pipeline_mismatches{};
-        u64 view_mismatches{};
-        u64 binding_mismatches{};
-        /// DeltaPipeline draws by GraphicsPipeline::DeltaDrawBlocker.
-        std::array<u64, static_cast<size_t>(GraphicsPipeline::DeltaBlocker::Count)> delta_blockers{};
-        /// StateChanged draws by the reason of the last break, and by its 3D method.
-        std::array<u64, static_cast<size_t>(VideoCommon::Nx2FastDraw::Reason::Count)> breaks{};
-        std::array<u32, Maxwell::NUM_REGS> break_methods{};
-        u64 window_start{};
-    };
-    struct ReusableTake {
-        GraphicsPipeline* pipeline{}; ///< null: resolve the draw in full
-        bool delta{};                 ///< light changes since: ConfigureDelta
-        bool vertex_buffers{};        ///< a delta draw binds the vertex buffers again
-    };
-    /// The pipeline the draw can reuse with what the previous draw bound, if any.
-    ReusableTake TakeReusableDraw(bool is_indexed, bool is_indirect);
-    void NoteResolvedDraw(GraphicsPipeline* pipeline, bool is_indexed, bool is_indirect);
-    void ReportFastDraws();
-    ReusableDraw reusable_draw;
-    FastDrawStats fast_draw_stats;
-
-    enum CleanCache : size_t { CleanTextures, CleanQueries, CleanShaders, CleanCount };
-    std::array<VideoCommon::Nx2CleanPages, CleanCount> clean_pages{};
-    struct SkipStats {
-        u64 window_start{};
-        u64 ranges{};
-        std::array<u64, CleanCount> ranges_skipped{};
-        std::array<u64, CleanCount> invalidation_mismatches{};
-        u64 dynamic_states{};
-        u64 dynamic_skipped{};
-        u64 dynamic_mismatches{};
-        u64 dynamic_pipeline_mismatches{};
-    };
-    SkipStats skip_stats;
-    Tegra::Engines::Maxwell3D::DirtyState::Flags dynamic_state_flags;
-    void ReportSkips();
-
-    struct IndirectTrace {
-        vk::Buffer readback;
-        u64 tick{};
-        u64 frame{};
-        GPUVAddr address{};
-        GPUVAddr count_address{};
-        u32 max_draws{};
-        u32 sampled_commands{};
-        bool pending{};
-        bool include_count{};
-        bool byte_count{};
-    };
-    std::array<IndirectTrace, 8> indirect_traces;
-    Common::DkbFrameTrace::RateLimit trace_rate;
-    Common::DkbFrameTrace::RateLimit trace_cpu_rate;
-    std::optional<Common::DkbCpuTrace::Snapshot> trace_cpu_snapshot;
-    u64 trace_cpu_frame{};
-    bool trace_sample_frame{true};
-    u64 trace_frame{};
-    u64 trace_window_frames{};
-    u64 trace_draws{};
-    u64 trace_skipped{};
-    u64 trace_indirect{};
-    u64 trace_zero_direct{};
-    /// Vertex and fragment hashes of the draw being recorded, for GPU timing.
-    std::pair<u64, u64> trace_draw_hashes{};
-    u32 trace_captures{};
-    u32 trace_capture_dropped{};
-    u32 trace_failure_details{};
 };
 
 } // namespace Vulkan
