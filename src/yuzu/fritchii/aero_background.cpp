@@ -7,6 +7,7 @@
 
 #include <QPainter>
 #include <QPaintEvent>
+#include <QLinearGradient>
 #include <QRadialGradient>
 
 namespace FritchiiUi {
