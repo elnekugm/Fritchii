@@ -38,16 +38,6 @@ jobs:
             libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
             libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xkb1
 
-      - name: Install Qt
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: "6.8.3"
-          host: linux
-          target: desktop
-          arch: linux_gcc_64
-          modules: qtcharts
-          cache: true
-
       - name: Cache compiler objects
         uses: actions/cache@v4
         with:
@@ -74,6 +64,7 @@ jobs:
             -DENABLE_UPDATE_CHECKER=OFF \
             -DUSE_DISCORD_PRESENCE=OFF \
             -DENABLE_WERROR=OFF \
+            -DENABLE_QT=OFF \
             -DUSE_CCACHE=ON \
             -DCMAKE_C_COMPILER=clang \
             -DCMAKE_CXX_COMPILER=clang++ \
