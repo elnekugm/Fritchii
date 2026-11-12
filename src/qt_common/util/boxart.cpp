@@ -244,6 +244,10 @@ void CleanTitle(std::string& title) {
         {"yoshiandthemysteriousbook", "yoshi and the mysterious book"},
         {"pokemonlegendsz-a", "pokemon legends z-a"},
         {"thelegendofzelda", "the legend of zelda"},
+        {"dragxdrive", "drag x drive"},
+        {"globaljam", "global jam racing"},
+        {"dkb", "donkey kong bananza"},
+        {"splatoonraiders", "splatoon raiders"},
     };
 
     std::string out;
@@ -262,26 +266,34 @@ void CleanTitle(std::string& title) {
         }
 
         // Version numbers ("v133") and program IDs ("0400a3a01ee4c000") name the file, not the game.
-        bool noise = lower.size() > 1 && lower[0] == 'v';
-        for (char c : lower) {
-            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
-                noise = false;
-                break;
-            }
-        }
-        if (lower.size() >= 12) {
+        bool noise = false;
+        if (lower.size() > 1 && lower[0] == 'v') {
             noise = true;
-            for (char c : lower) {
-                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+            for (std::size_t c = 1; c < lower.size(); ++c) {
+                if (lower[c] < '0' || lower[c] > '9') {
                     noise = false;
                     break;
                 }
             }
         }
+        if (lower.size() >= 12) {
+            bool id = true;
+            for (char c : lower) {
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+                    id = false;
+                    break;
+                }
+            }
+            noise = noise || id;
+        }
         for (const auto& word_noise : Noise) {
             if (lower == word_noise) {
                 noise = true;
             }
+        }
+        // A bare number behind a platform word is its generation ("switch 2"), not part of the name.
+        if (lower == "2" || lower == "1") {
+            noise = true;
         }
         if (noise) {
             continue;
@@ -361,13 +373,102 @@ std::vector<std::string> Words(std::string_view name) {
         }
         ++i;
     }
+// The words of a name, without punctuation and with the HTML entities of the search page decoded.
+// The accented letters of the titles are spelled without their accent, as the box art repositories
+// do, so "Pokemon" and "POKEMON" name the same game.
+std::vector<std::string> Words(std::string_view name) {
+    std::vector<std::string> words;
+    std::string current;
+    for (std::size_t i = 0; i < name.size();) {
+        const char c = name[i];
+        if (c == '&') {
+            // "&#xE9;" and the named entities of the titles.
+            const auto end = name.find(';', i);
+            if (end != std::string_view::npos && end - i <= 10) {
+                const auto entity = name.substr(i + 1, end - i - 1);
+                std::string decoded;
+                if (entity.starts_with("#x") || entity.starts_with("#X")) {
+                    const auto value = std::strtol(entity.c_str() + 2, nullptr, 16);
+                    if (value > 0 && value < 128) {
+                        decoded += static_cast<char>(value);
+                    }
+                } else if (entity == "amp") {
+                    decoded = "&";
+                } else if (entity == "quot") {
+                    decoded = "\"";
+                } else if (entity == "apos" || entity == "#39") {
+                    decoded = "'";
+                }
+                if (!decoded.empty()) {
+                    if (decoded != ' ') {
+                        current += decoded;
+                    }
+                    i = end + 1;
+                    continue;
+                }
+            }
+        }
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+            current += (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+        } else if (!current.empty()) {
+            words.push_back(std::move(current));
+            current.clear();
+        }
+        ++i;
+    }
     if (!current.empty()) {
         words.push_back(std::move(current));
+    }
+
+    // The accented letters lose their accent, so that they match the plain spelling.
+    for (auto& word : words) {
+        std::size_t out = 0;
+        for (std::size_t i = 0; i < word.size();) {
+            const unsigned char c = static_cast<unsigned char>(word[i]);
+            if (c < 0x80) {
+                word[out++] = word[i];
+                ++i;
+                continue;
+            }
+            // The two and three byte UTF-8 letters of the Latin range.
+            std::size_t length = (c & 0xE0) == 0xC0 ? 2 : 3;
+            if (i + length > word.size()) {
+                break;
+            }
+            char plain = 0;
+            switch (word[i + 1]) {
+            case 0x89: plain = 'e'; break; // e with an acute accent
+            case 0x92: plain = 'e'; break; // e with a grave accent
+            case 0x9A: plain = 'e'; break; // e with a circumflex
+            case 0xA1: plain = 'a'; break; // a with an acute accent
+            case 0xA0: plain = 'a'; break; // a with a grave accent
+            case 0xA2: plain = 'a'; break; // a with a circumflex
+            case 0xAD: plain = 'i'; break; // i with an acute accent
+            case 0xAC: plain = 'i'; break; // i with a grave accent
+            case 0xAE: plain = 'i'; break; // i with a circumflex
+            case 0xB3: plain = 'o'; break; // o with an acute accent
+            case 0xB2: plain = 'o'; break; // o with a grave accent
+            case 0xB4: plain = 'o'; break; // o with a circumflex
+            case 0xBA: plain = 'u'; break; // u with an acute accent
+            case 0xB9: plain = 'u'; break; // u with a grave accent
+            case 0xBB: plain = 'u'; break; // u with a circumflex
+            case 0xB1: plain = 'n'; break; // n with a tilde
+            case 0xA7: plain = 'c'; break; // c with a cedilla
+            default: break;
+            }
+            if (plain != 0) {
+                word[out++] = plain;
+            }
+            i += length;
+        }
+        word.resize(out);
     }
     return words;
 }
 
-// How many of the words of the game are in the name of the candidate.
+// How well the name of the candidate matches the name of the game: the share of the words of the
+// game that the candidate names, with the words of the candidate that the game does not name
+// counted against it. A candidate that names the game exactly scores 1.
 float Score(const std::string& candidate, const std::vector<std::string>& wanted) {
     const auto words = Words(candidate);
     if (words.empty() || wanted.empty()) {
@@ -382,7 +483,9 @@ float Score(const std::string& candidate, const std::vector<std::string>& wanted
             }
         }
     }
-    return static_cast<float>(hits) / static_cast<float>(words.size());
+    const float matched = static_cast<float>(hits) / static_cast<float>(wanted.size());
+    const float extra = static_cast<float>(words.size() - hits) / static_cast<float>(words.size());
+    return matched - extra * 0.5f;
 }
 
 // Fetches a page of the LaunchBox site. Returns the HTTP status.
@@ -485,7 +588,7 @@ std::string FindGamePage(const std::string& title, std::stop_token stop_token) {
         pos = slug_end;
     }
 
-    if (best_score < 0.5f) {
+    if (best_score < 0.34f) {
         return {};
     }
     return best_page;
