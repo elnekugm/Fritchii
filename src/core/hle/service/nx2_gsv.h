@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
+
 
 #pragma once
 
@@ -2780,6 +2781,10 @@ private:
         const u64 pts = u64{w[words]} | (u64{w[words + 1]} << 32);
         const bool end = (w[words + 2] & 0xFF) != 0;
         Log(ctx, "submit");
+        if (end) {
+            LOG_INFO(Service, "{} submit {} marks the end of stream (pts {} us)", GetServiceName(),
+                     m_submitted + 1, pts);
+        }
         if (end) {
             LOG_INFO(Service, "{} submit {} marks the end of stream (pts {} us)", GetServiceName(),
                      m_submitted + 1, pts);
@@ -2806,6 +2811,11 @@ private:
         Log(ctx, ctx.GetCommand() == 8 ? "flush" : "stop");
         {
             std::scoped_lock lk{m_mutex};
+            LOG_INFO(Service, "{} {} after {} frames out ({} inputs, {} decoded, {} finished "
+                              "not yet fetched, {} free queued, {} handed out)",
+                     GetServiceName(), ctx.GetCommand() == 8 ? "flush" : "stop", m_frames_out,
+                     m_inputs.size(), m_decoded.size(), m_outputs.size(), m_free.size(), m_handed);
+            m_trace_calls = 48;
             LOG_INFO(Service, "{} {} after {} frames out ({} inputs, {} decoded, {} finished "
                               "not yet fetched, {} free queued, {} handed out)",
                      GetServiceName(), ctx.GetCommand() == 8 ? "flush" : "stop", m_frames_out,
@@ -2828,6 +2838,12 @@ private:
             if (!m_outputs.empty()) {
                 output = m_outputs.front();
                 m_outputs.pop_front();
+            } else if (m_empty_replies < 16) {
+                ++m_empty_replies;
+                LOG_INFO(Service, "{} 213 found no frame after {} out ({} inputs, {} decoded, "
+                                  "{} free queued, stream ended {})",
+                         GetServiceName(), m_frames_out, m_inputs.size(), m_decoded.size(),
+                         m_free.size(), m_stream_ended);
             } else if (m_empty_replies < 16) {
                 ++m_empty_replies;
                 LOG_INFO(Service, "{} 213 found no frame after {} out ({} inputs, {} decoded, "
@@ -2843,6 +2859,10 @@ private:
             return;
         }
         const u64 pts_ns = output->pts * 1000;
+        if (m_trace_calls > 0) {
+            LOG_INFO(Service, "{} 213 hands out image {} (pts {} us, end {})", GetServiceName(),
+                     output->image, output->pts, output->end);
+        }
         if (m_trace_calls > 0) {
             LOG_INFO(Service, "{} 213 hands out image {} (pts {} us, end {})", GetServiceName(),
                      output->image, output->pts, output->end);
@@ -3080,6 +3100,8 @@ private:
     u32 m_height{};
     u32 m_handed{}; ///< Output images handed out (registered or released) so far
     u64 m_frames_out{};
+    u32 m_empty_replies{}; ///< 213 replies with no frame, logged (the first 16)
+    u32 m_trace_calls{};   ///< Calls still logged in full after a stop or flush
     u32 m_empty_replies{}; ///< 213 replies with no frame, logged (the first 16)
     u32 m_trace_calls{};   ///< Calls still logged in full after a stop or flush
     std::deque<Input> m_inputs;

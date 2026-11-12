@@ -1428,6 +1428,16 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code, bool geo
                 return fail(index, "native fragment discard mode");
             emit(0xe33000000000000fULL | predicate);
             break;
+        case 0x311: { // F2I.FTZ.U64.TRUNC, register source, destination pair (build-131's form)
+            // Eden's Maxwell F2I has a 64-bit destination (dest format 3), which writes the pair:
+            // a 64-bit divide starts from 2^64 / x this way (auto-exposure, per nxnative f5c785cc).
+            if (insn.words[2] != 0x0021d800 || (insn.words[1] & ~0xffU) || insn.Bits(24, 8) ||
+                (dest & 1) || dest >= 246)
+                return fail(index, "native unsigned 64-bit float conversion mode");
+            emit(base(0x5cb0000000000000ULL) | (u64{3} << 8) | (u64{2} << 10) |
+                 (u64{insn.Bits(32, 8)} << 20) | (u64{3} << 39) | (u64{1} << 44));
+            break;
+        }
         case 0x311: { // F2I.FTZ.U64.TRUNC, register source, destination pair (build-131's form)
             // Eden's Maxwell F2I has a 64-bit destination (dest format 3), which writes the pair:
             // a 64-bit divide starts from 2^64 / x this way (auto-exposure, per nxnative f5c785cc).
@@ -1500,6 +1510,21 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code, bool geo
             }
             break;
         }
+        case 0xb6f: case 0x370: { // TXQ texture dimensions (0x370: TXQ.B). From build-131.
+            // TXQ.B takes the handle in Ra and the level in Ra+1, as Maxwell's. Up to two outputs
+            // go to Rd, Rd+1 directly; more, or a second destination (bits 64-71) for the third and
+            // fourth, come out packed in scratch and are copied as for TEX. Kirby Air Riders'
+            // colour-grading LUT pass asks for a 3D texture's width, height and depth.
+            const bool bindless = opcode == 0x370;
+            const u32 binding = insn.Bits(54, 5); // descriptor buffer, as for TLD
+            const u32 mask = insn.Bits(72, 4), components = static_cast<u32>(std::popcount(mask));
+            const u32 second_dest = insn.Bits(64, 8);
+            const bool direct = second_dest == 255;
+            if (insn.Bits(59, 5) != (bindless ? 1U : 0U) || mask == 0 || (direct && components > 2) ||
+                insn.Bits(76, 14) || insn.Bits(91, 1) || (!bindless && binding >= 18) ||
+                (bindless && (insn.Bits(32, 27) || insn.Bits(24, 8) >= 245)) ||
+                (!direct && (second_dest >= 245 || dest >= 245)) ||
+                insn.Bits(40, 14) > 0x1fff || (direct && components == 2 && (dest & 1)) || dest >= 254)
         case 0xb6f: case 0x370: { // TXQ texture dimensions (0x370: TXQ.B). From build-131.
             // TXQ.B takes the handle in Ra and the level in Ra+1, as Maxwell's. Up to two outputs
             // go to Rd, Rd+1 directly; more, or a second destination (bits 64-71) for the third and
@@ -1516,6 +1541,19 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code, bool geo
                 (!direct && (second_dest >= 245 || dest >= 245)) ||
                 insn.Bits(40, 14) > 0x1fff || (direct && components == 2 && (dest & 1)) || dest >= 254)
                 return fail(index, "native texture dimension query mode");
+            if (!bindless) {
+                if (result.required_texture_buffer != ~0U && result.required_texture_buffer != binding)
+                    return fail(index, "native texture descriptor buffer conflict");
+                result.required_texture_buffer = binding;
+            }
+            emit((bindless ? 0xdf50000000000000ULL : 0xdf48000000000000ULL) | predicate | (direct ? dest : 250) |
+                 (u64{insn.Bits(24, 8)} << 8) | (u64{1} << 22) | (u64{mask} << 31) |
+                 (u64{bindless ? 0U : insn.Bits(40, 14)} << 36) | (u64{insn.Bits(90, 1)} << 49));
+            for (u32 i = 0; !direct && i < components; ++i) {
+                const u32 target = i < 2 ? (dest == 255 ? 255U : static_cast<u32>(dest) + i) : second_dest + (i - 2);
+                if (target != 255)
+                    emit(0x5c98000000000000ULL | predicate | target | (u64{15} << 39) | (u64{250 + i} << 20));
+            }
             if (!bindless) {
                 if (result.required_texture_buffer != ~0U && result.required_texture_buffer != binding)
                     return fail(index, "native texture descriptor buffer conflict");
@@ -2082,6 +2120,28 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code, bool geo
             const bool store = opcode == 0x387;
             const u32 data = insn.Bits(32, 8), offset = insn.Bits(40, 24);
             const u32 type = insn.Bits(73, 3);
+            // Types 0-3 (U8, S8, U16, S16) move one register's low byte or half.
+            const u32 components = type <= 3 ? 1U : type <= 6 ? 1U << (type - 4) : 0U;
+            const u32 alignment = type <= 1 ? 1U : type <= 3 ? 2U : components * 4;
+            // Bit 91: [Ra + URb + offset] (Kirby Air Riders' menu shaders). URb is at 32-39 for
+            // LDL, which has no data operand there, and at 64-69 for STL.
+            const bool uniform_address = insn.Bits(91, 1) != 0;
+            const u32 mode = insn.words[2] & ~(uniform_address ? (7U << 9) | 0x3fU | 0x08000000U
+                                                               : 7U << 9);
+            u32 base_register = insn.Bits(24, 8);
+            if (uniform_address) {
+                const u32 uniform = uniform_register(store ? insn.Bits(64, 6) : insn.Bits(32, 8));
+                if (uniform == ~0U) return fail(index, "native local spill uniform address");
+                if (uniform != 255) {
+                    if (base_register == 255) {
+                        base_register = uniform;
+                    } else {
+                        emit(0x5c10000000000000ULL | predicate | 252 | (u64{uniform} << 8) |
+                             (u64{base_register} << 20));
+                        base_register = 252;
+                    }
+                }
+            }
             // Types 0-3 (U8, S8, U16, S16) move one register's low byte or half.
             const u32 components = type <= 3 ? 1U : type <= 6 ? 1U << (type - 4) : 0U;
             const u32 alignment = type <= 1 ? 1U : type <= 3 ? 2U : components * 4;
@@ -2106,6 +2166,8 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code, bool geo
             }
             u32 value = store ? data : static_cast<u32>(dest);
             if (components == 0 || (store && insn.Bits(16, 8)) ||
+                (!store && ((data && !uniform_address) || value == 255)) ||
+                (offset & (alignment - 1)) || offset > 0x7fffff ||
                 (!store && ((data && !uniform_address) || value == 255)) ||
                 (offset & (alignment - 1)) || offset > 0x7fffff ||
                 (value != 255 && ((value & (components - 1)) ||
@@ -2117,6 +2179,39 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code, bool geo
                 value = 248;
             }
             emit((store ? 0xef50000000000000ULL : 0xef40000000000000ULL) | predicate |
+                 value | (u64{base_register} << 8) | (u64{offset} << 20) | (u64{type} << 48));
+            break;
+        }
+        case 0x987: { // STL [Ra + URb + offset] (UR at 64-69, bit 91): Kirby Air Riders' menu shaders.
+            const u32 data = insn.Bits(32, 8), offset = insn.Bits(40, 24);
+            const u32 type = insn.Bits(73, 3);
+            // Types 0-3 (U8, S8, U16, S16) store the low byte or half of one register.
+            const u32 components = type <= 3 ? 1U : type <= 6 ? 1U << (type - 4) : 0U;
+            const u32 alignment = type <= 1 ? 1U : type <= 3 ? 2U : components * 4;
+            const u32 mode = insn.words[2] & ~((7U << 9) | 0x3fU);
+            const u32 uniform = uniform_register(insn.Bits(64, 6));
+            u32 address = insn.Bits(24, 8);
+            if (components == 0 || insn.Bits(16, 8) || (offset & (alignment - 1)) ||
+                offset > 0x7fffff || mode != 0x08100000U || uniform == ~0U ||
+                (data != 255 && ((data & (components - 1)) ||
+                 data + components > (uses_uniform_bank ? 216U : 246U))))
+                return fail(index, "native uniform local store mode");
+            if (uniform != 255) {
+                if (address == 255) {
+                    address = uniform;
+                } else {
+                    emit(0x5c10000000000000ULL | predicate | 252 | (u64{uniform} << 8) |
+                         (u64{address} << 20));
+                    address = 252;
+                }
+            }
+            u32 value = data;
+            if (value == 255) {
+                for (u32 word = 0; word < components; ++word) mov_imm(248 + word, 0);
+                value = 248;
+            }
+            emit(0xef50000000000000ULL | predicate | value | (u64{address} << 8) |
+                 (u64{offset} << 20) | (u64{type} << 48));
                  value | (u64{base_register} << 8) | (u64{offset} << 20) | (u64{type} << 48));
             break;
         }
@@ -2386,6 +2481,18 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code, bool geo
                  (u64{insn.Bits(74, 2)} << 47) | (u64{insn.Bits(71, 1)} << 49));
             break;
         }
+        case 0x80d: { // CSMTEST: a test of shading-mode state Eden does not model, taken as false.
+            // Kirby Air Riders' vertex-side shaders run "CSMTEST.A.FCSM_TR P0" then "@P0 EXIT":
+            // never leave early. Outputs of PT discard the result. (From build-131.)
+            const u32 first = insn.Bits(81, 3), second = insn.Bits(84, 3);
+            if (insn.Bits(87, 4) != 7 || insn.Bits(16, 16))
+                return fail(index, "native CSM test mode");
+            for (const u32 target : {first, second})
+                if (target != 7)
+                    emit(0x5090000000000000ULL | predicate | (u64{target} << 3) | 7 | (u64{7} << 12) |
+                         (u64{1} << 15) | (u64{7} << 29) | (u64{7} << 39));
+            break;
+        }
         case 0x80d: { // CSMTEST: a test of shading-mode state Eden does not model, taken as false.
             // Kirby Air Riders' vertex-side shaders run "CSMTEST.A.FCSM_TR P0" then "@P0 EXIT":
             // never leave early. Outputs of PT discard the result. (From build-131.)
@@ -2474,6 +2581,10 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code, bool geo
                 emit(base(0x3828000000000000ULL) | (u64{insn.Bits(24, 8)} << 8) | (u64{insn.words[1]} << 20));
                 break;
             }
+            // .U64 (type 1) below 32: the high word is the same funnel shift as .U32's (Kirby Air
+            // Riders' menu shaders: SHF.L.U64.HI Rd, Rlow, 16, Rhigh).
+            const bool u64_type = insn.Bits(73, 2) == 1 && insn.words[1] < 32;
+            if ((insn.Bits(73, 2) != 3 && !is_signed && !u64_type) || insn.Bits(75, 1) || !insn.Bits(80, 1) || insn.words[1] > 32) return fail(index, "native funnel-shift mode");
             // .U64 (type 1) below 32: the high word is the same funnel shift as .U32's (Kirby Air
             // Riders' menu shaders: SHF.L.U64.HI Rd, Rlow, 16, Rhigh).
             const bool u64_type = insn.Bits(73, 2) == 1 && insn.words[1] < 32;

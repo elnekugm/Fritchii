@@ -5,12 +5,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <array>
 #include <atomic>
 #include <bit>
 #include <bitset>
+#include <cstdio>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -559,6 +562,33 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
     }
     if (!launch_description.block_dim_x || !launch_description.block_dim_y || !launch_description.block_dim_z)
         return false;
+    const u64 program = (u64{qmd[49] & 0x1ffff} << 32) | qmd[48];
+    // EDEN_NX2_SKIP_GRID=<x>x<y>x<z>: skip compute dispatches with that grid (a test aid: program
+    // addresses change from run to run; Kirby Air Riders' colour table bake is 9x9x9).
+    if (static const std::array<u32, 3> skip_grid = [] {
+            std::array<u32, 3> grid{};
+            if (const char* text = std::getenv("EDEN_NX2_SKIP_GRID")) {
+                std::sscanf(text, "%ux%ux%u", &grid[0], &grid[1], &grid[2]);
+            }
+            return grid;
+        }();
+        skip_grid[0] != 0 && qmd[12] == skip_grid[0] && (qmd[13] & 0xffff) == skip_grid[1] &&
+        (qmd[14] & 0xffff) == skip_grid[2]) {
+        static bool logged{};
+        if (!std::exchange(logged, true)) {
+            LOG_INFO(HW_GPU, "EDEN_NX2_SKIP_GRID: skipping compute program {:#x}", program);
+        }
+        return true;
+    }
+    if (g_nx2_trace_draws_after_upscale > 0) {
+        --g_nx2_trace_draws_after_upscale;
+        LOG_INFO(HW_GPU, "after upscale: compute program {:#x}{}", program,
+                 tensor_programs.contains(program) ? " (tensor, upscaled instead)" : "");
+        DescribeNativeResources(qmd, true);
+    }
+    if (tensor_programs.contains(program)) {
+        return UpscaleInsteadOfNativeProgram();
+    }
     const u64 program = (u64{qmd[49] & 0x1ffff} << 32) | qmd[48];
     // EDEN_NX2_SKIP_GRID=<x>x<y>x<z>: skip compute dispatches with that grid (a test aid: program
     // addresses change from run to run; Kirby Air Riders' colour table bake is 9x9x9).
@@ -594,6 +624,7 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
             LOG_ERROR(HW_GPU, "Native compute shader rejected: {}", error.what());
         }
         if (std::string_view{error.what()}.find("matrix multiply") != std::string_view::npos) {
+            tensor_programs.insert(program);
             tensor_programs.insert(program);
             DescribeNativeResources(qmd);
             // The console runs this on tensor cores; stand in with a plain upscale of its input.
@@ -607,8 +638,10 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
 
 // Logs the images a rejected program's handles (constant bank 0, bytes 0x80-0x11c) point to, so a
 // substitute (e.g. an upscale blit for a tensor-core pass) can find its inputs and output.
+void KeplerCompute::DescribeNativeResources(const NativeQmdScheduler::Descriptor& qmd, bool always) {
 void KeplerCompute::DescribeNativeResources(const NativeQmdScheduler::Descriptor& qmd, bool always) {
     static u32 described{};
+    if (!always && described++ >= 2) return;
     if (!always && described++ >= 2) return;
     const auto& cbuf = launch_description.const_buffer_config[0];
     const GPUVAddr cbuf_address = (GPUVAddr{cbuf.address_high} << 32) | cbuf.address_low;
@@ -810,19 +843,31 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
         .src_x1 = static_cast<s32>(input->Width()),
         .src_y1 = static_cast<s32>(input->Height()),
     };
-    // Debug (EDEN_NX2_SAMPLE_AT=<n>): at the n-th upscale, download the input, output and targets
-    // and count non-zero words. Off by default: the downloads froze title 4 for ~1.3 s.
+    // Debug (EDEN_NX2_SAMPLE_AT=<n>): at the n-th upscale, download the input, output and targets
+
+    // and count non-zero words. Off by default: the downloads froze title 4 for ~1.3 s.
+
     // Debug (EDEN_NX2_SAMPLE_AT=<n>): at the n-th upscale, download the input, output and targets
     // and count non-zero words. Off by default: the downloads froze title 4 for ~1.3 s.
     static const u32 sample_at = [] {
         const char* value = std::getenv("EDEN_NX2_SAMPLE_AT");
-        return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : ~0U;
+        return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : ~0U;
+
         return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : ~0U;
     }();
+    // EDEN_NX2_SAMPLE_EVERY=<n>: again every n upscales after that (the scene may come later).
+    static const u32 sample_every = [] {
+        const char* value = std::getenv("EDEN_NX2_SAMPLE_EVERY");
+        return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
+    }();
+    if (static u32 sampled{}; sampled++ == sample_at ||
+                              (sample_every != 0 && sampled > sample_at &&
+                               (sampled - 1 - sample_at) % sample_every == 0)) {
     // EDEN_NX2_SAMPLE_EVERY=<n>: again every n upscales after that (the scene may come later).
     static const u32 sample_every = [] {
         const char* value = std::getenv("EDEN_NX2_SAMPLE_EVERY");
-        return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
+        return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
+
         return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
     }();
     if (static u32 sampled{}; sampled++ == sample_at ||
@@ -846,11 +891,33 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
         };
         sample(*input);
         sample(*output);
+        // Every 2560x1440 target the in-game passes draw to (from EDEN_NX2_RT_TRACE), or the
+        // images listed in EDEN_NX2_SAMPLE_EXTRA=<hex address>,... (Kirby Air Riders' frame).
+        std::vector<std::pair<GPUVAddr, u64>> addresses;
         // Every 2560x1440 target the in-game passes draw to (from EDEN_NX2_RT_TRACE), or the
         // images listed in EDEN_NX2_SAMPLE_EXTRA=<hex address>,... (Kirby Air Riders' frame).
         std::vector<std::pair<GPUVAddr, u64>> addresses;
         for (const GPUVAddr address : {0x8116a03000ULL, 0x8117ae5000ULL, 0x8114b62000ULL,
                                        0x8115a63000ULL, 0x8117904000ULL, 0x8114a02000ULL}) {
+            addresses.emplace_back(address, 2560ULL * 1440 * 4);
+        }
+        // <hex address>[:<hex size>],...: the size defaults to the upscale input's.
+        if (const char* extra = std::getenv("EDEN_NX2_SAMPLE_EXTRA")) {
+            addresses.clear();
+            for (const char* text = extra; *text != '\0';) {
+                char* end{};
+                const u64 address = std::strtoull(text, &end, 16);
+                if (end == text) break;
+                u64 extra_size = u64{input->Width()} * input->Height() * 4;
+                if (*end == ':') {
+                    text = end + 1;
+                    extra_size = std::strtoull(text, &end, 16);
+                }
+                addresses.emplace_back(address, extra_size);
+                text = *end == ',' ? end + 1 : end;
+            }
+        }
+        for (const auto& [address, size] : addresses) {
             addresses.emplace_back(address, 2560ULL * 1440 * 4);
         }
         // <hex address>[:<hex size>],...: the size defaults to the upscale input's.
@@ -875,6 +942,16 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
             }
             u32 nonzero{}, samples{}, distinct{};
             u32 last{};
+            std::unordered_map<u32, u32> counts;
+            // About a thousand samples of a small image (a 33x33x33 table), else every 4 KiB.
+            const u64 stride = size < (u64{4} << 20) ?(std::max<u64>(size / 1024, 8) & ~u64{7}) + 4 : 4096 + 4;
+            u32 first_words[4]{};
+            for (u32 i = 0; i < 4; ++i) {
+                first_words[i] = memory_manager.Read<u32>(address + i * 4);
+            }
+            LOG_INFO(HW_GPU, "Upscale fallback target {:#x}: first words {:08x} {:08x} {:08x} {:08x}",
+                     address, first_words[0], first_words[1], first_words[2], first_words[3]);
+            for (u64 offset = 0; offset < size; offset += stride) {
             std::unordered_map<u32, u32> counts;
             // About a thousand samples of a small image (a 33x33x33 table), else every 4 KiB.
             const u64 stride = size < (u64{4} << 20) ?(std::max<u64>(size / 1024, 8) & ~u64{7}) + 4 : 4096 + 4;
@@ -890,6 +967,14 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
                 nonzero += word != 0;
                 distinct += word != last;
                 last = word;
+                ++counts[word];
+            }
+            u32 common{}, common_count{};
+            for (const auto& [word, count] : counts) {
+                if (count > common_count) {
+                    common = word;
+                    common_count = count;
+                }
                 ++counts[word];
             }
             u32 common{}, common_count{};
@@ -899,6 +984,9 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
                     common_count = count;
                 }
             }
+            LOG_INFO(HW_GPU, "Upscale fallback target {:#x}: {}/{} non-zero, {} changes, most common "
+                             "word {:#010x} ({} times)",
+                     address, nonzero, samples, distinct, common, common_count);
             LOG_INFO(HW_GPU, "Upscale fallback target {:#x}: {}/{} non-zero, {} changes, most common "
                              "word {:#010x} ({} times)",
                      address, nonzero, samples, distinct, common, common_count);
@@ -956,7 +1044,8 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
         const char* value = std::getenv("EDEN_NX2_TRACE_AFTER_UPSCALE");
         return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
     }();
-    if (static u32 count{}; trace_at != 0 && ++count == trace_at) g_nx2_trace_draws_after_upscale = 40;
+    if (static u32 count{}; trace_at != 0 && ++count == trace_at) g_nx2_trace_draws_after_upscale = 40;
+
     if (static u32 count{}; trace_at != 0 && ++count == trace_at) g_nx2_trace_draws_after_upscale = 40;
     static u32 logged{};
     if (logged++ < 4) {

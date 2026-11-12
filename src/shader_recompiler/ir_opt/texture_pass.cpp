@@ -10,6 +10,7 @@
 #include <unordered_set>
 #include <vector>
 #include <bit>
+#include <cstdlib>
 #include <cstdlib>
 #include <optional>
 #include "common/container/unordered_map.h"
@@ -1145,6 +1146,12 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
     env.handle_cache.clear();
     env.track_cache.clear();
     TextureInstVector to_replace;
+    // EDEN_NX2_HANDLE_PROGRAMS=0 keeps performance build 4's search through loads only.
+    static const bool handle_programs_on = [] {
+        const char* value = std::getenv("EDEN_NX2_HANDLE_PROGRAMS");
+        return !value || value[0] != '0';
+    }();
+    g_handle_programs = handle_programs_on ? &program.info.handle_programs : nullptr;
     // EDEN_NX2_HANDLE_PROGRAMS=0 keeps performance build 4's search through loads only.
     static const bool handle_programs_on = [] {
         const char* value = std::getenv("EDEN_NX2_HANDLE_PROGRAMS");
