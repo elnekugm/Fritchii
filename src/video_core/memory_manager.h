@@ -274,6 +274,8 @@ private:
     const u8* CachedPagePointer(GPUVAddr addr) const;
 
     std::atomic<GPUVAddr> native_syncpoint_shim{};
+    /// Bumped after each page table change: lookups cached under one value stay valid until then.
+    std::atomic<u64> kind_generation{};
     Core::System& system;
     MaxwellDeviceMemoryManager& memory;
 
