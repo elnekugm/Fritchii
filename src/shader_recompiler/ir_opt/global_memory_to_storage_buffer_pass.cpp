@@ -406,8 +406,7 @@ std::optional<LowAddrInfo> TrackLowAddress(IR::Inst* inst) {
 }
 
 /// Tries to track the storage buffer address used by a global memory instruction
-std::optional<StorageBufferAddr> Track(const IR::Value& value, const Bias* bias,
-                                       std::unordered_set<const IR::Inst*>& exhausted) {
+std::optional<StorageBufferAddr> Track(const IR::Value& value, const Bias* bias) {
     const auto pred{[bias](const IR::Inst* inst) -> std::optional<StorageBufferAddr> {
         if (inst->GetOpcode() != IR::Opcode::GetCbufU32 &&
             inst->GetOpcode() != IR::Opcode::GetCbufU32x2) {
@@ -1444,13 +1443,13 @@ bool CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info, 
     }
     const auto cached_track = [&](const Bias* bias, auto& cache) {
         if (low_addr.IsImmediate()) {
-            return Track(low_addr, bias, exhausted);
+            return Track(low_addr, bias);
         }
         const IR::Inst* const start{low_addr.InstRecursive()};
         if (const auto it = cache.find(start); it != cache.end()) {
             return it->second;
         }
-        const std::optional<StorageBufferAddr> result{Track(low_addr, bias, exhausted)};
+        const std::optional<StorageBufferAddr> result{Track(low_addr, bias)};
         cache.emplace(start, result);
         return result;
     };
@@ -1465,7 +1464,7 @@ bool CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info, 
     }
     if (!storage_buffer) {
         // If it fails, track without a bias
-        storage_buffer = cached_track(nullptr, info.unbiased_tracks, info.unbiased_exhausted);
+        storage_buffer = cached_track(nullptr, info.unbiased_tracks);
         if (!storage_buffer) {
             // If that also fails, use NVN fallbacks
             LOG_WARNING(Shader, "Storage buffer failed to track, using global memory fallbacks");
@@ -2082,6 +2081,33 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
         return;
     }
     const size_t max_ssbos{StorageBufferLimit(host_info)};
+    TrackingConditions conditions{program};
+    StorageInfo info;
+    info.iterator_words = CollectIteratorWords(program);
+    info.atomic_pointers = CollectAtomicPointers(program);
+    const auto collect = [&] {
+        for (IR::Block* const block : program.post_order_blocks) {
+            for (IR::Inst& inst : block->Instructions()) {
+                if (!IsGlobalMemory(inst)) {
+                    continue;
+                }
+                conditions.current = block;
+                CollectStorageBuffers(*block, inst, info, env, conditions);
+            }
+        }
+    };
+    collect();
+    if (info.tables_seen && info.set.size() < Info::MAX_SSBOS) {
+        // Again with pointer table entries, in the bindings the first pass left free.
+        StorageInfo with_tables;
+        with_tables.iterator_words = std::move(info.iterator_words);
+        with_tables.atomic_pointers = std::move(info.atomic_pointers);
+        with_tables.tables_enabled = true;
+        with_tables.table_budget = Info::MAX_SSBOS - info.set.size();
+        info = std::move(with_tables);
+        collect();
+    }
+    program.info.native_global_bounds |= info.native_runtime_bounds;
     TrackingConditions conditions{program};
     StorageInfo info;
     // Without 64-bit integers the backend cannot route global accesses among bound buffers.
@@ -2184,33 +2210,6 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
                                        read_extents[storage_inst.storage_buffer]);
         }
     }
-    TrackingConditions conditions{program};
-    StorageInfo info;
-    info.iterator_words = CollectIteratorWords(program);
-    info.atomic_pointers = CollectAtomicPointers(program);
-    const auto collect = [&] {
-        for (IR::Block* const block : program.post_order_blocks) {
-            for (IR::Inst& inst : block->Instructions()) {
-                if (!IsGlobalMemory(inst)) {
-                    continue;
-                }
-                conditions.current = block;
-                CollectStorageBuffers(*block, inst, info, env, conditions);
-            }
-        }
-    };
-    collect();
-    if (info.tables_seen && info.set.size() < Info::MAX_SSBOS) {
-        // Again with pointer table entries, in the bindings the first pass left free.
-        StorageInfo with_tables;
-        with_tables.iterator_words = std::move(info.iterator_words);
-        with_tables.atomic_pointers = std::move(info.atomic_pointers);
-        with_tables.tables_enabled = true;
-        with_tables.table_budget = Info::MAX_SSBOS - info.set.size();
-        info = std::move(with_tables);
-        collect();
-    }
-    program.info.native_global_bounds |= info.native_runtime_bounds;
     for (const StorageBufferAddr& storage_buffer : info.set) {
         const auto read_extent{read_extents.find(storage_buffer)};
         program.info.storage_read_extents.push_back(

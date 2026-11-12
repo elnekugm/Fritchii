@@ -101,21 +101,12 @@ void BlitConstantsPass(Environment& env, IR::Program& program) {
         return offset < 0x20 || offset == 0x38 || offset == 0x3c || offset == 0x58 || offset == 0x5c;
     };
     // EDEN_NX2_ROOT_TABLES=0: every bank 17 read is the blit block, as in performance build 4.
-    static const bool root_tables = [] {
-        const char* value = std::getenv("EDEN_NX2_ROOT_TABLES");
-        return !value || value[0] != '0';
-    }();
-    bool reads_nonzero_word{!root_tables};
-    // EDEN_NX2_ROOT_TABLES=0: every bank 17 read is the blit block, as in performance build 4.
     static const bool root_tables = [] {
         const char* value = std::getenv("EDEN_NX2_ROOT_TABLES");
         return !value || value[0] != '0';
     }();
     bool reads_nonzero_word{!root_tables};
     for (IR::Block* const block : program.post_order_blocks) {
-        if (!root_tables) {
-            break;
-        }
         if (!root_tables) {
             break;
         }
