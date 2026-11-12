@@ -91,8 +91,7 @@ Id GuestLane(EmitContext& ctx, Id index) {
 }
 
 bool UseShuffleFallback(EmitContext& ctx) {
-    return ctx.profile.has_broken_spirv_subgroup_shuffle ||
-           (ctx.profile.has_broken_spirv_fragment_shuffle && ctx.stage == Stage::Fragment);
+    return ctx.profile.has_broken_spirv_subgroup_shuffle;
 }
 
 Id ShuffleAbsolute(EmitContext& ctx, Id value, Id src_thread_id) {

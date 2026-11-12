@@ -1097,6 +1097,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
     const Id zero{u32_zero_value};
     const auto define_body{[&](DefPtr ssbo_member, Id addr, Id element_pointer, u32 shift,
                                auto&& callback) {
+        // The callback takes the pointer, the storage buffer and the index of the word.
         AddLabel();
         const size_t num_buffers{info.storage_buffers_descriptors.size()};
         const u64 ssbo_align_mask{~(profile.min_ssbo_alignment - 1U)};
@@ -1328,6 +1329,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
 
     // The remaining global 32-bit atomics share one table, indexed like the operations below.
     {
+        using AtomicOp = Id (Sirit::Module::*)(Id, Id, Id, Id, Id);
         static constexpr std::array<std::pair<IR::Opcode, AtomicOp>, 9> operations{{
             {IR::Opcode::GlobalAtomicIAdd32, &Sirit::Module::OpAtomicIAdd},
             {IR::Opcode::GlobalAtomicSMin32, &Sirit::Module::OpAtomicSMin},
@@ -1355,7 +1357,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
             const Id address{OpFunctionParameter(U64)};
             const Id value{OpFunctionParameter(U32[1])};
             define_body(&StorageDefinitions::U32, address, storage_types.U32.element, 2,
-                        [&](Id pointer) {
+                        [&](Id pointer, Id, Id) {
                             const Id scope{Const(static_cast<u32>(spv::Scope::Device))};
                             OpReturnValue((this->*operation)(U32[1], pointer, scope, zero, value));
                         });
@@ -1397,7 +1399,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
         const Id value{OpFunctionParameter(U32[1])};
         const Id scope{Const(static_cast<u32>(spv::Scope::Device))};
         define_body(&StorageDefinitions::U32, address, storage_types.U32.element, 2,
-                    [&](Id pointer) {
+                    [&](Id pointer, Id, Id) {
                         OpReturnValue(OpAtomicCompareExchange(U32[1], pointer, scope, zero, zero,
                                                               value, comparator));
                     });
