@@ -30,13 +30,7 @@ DECLARE_ENUM_FLAG_OPERATORS(MemoryPermission)
  */
 class HostMemory {
 public:
-    enum class BackingMode {
-        Committed,
-        Deferred,
-    };
-
-    explicit HostMemory(size_t backing_size_, size_t virtual_size_,
-                        BackingMode backing_mode = BackingMode::Committed);
+    explicit HostMemory(size_t backing_size_, size_t virtual_size_);
     ~HostMemory();
 
     /**
