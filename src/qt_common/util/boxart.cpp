@@ -373,8 +373,55 @@ std::vector<std::string> Words(std::string_view name) {
         }
         ++i;
     }
+    if (!current.empty()) {
+        words.push_back(std::move(current));
+    }
 
-// How well the name of the candidate matches the name of the game: the share of the words of the
+    // The accented letters lose their accent, so that they match the plain spelling.
+    for (auto& word : words) {
+        std::size_t out = 0;
+        for (std::size_t i = 0; i < word.size();) {
+            const unsigned char c = static_cast<unsigned char>(word[i]);
+            if (c < 0x80) {
+                word[out++] = word[i];
+                ++i;
+                continue;
+            }
+            // The two and three byte UTF-8 letters of the Latin range.
+            std::size_t length = (c & 0xE0) == 0xC0 ? 2 : 3;
+            if (i + length > word.size()) {
+                break;
+            }
+            char plain = 0;
+            switch (word[i + 1]) {
+            case 0x89: plain = 'e'; break; // e with an acute accent
+            case 0x92: plain = 'e'; break; // e with a grave accent
+            case 0x9A: plain = 'e'; break; // e with a circumflex
+            case 0xA1: plain = 'a'; break; // a with an acute accent
+            case 0xA0: plain = 'a'; break; // a with a grave accent
+            case 0xA2: plain = 'a'; break; // a with a circumflex
+            case 0xAD: plain = 'i'; break; // i with an acute accent
+            case 0xAC: plain = 'i'; break; // i with a grave accent
+            case 0xAE: plain = 'i'; break; // i with a circumflex
+            case 0xB3: plain = 'o'; break; // o with an acute accent
+            case 0xB2: plain = 'o'; break; // o with a grave accent
+            case 0xB4: plain = 'o'; break; // o with a circumflex
+            case 0xBA: plain = 'u'; break; // u with an acute accent
+            case 0xB9: plain = 'u'; break; // u with a grave accent
+            case 0xBB: plain = 'u'; break; // u with a circumflex
+            case 0xB1: plain = 'n'; break; // n with a tilde
+            case 0xA7: plain = 'c'; break; // c with a cedilla
+            default: break;
+            }
+            if (plain != 0) {
+                word[out++] = plain;
+            }
+            i += length;
+        }
+        word.resize(out);
+    }
+    return words;
+}
 // game that the candidate names, with the words of the candidate that the game does not name
 // counted against it. A candidate that names the game exactly scores 1.
 float Score(const std::string& candidate, const std::vector<std::string>& wanted) {
