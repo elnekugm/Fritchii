@@ -22,7 +22,8 @@
 #endif
 
 #include <array>
-#include <cstdlib>
+#include <cstdlib>
+
 #include <cstdlib>
 #include <cstring>
 
@@ -94,81 +95,16 @@ void ProtectMemory(const void* base, size_t size, bool is_executable) {
     const int mode = is_executable ? (PROT_READ | PROT_EXEC) : (PROT_READ | PROT_WRITE);
     mprotect(reinterpret_cast<void*>(roundAddr), size + (iaddr - roundAddr), mode);
 #    endif
-}
+}
+
 }
 #endif
 
-HostFeature DetectHostFeatures() {
 HostFeature DetectHostFeatures() {
-    HostFeature f{};
-#ifdef DYNARMIC_ENABLE_CPU_FEATURE_DETECTION
-    using Cpu = Xbyak::util::Cpu;
-    Xbyak::util::Cpu cpu_info{};
-    if (cpu_info.has(Cpu::tSSSE3)) f |= HostFeature::SSSE3;
-    if (cpu_info.has(Cpu::tSSE41)) f |= HostFeature::SSE41;
-    if (cpu_info.has(Cpu::tSSE42)) f |= HostFeature::SSE42;
-    if (cpu_info.has(Cpu::tAVX)) f |= HostFeature::AVX;
-    if (cpu_info.has(Cpu::tAVX2)) f |= HostFeature::AVX2;
-    // AVX-512 paths stay off unless EDEN_NX2_AVX512=1: Zen 4 players crashed in Mario Kart World
-    // seconds after boot by jumping to garbage, and one of these paths already miscompiled
-    // (VectorCountLeadingZeros16). Without them the JIT emits the AVX2 code every other tested CPU
-    // runs. Read when the first JIT starts, after nx2_switches.txt.
-    const char* avx512 = std::getenv("EDEN_NX2_AVX512");
-    if (avx512 != nullptr && avx512[0] == '1') {
-        if (cpu_info.has(Cpu::tAVX512F)) f |= HostFeature::AVX512F;
-        if (cpu_info.has(Cpu::tAVX512CD)) f |= HostFeature::AVX512CD;
-        if (cpu_info.has(Cpu::tAVX512VL)) f |= HostFeature::AVX512VL;
-        if (cpu_info.has(Cpu::tAVX512BW)) f |= HostFeature::AVX512BW;
-        if (cpu_info.has(Cpu::tAVX512DQ)) f |= HostFeature::AVX512DQ;
-        if (cpu_info.has(Cpu::tAVX512_BITALG)) f |= HostFeature::AVX512BITALG;
-        if (cpu_info.has(Cpu::tAVX512VBMI)) f |= HostFeature::AVX512VBMI;
-    }
-    // AVX-512 paths stay off unless EDEN_NX2_AVX512=1: Zen 4 players crashed in Mario Kart World
-    // seconds after boot by jumping to garbage, and one of these paths already miscompiled
-    // (VectorCountLeadingZeros16). Without them the JIT emits the AVX2 code every other tested CPU
-    // runs. Read when the first JIT starts, after nx2_switches.txt.
-    const char* avx512 = std::getenv("EDEN_NX2_AVX512");
-    if (avx512 != nullptr && avx512[0] == '1') {
-        if (cpu_info.has(Cpu::tAVX512F)) f |= HostFeature::AVX512F;
-        if (cpu_info.has(Cpu::tAVX512CD)) f |= HostFeature::AVX512CD;
-        if (cpu_info.has(Cpu::tAVX512VL)) f |= HostFeature::AVX512VL;
-        if (cpu_info.has(Cpu::tAVX512BW)) f |= HostFeature::AVX512BW;
-        if (cpu_info.has(Cpu::tAVX512DQ)) f |= HostFeature::AVX512DQ;
-        if (cpu_info.has(Cpu::tAVX512_BITALG)) f |= HostFeature::AVX512BITALG;
-        if (cpu_info.has(Cpu::tAVX512VBMI)) f |= HostFeature::AVX512VBMI;
-    }
-    if (cpu_info.has(Cpu::tPCLMULQDQ)) f |= HostFeature::PCLMULQDQ;
-    if (cpu_info.has(Cpu::tF16C)) f |= HostFeature::F16C;
-    if (cpu_info.has(Cpu::tFMA)) f |= HostFeature::FMA;
-    if (cpu_info.has(Cpu::tAESNI)) f |= HostFeature::AES;
-    if (cpu_info.has(Cpu::tSHA)) f |= HostFeature::SHA;
-    if (cpu_info.has(Cpu::tPOPCNT)) f |= HostFeature::POPCNT;
-    if (cpu_info.has(Cpu::tBMI1)) f |= HostFeature::BMI1;
-    if (cpu_info.has(Cpu::tBMI2)) f |= HostFeature::BMI2;
-    if (cpu_info.has(Cpu::tLZCNT)) f |= HostFeature::LZCNT;
-    if (cpu_info.has(Cpu::tGFNI)) f |= HostFeature::GFNI;
-    if (cpu_info.has(Cpu::tWAITPKG)) f |= HostFeature::WAITPKG;
-    if (cpu_info.has(Cpu::tBMI2)) {
-        // BMI2 instructions such as pdep and pext have been very slow up until Zen 3.
-        // Check for Zen 3 or newer by its family (0x19).
-        // See also: https://en.wikichip.org/wiki/amd/cpuid
-        if (cpu_info.has(Cpu::tAMD)) {
-            std::array<u32, 4> data{};
-            cpu_info.getCpuid(1, data.data());
-            const u32 family_base = mcl::bit::get_bits<8, 11>(data[0]);
-            const u32 family_extended = mcl::bit::get_bits<20, 27>(data[0]);
-            const u32 family = family_base + family_extended;
-            if (family >= 0x19)
-                f |= HostFeature::FastBMI2;
-        } else {
-            f |= HostFeature::FastBMI2;
-        }
-    }
-    return f;
-#endif
-}
+
 HostFeature GetHostFeatures() {
-    static const HostFeature features = DetectHostFeatures();
+    static const HostFeature features = DetectHostFeatures();
+
     static const HostFeature features = DetectHostFeatures();
     return features;
 }
