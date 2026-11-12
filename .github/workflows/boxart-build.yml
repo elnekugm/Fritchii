@@ -4,10 +4,6 @@ name: boxart-build
 # Arch/CachyOS and any other distribution with glibc 2.39 or newer.
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - boxart-port
-      - integration/forks
 
 permissions:
   contents: read
