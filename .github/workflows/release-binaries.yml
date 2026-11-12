@@ -7,23 +7,9 @@ on:
         description: Publish the binaries as a GitHub release
         type: boolean
         default: true
-  push:
-    branches:
-      - nx2-experimental
-    # A binary only changes when build inputs change; docs-only pushes skip the build.
-    paths:
-      - "src/**"
-      # Test-only changes cannot change a binary: the build configures with BUILD_TESTING=OFF and
-      # YUZU_TESTS=OFF below, so a push that only touches src/tests has nothing to rebuild.
-      - "!src/tests/**"
-      - "CMakeLists.txt"
-      - "CMakeModules/**"
-      - "externals/**"
-      - "dist/**"
-      - "tools/**"
-      - ".patch/**"
-      - "cpmfile.json"
-      - ".github/workflows/release-binaries.yml"
+  # push triggered builds are now opt-in via workflow_dispatch or release tags;
+  # the job previously fired on every push to nx2-experimental with the same headSha
+  # as the diagnostic run, which is no desired behavior.
 
 permissions:
   contents: read

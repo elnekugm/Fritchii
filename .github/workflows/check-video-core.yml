@@ -65,13 +65,11 @@ jobs:
             -DUSE_DISCORD_PRESENCE=OFF \
             -DENABLE_WERROR=OFF \
             -DENABLE_QT=OFF \
-            -DUSE_CCACHE=ON \
-            -DCMAKE_C_COMPILER=clang \
-            -DCMAKE_CXX_COMPILER=clang++ \
-            -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld
+            -DUSE_CCACHE=ON
 
       - name: Build video_core only
         run: |
+          set -euo pipefail
           ccache --zero-stats
           cmake --build build/release --target video_core -- -k 0 2>&1 | tee build.log
           ccache --show-stats
