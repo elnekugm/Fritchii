@@ -18,7 +18,6 @@ namespace VideoCommon {
 
 /// Why the split's front waited for its back (EDEN_NX2_GPU_PROFILE counts each).
 enum class DrainSite : u32 {
-    Other,
     FetchDrain,     ///< EDEN_NX2_FETCH_DRAIN: before every entry
     Acquire,        ///< A semaphore acquire reads the value the back may release
     SemaphoreFlush, ///< The acquired semaphore is in the buffer cache
@@ -40,6 +39,12 @@ inline constexpr std::array<const char*, static_cast<size_t>(DrainSite::Count)> 
     "other",       "fetch drain",     "acquire",    "semaphore flush", "fence release",
     "list writers", "list sync",      "list flush", "macro dma read",  "macro dma flush",
     "gp sync fence", "map",           "front start", "front verify",  "macro dma check",
+};
+
+enum class Effect : u8 {
+    Unknown,
+    Gpu,
+    None,
 };
 
 // Splits the GPU thread in two (NX2_GPU_THREAD_SPLIT.md). The GPU thread (the front) takes the
@@ -327,7 +332,7 @@ private:
             last_visibility_position = write_position;
             break;
         case NextWrite::None:
-            if (engine->writer_work_mask[method]) {
+            if (engine->memory_write_mask[method]) {
                 last_visibility_position = write_position;
             } else {
                 last_untracked_write_position = write_position;
