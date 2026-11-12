@@ -155,10 +155,6 @@ void NPad::ControllerUpdate(Kernel::KernelCore& kernel, Core::HID::ControllerTri
         ControllerUpdate(kernel, Core::HID::ControllerTriggerType::Battery, controller_idx);
         return;
     }
-    const auto applet_resource = applet_resource_holder.applet_resource;
-    if (applet_resource == nullptr) {
-        return;
-    }
 
     // Only connection and battery changes are handled here. Motion and button updates arrive many
     // times a second, a phone's gyro from the first frame: before the applet resource is set,
