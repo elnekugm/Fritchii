@@ -7,6 +7,7 @@
 #pragma once
 
 #include <array>
+#include <bit>
 #include <optional>
 
 #include <sirit/sirit.h>
@@ -22,6 +23,9 @@
 namespace Shader::Backend::SPIRV {
 
 using Sirit::Id;
+
+// The clip distances a program writes, so the ones a fragment does not write keep their old value.
+static std::bitset<8> clip_distance_written;
 
 class VectorTypes {
 public:
