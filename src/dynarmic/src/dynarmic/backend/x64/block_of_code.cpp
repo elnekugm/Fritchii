@@ -22,6 +22,7 @@
 #endif
 
 #include <array>
+#include <cstdlib>
 #include <cstdlib>
 #include <cstring>
 
@@ -93,9 +94,11 @@ void ProtectMemory(const void* base, size_t size, bool is_executable) {
     const int mode = is_executable ? (PROT_READ | PROT_EXEC) : (PROT_READ | PROT_WRITE);
     mprotect(reinterpret_cast<void*>(roundAddr), size + (iaddr - roundAddr), mode);
 #    endif
+}
 }
 #endif
 
+HostFeature DetectHostFeatures() {
 HostFeature DetectHostFeatures() {
     HostFeature f{};
 #ifdef DYNARMIC_ENABLE_CPU_FEATURE_DETECTION
@@ -106,6 +109,20 @@ HostFeature DetectHostFeatures() {
     if (cpu_info.has(Cpu::tSSE42)) f |= HostFeature::SSE42;
     if (cpu_info.has(Cpu::tAVX)) f |= HostFeature::AVX;
     if (cpu_info.has(Cpu::tAVX2)) f |= HostFeature::AVX2;
+    // AVX-512 paths stay off unless EDEN_NX2_AVX512=1: Zen 4 players crashed in Mario Kart World
+    // seconds after boot by jumping to garbage, and one of these paths already miscompiled
+    // (VectorCountLeadingZeros16). Without them the JIT emits the AVX2 code every other tested CPU
+    // runs. Read when the first JIT starts, after nx2_switches.txt.
+    const char* avx512 = std::getenv("EDEN_NX2_AVX512");
+    if (avx512 != nullptr && avx512[0] == '1') {
+        if (cpu_info.has(Cpu::tAVX512F)) f |= HostFeature::AVX512F;
+        if (cpu_info.has(Cpu::tAVX512CD)) f |= HostFeature::AVX512CD;
+        if (cpu_info.has(Cpu::tAVX512VL)) f |= HostFeature::AVX512VL;
+        if (cpu_info.has(Cpu::tAVX512BW)) f |= HostFeature::AVX512BW;
+        if (cpu_info.has(Cpu::tAVX512DQ)) f |= HostFeature::AVX512DQ;
+        if (cpu_info.has(Cpu::tAVX512_BITALG)) f |= HostFeature::AVX512BITALG;
+        if (cpu_info.has(Cpu::tAVX512VBMI)) f |= HostFeature::AVX512VBMI;
+    }
     // AVX-512 paths stay off unless EDEN_NX2_AVX512=1: Zen 4 players crashed in Mario Kart World
     // seconds after boot by jumping to garbage, and one of these paths already miscompiled
     // (VectorCountLeadingZeros16). Without them the JIT emits the AVX2 code every other tested CPU
@@ -151,6 +168,7 @@ HostFeature DetectHostFeatures() {
 #endif
 }
 HostFeature GetHostFeatures() {
+    static const HostFeature features = DetectHostFeatures();
     static const HostFeature features = DetectHostFeatures();
     return features;
 }

@@ -365,9 +365,12 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             },
             [&](u64 address, u32 payload, u32 flags) {
                 if (!memory_manager.IsFullyMappedRange(address, sizeof(payload))) return false;
-                if (const auto device = memory_manager.GpuToCpuAddress(address)) {
-                    Tegra::Nx2NoteQmdReleaseTarget(*device);
-                }
+                if (const auto device = memory_manager.GpuToCpuAddress(address)) {
+
+                    Tegra::Nx2NoteQmdReleaseTarget(*device);
+
+                }
+
                 if (const auto device = memory_manager.GpuToCpuAddress(address)) {
                     Tegra::Nx2NoteQmdReleaseTarget(*device);
                 }
@@ -624,6 +627,25 @@ void KeplerCompute::DescribeNativeResources(const NativeQmdScheduler::Descriptor
                  static_cast<u32>(tic.g_type.Value()), static_cast<u32>(tic.b_type.Value()),
                  static_cast<u32>(tic.a_type.Value()));
     }
+    // Words in every bound constant buffer that name a real image of at least 256 pixels a side:
+    // where the program's inputs and output are when they are not at cbuf0+0x90/0xa0.
+    for (u32 slot = 0; slot < NumConstBuffers; ++slot) {
+        const auto& buffer = launch_description.const_buffer_config[slot];
+        if (!((launch_description.const_buffer_enable_mask.Value() >> slot) & 1)) continue;
+        const GPUVAddr address = (GPUVAddr{buffer.address_high} << 32) | buffer.address_low;
+        const u32 size = std::min<u32>(buffer.size.Value(), 0x800);
+        LOG_INFO(HW_GPU, "  cbuf{} {:#x} size {:#x}", slot, address, buffer.size.Value());
+        for (u32 offset = 0; offset + 4 <= size; offset += 4) {
+            const u32 handle = memory_manager.Read<u32>(address + offset);
+            const u32 tic_index = handle & 0xfffff;
+            if (handle == 0 || tic_index == 0 || tic_index > regs.tic.limit) continue;
+            const auto tic = GetTICEntry(tic_index);
+            if (tic.Address() == 0 || tic.Width() < 256 || tic.Height() < 256) continue;
+            LOG_INFO(HW_GPU, "    cbuf{}+{:#x} = {:#x}: tic {} address {:#x} {}x{} format {:#x} block {}",
+                     slot, offset, handle, tic_index, tic.Address(), tic.Width(), tic.Height(),
+                     static_cast<u32>(tic.format.Value()), tic.IsBlockLinear());
+        }
+    }
     // Words in every bound constant buffer that name a real image of at least 256 pixels a side:
     // where the program's inputs and output are when they are not at cbuf0+0x90/0xa0.
     for (u32 slot = 0; slot < NumConstBuffers; ++slot) {
@@ -687,6 +709,21 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
         if (tic_index > regs.tic.limit) return std::nullopt;
         return GetTICEntry(tic_index);
     };
+    const auto usable = [](const std::optional<Texture::TICEntry>& in,
+                           const std::optional<Texture::TICEntry>& out) {
+        return in && out && in->format == out->format && in->Address() != 0 &&
+               out->Address() != 0 && out->Width() > in->Width() && in->IsBlockLinear() &&
+               out->IsBlockLinear();
+    };
+    // Title 4's version 458752 keeps the pair at cbuf0+0x60 (1280x720) and +0x70 (1920x1080); the
+    // screen stayed the output's clear colour (blue) until camera mode skipped the pass.
+    std::optional<Texture::TICEntry> input, output;
+    for (const auto [in_offset, out_offset] : {std::pair{0x90U, 0xa0U}, std::pair{0x60U, 0x70U}}) {
+        input = image(in_offset);
+        output = image(out_offset);
+        if (usable(input, output)) break;
+    }
+    if (!usable(input, output))
     const auto usable = [](const std::optional<Texture::TICEntry>& in,
                            const std::optional<Texture::TICEntry>& out) {
         return in && out && in->format == out->format && in->Address() != 0 &&
