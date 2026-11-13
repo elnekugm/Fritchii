@@ -8,7 +8,6 @@
 
 #include <functional>
 #include <memory>
-#include <stop_token>
 
 #include "common/bit_field.h"
 #include "common/common_types.h"
@@ -17,9 +16,6 @@
 #include "video_core/framebuffer_config.h"
 #include "video_core/rasterizer_download_area.h"
 
-namespace Common {
-class Event;
-}
 namespace Core {
 class System;
 } // namespace Core
@@ -152,11 +148,6 @@ public:
     void FlushCommands();
     /// Synchronizes CPU writes with Host GPU memory.
     void InvalidateGPUCache();
-    /// Calls `callback` for each CPU write into GPU-written memory that InvalidateGPUCache has not
-    /// applied yet.
-    void ForEachPendingCpuWrite(const std::function<void(DAddr, size_t)>& callback);
-    /// Returns true when guest CPU writes to the range are collected but not yet applied.
-    [[nodiscard]] bool HasPendingCPUWrites(DAddr addr, u64 size);
     /// Signal the ending of command list.
     void OnCommandListEnd();
 
@@ -228,9 +219,6 @@ public:
 
     /// Whether a channel is suspended on a semaphore acquire (callable from any thread).
     [[nodiscard]] bool HasSuspendedChannels() const;
-    [[nodiscard]] bool IsIdleOnPendingSemaphore() const;
-    void SetPendingIdleWake(const std::shared_ptr<Common::Event>& event);
-    void WakePendingChannels();
 
     [[nodiscard]] bool UseNvdec() const;
 
@@ -250,7 +238,6 @@ public:
 
     /// Performs any additional necessary steps to shutdown GPU emulation.
     void NotifyShutdown();
-    [[nodiscard]] std::stop_token GetShutdownToken() const noexcept;
 
     /// Obtain the CPU Context
     void ObtainContext();
@@ -264,11 +251,6 @@ public:
     /// Notify rasterizer that any caches of the specified region should be flushed to Switch memory
     [[nodiscard]] VideoCore::RasterizerDownloadArea OnCPURead(DAddr addr, u64 size);
 
-    u64 ReadbackGeneration() const;
-    void InvalidateReadbackCache();
-    void BeginAsyncGuestWrite();
-    void EndAsyncGuestWrite();
-
     /// Notify rasterizer that any caches of the specified region should be flushed to Switch memory
     void FlushRegion(DAddr addr, u64 size);
 
@@ -277,11 +259,7 @@ public:
 
     /// RunInOrder for GPU memory maps: also done before the GPU thread reads the command lists
     /// submitted later (with the GPU split, on its front rather than its back).
-    /// [gpu_addr, gpu_addr + size) is the range of GPU addresses the map changes.
-    void MapInOrder(GPUVAddr gpu_addr, u64 size, std::function<void()>&& func);
-
-    /// Whether a MapInOrder over part of [gpu_addr, gpu_addr + size) is queued and not done yet.
-    [[nodiscard]] bool IsMapPending(GPUVAddr gpu_addr, u64 size) const;
+    void MapInOrder(std::function<void()>&& func);
 
     /// Notify rasterizer that any caches of the specified region should be invalidated
     void InvalidateRegion(DAddr addr, u64 size, bool preserve_gpu_writes = false);

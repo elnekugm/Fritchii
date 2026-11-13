@@ -6,9 +6,7 @@
 
 #pragma once
 
-#include <array>
 #include <limits>
-#include <memory>
 
 #include <boost/container/small_vector.hpp>
 
@@ -80,26 +78,17 @@ public:
     }
 
 private:
-    struct ViewKey {
+    struct BufferView {
         u32 offset;
         u32 size;
         VideoCore::Surface::PixelFormat format;
-        bool operator==(const ViewKey&) const = default;
-    };
-    struct ViewKeyHash {
-        size_t operator()(const ViewKey& key) const noexcept {
-            return ((static_cast<u64>(key.offset) << 32) ^ key.size ^
-                    (static_cast<u64>(key.format) << 20)) *
-                   0x9E3779B97F4A7C15ULL;
-        }
+        vk::BufferView handle;
     };
 
     const Device* device{};
     Scheduler* scheduler{};
     vk::Buffer buffer;
-    // One view per (offset, size, format); a buffer bound at many offsets collects many, and
-    // every texel buffer of every draw looks one up.
-    std::unordered_map<ViewKey, vk::BufferView, ViewKeyHash> views;
+    std::vector<BufferView> views;
     VideoCommon::UsageTracker tracker;
     VkDeviceAddress device_address{};
     u64 last_usage_tick{};
@@ -139,21 +128,9 @@ public:
     void Wait(u64 tick);
 
     /// Waits for a submitted tick without flushing: safe on threads other than the GPU thread.
-    void WaitSubmittedTick(u64 tick, u64 writer = 0);
-    void WaitSubmittedTickImpl(u64 tick);
+    void WaitSubmittedTick(u64 tick);
 
     void Finish();
-
-    /// EDEN_NX2_EXP49: Finish without the wait. Makes the copies so far visible to the host,
-    /// submits, and returns the tick to wait for (WaitForHostRead).
-    u64 SubmitForHostRead();
-
-    /// Waits for a SubmitForHostRead tick, on any thread.
-    void WaitForHostRead(u64 tick);
-
-    /// Whether the host GPU completed `tick`, asking it when the tick is submitted but not known
-    /// to be done.
-    [[nodiscard]] bool IsFreeNow(u64 tick);
 
     u64 GetDeviceLocalMemory() const;
 
@@ -165,9 +142,6 @@ public:
 
     u32 GetStorageBufferAlignment() const;
 
-    /// Largest range a storage buffer binding may have
-    u64 GetMaxStorageBufferRange() const;
-
     [[nodiscard]] StagingBufferRef UploadStagingBuffer(size_t size);
 
     [[nodiscard]] StagingBufferRef DownloadStagingBuffer(size_t size, bool deferred = false);
@@ -175,7 +149,6 @@ public:
     bool CanReorderUpload(const Buffer& buffer, std::span<const VideoCommon::BufferCopy> copies);
 
     void FreeDeferredStagingBuffer(StagingBufferRef& ref);
-    void FreeCompletedDeferredStagingBuffer(StagingBufferRef& ref);
 
     void PreCopyBarrier();
 
@@ -339,8 +312,6 @@ private:
     u32 vertex_repack_mask{};
     bool static_vertex_repack{};
     QuadIndexedPass quad_index_pass;
-    QuadIndirectPass quad_indirect_pass;
-    std::pair<VkBuffer, VkDeviceSize> array_indirect_args{};
 
     MultiRangeBufferCache multi_range_buffers;
     boost::container::small_vector<MultiRangeSource, 16> multi_range_sources;
@@ -350,13 +321,6 @@ private:
 
     bool limit_dynamic_storage_buffers = false;
     u32 max_dynamic_storage_buffers = (std::numeric_limits<u32>::max)();
-
-    /// The index buffer BindIndexBuffer recorded last, at scheduler recording epoch bound_index_epoch.
-    VkBuffer bound_index_buffer = VK_NULL_HANDLE;
-    VkDeviceSize bound_index_offset = 0;
-    VkIndexType bound_index_type = VK_INDEX_TYPE_UINT32;
-    u64 bound_index_epoch = 0;
-    bool bound_index_valid = false;
 };
 
 struct BufferCacheParams {
