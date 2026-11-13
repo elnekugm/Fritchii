@@ -126,6 +126,8 @@ struct SynchState final {
     CommandQueue queue;
     u64 last_fence{};
     std::atomic<u64> signaled_fence{};
+    std::atomic<u64> published_work_sequence{};
+    std::atomic<bool> shutting_down{};
     std::condition_variable_any cv;
     Common::Event pending_wake;
     std::atomic<bool> idle_on_pending{};

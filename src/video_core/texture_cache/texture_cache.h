@@ -41,6 +41,8 @@
 #include "video_core/texture_cache/texture_cache_base.h"
 #include "video_core/texture_cache/util.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_debug_control.h"
+#include "video_core/cache_tracking_diagnostics.h"
 #include "video_core/churn_counters.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/render_trace.h"
@@ -2486,15 +2488,29 @@ std::pair<typename P::ImageView*, bool> TextureCache<P>::TryFindFramebufferImage
         if (it == page_table.end()) {
             return;
         }
-        if (image.image_view_ids.empty()) {
-            continue;
-        }
-        if (!VideoCore::Surface::IsViewCompatible(image.info.format, view_format, false, true)) {
-            static u32 rejected_alias_count{};
-            if (NativeDrawDiagnostics() && rejected_alias_count++ < 8) {
-                LOG_WARNING(HW_GPU, "Ignoring incompatible framebuffer alias: address={:#x}, image={}, view={}",
-                            cpu_addr, image.info.format, view_format);
+        for (const ImageMapId map_id : it->second) {
+            const ImageMapView& map = slot_map_views[map_id];
+            const ImageBase& image = slot_images[map.image_id];
+            if (!map.Overlaps(address, 1) || (!physical_alias && image.cpu_addr != address)) {
+                continue;
             }
+            if (image.image_view_ids.empty()) {
+                continue;
+            }
+            if (!VideoCore::Surface::IsViewCompatible(image.info.format, view_format, false,
+                                                       true)) {
+                static u32 rejected_alias_count{};
+                if (NativeDrawDiagnostics() && rejected_alias_count++ < 8) {
+                    LOG_WARNING(HW_GPU,
+                                "Ignoring incompatible framebuffer alias: address={:#x}, image={}, view={}",
+                                address, image.info.format, view_format);
+                }
+                continue;
+            }
+            if (std::ranges::find(valid_image_ids, map.image_id) == valid_image_ids.end()) {
+                valid_image_ids.push_back(map.image_id);
+            }
+            ++traced_candidates;
         }
     };
     add_candidates(cpu_addr, false);
@@ -2527,20 +2543,6 @@ std::pair<typename P::ImageView*, bool> TextureCache<P>::TryFindFramebufferImage
                               slot_images[image_id].IsRescaled());
     };
 
-    if (g_yo.enabled) {
-        std::string desc;
-        for (const ImageId id : valid_image_ids) {
-            const auto& img = slot_images[id];
-            desc += fmt::format("[cpu={:#x} gpu={:#x} tick={} gmod={} cmod={} {}x{} fmt{}] ",
-                                img.cpu_addr, img.gpu_addr, img.modification_tick,
-                                True(img.flags & ImageFlagBits::GpuModified),
-                                True(img.flags & ImageFlagBits::CpuModified),
-                                img.info.size.width, img.info.size.height,
-                                static_cast<u32>(img.info.format));
-        }
-        g_yo.pick = fmt::format("req={:#x} cands={} {}", cpu_addr, valid_image_ids.size(), desc);
-        g_yo.pick_cpu = valid_image_ids.size() == 1 ? slot_images[valid_image_ids.front()].cpu_addr : 0;
-    }
     if (valid_image_ids.size() == 1) [[likely]] {
         return GetImageViewForFramebuffer(valid_image_ids.front());
     }

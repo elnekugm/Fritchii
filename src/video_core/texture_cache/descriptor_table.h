@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <span>
 #include <vector>
 
 #include "common/alignment.h"
@@ -19,7 +20,7 @@
 
 namespace VideoCommon {
 
-template <typename T>
+template <typename T, typename Id = u32>
 class DescriptorTable {
 public:
     [[nodiscard]] bool Synchronize(GPUVAddr gpu_addr, u32 limit) noexcept {
@@ -43,6 +44,11 @@ public:
             return;
         }
         invalidated = true;
+    }
+
+    std::span<Id> LiveBoundIds() noexcept {
+        return std::span{bound_ids}.first(
+            (std::min)(bound_ids.size(), size_t{current_limit} + 1));
     }
 
     [[nodiscard]] std::pair<T, bool> Read(Tegra::MemoryManager const& gpu_memory, u32 index) noexcept {
@@ -79,10 +85,12 @@ public:
         invalidated = false;
         //
         descriptors.resize(num_descriptors);
+        bound_ids.resize(num_descriptors, Id{0});
     }
 
     std::vector<u64> read_descriptors;
     std::vector<T> descriptors;
+    std::vector<Id> bound_ids;
     GPUVAddr current_gpu_addr{};
     u32 current_limit{};
     bool invalidated{}; ///< read_descriptors is to be cleared before the next read

@@ -3433,8 +3433,7 @@ private:
     void FrontReportSameWrites(FrontState& state);
     void FrontNoteMemoryWrite(VideoCommon::GpuSplit& split, FrontState& state, u32 method,
                               const u32* words, u32 count);
-    void FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& state, u32 macro, u32 method,
-                      u32 count);
+    void FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& state, u32 method, u32 count);
     /// Tells the split a report just sent releases a known payload (GpuSplit::NoteRelease).
     void FrontNoteRelease(VideoCommon::GpuSplit& split, const FrontState& fs, u32 query) const;
     /// The memory `amount` words of `method` write, if known (constant buffer uploads, reports).

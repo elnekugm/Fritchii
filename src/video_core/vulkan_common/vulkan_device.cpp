@@ -1408,7 +1408,7 @@ bool Device::GetSuitability(bool requires_swapchain) {
     // Retrieve subgroup properties.
     properties.subgroup_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
     SetNext(next, properties.subgroup_properties);
-    if (extensions.cooperative_matrix) {
+    if (extensions.cooperative_matrix_nv) {
         properties.cooperative_matrix.sType =
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_PROPERTIES_NV;
         SetNext(next, properties.cooperative_matrix);
@@ -1456,9 +1456,9 @@ bool Device::GetSuitability(bool requires_swapchain) {
         SetNext(next, properties.custom_border_color);
     }
     if (extensions.cooperative_matrix) {
-        properties.cooperative_matrix.sType =
+        properties.cooperative_matrix_khr.sType =
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
-        SetNext(next, properties.cooperative_matrix);
+        SetNext(next, properties.cooperative_matrix_khr);
     }
     if (supported_extensions.contains(VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME)) {
         properties.integer_dot_product.sType =
@@ -1475,7 +1475,7 @@ bool Device::GetSuitability(bool requires_swapchain) {
     // Perform the property fetch.
     physical.GetProperties2(properties2);
 
-    if (extensions.cooperative_matrix && dld.vkGetPhysicalDeviceCooperativeMatrixPropertiesNV &&
+    if (extensions.cooperative_matrix_nv && dld.vkGetPhysicalDeviceCooperativeMatrixPropertiesNV &&
         (properties.cooperative_matrix.cooperativeMatrixSupportedStages &
          VK_SHADER_STAGE_COMPUTE_BIT)) {
         u32 count{};
@@ -1872,7 +1872,7 @@ void Device::RemoveUnsuitableExtensions() {
         const bool usable = extensions.cooperative_matrix && !emulated_amd_matrices &&
                             !no_matrix_units && !forced_off &&
                             features.cooperative_matrix.cooperativeMatrix &&
-                            (properties.cooperative_matrix.cooperativeMatrixSupportedStages &
+                            (properties.cooperative_matrix_khr.cooperativeMatrixSupportedStages &
                              VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
                             features.shader_float16_int8.shaderFloat16 &&
                             features.vulkan_memory_model.vulkanMemoryModel &&

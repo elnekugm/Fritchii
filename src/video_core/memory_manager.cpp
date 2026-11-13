@@ -11,6 +11,10 @@
 #include <cstring>
 #include <atomic>
 #include <thread>
+#if (defined(__linux__) || defined(__APPLE__)) && __has_include(<execinfo.h>)
+#include <dlfcn.h>
+#include <execinfo.h>
+#endif
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -1054,19 +1058,7 @@ size_t MemoryManager::GetMemoryLayoutSize(GPUVAddr gpu_addr,
 
 size_t MemoryManager::GetMemoryLayoutSizeUncached(GPUVAddr gpu_addr) const {
     std::unique_lock<std::mutex> lock(guard);
-    const auto key = static_cast<s64>(gpu_addr);
-    if (key < 0) {
-        return 0;
-    }
-    const auto segment = kind_map.GetSegment(key);
-    cached = {
-        .owner = this,
-        .generation = kind_generation.load(std::memory_order_relaxed),
-        .start = static_cast<GPUVAddr>(std::max<s64>(segment.start, 0)),
-        .end = static_cast<GPUVAddr>(segment.end),
-        .null = segment.value == PTEKind::INVALID,
-    };
-    return cached.null ? 0 : static_cast<size_t>(cached.end - gpu_addr);
+    return kind_map.GetContinuousSizeFrom(gpu_addr);
 }
 
 void MemoryManager::InvalidateRegion(GPUVAddr gpu_addr, size_t size,

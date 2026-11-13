@@ -102,6 +102,8 @@ public:
                      VideoCommon::CacheType which = VideoCommon::CacheType::All) override;
     void BeginFlushBatch() override;
     void EndFlushBatch() override;
+    bool HasPendingQueries(DAddr addr, u64 size) override;
+    void PrepareRegionWrite(DAddr addr, u64 size, VideoCommon::CacheType which) override;
     bool MustFlushRegion(DAddr addr, u64 size,
                          VideoCommon::CacheType which = VideoCommon::CacheType::All) override;
     VideoCore::RasterizerDownloadArea GetFlushArea(DAddr addr, u64 size) override;

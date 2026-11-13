@@ -97,6 +97,19 @@ public:
     virtual void BeginFlushBatch() {}
     virtual void EndFlushBatch() {}
 
+    virtual void FinishRead(DAddr addr, u64 size) {
+        FlushRegion(addr, size);
+        WaitForIdle();
+    }
+    virtual void FlushRegionForRead(DAddr addr, u64 size) {
+        FlushRegion(addr, size);
+    }
+    virtual bool HasPendingQueries(DAddr addr, u64 size) { return false; }
+    virtual void FlushQueryResults(DAddr addr, u64 size) {
+        FlushRegion(addr, size, VideoCommon::CacheType::QueryCache);
+    }
+    virtual void PrepareRegionWrite(DAddr addr, u64 size, VideoCommon::CacheType which) {}
+
     /// Check if the the specified memory area requires flushing to CPU Memory.
     virtual bool MustFlushRegion(DAddr addr, u64 size,
                                  VideoCommon::CacheType which = VideoCommon::CacheType::All) = 0;
@@ -117,6 +130,12 @@ public:
 
     /// Notify rasterizer that any caches of the specified region are desync with guest
     virtual void OnCacheInvalidation(PAddr addr, u64 size) = 0;
+
+    virtual void OnCacheInvalidations(std::span<const std::pair<DAddr, u64>> writes) {
+        for (const auto& [addr, size] : writes) {
+            OnCacheInvalidation(addr, size);
+        }
+    }
 
     /// A guest CPU write to GPU-written memory, held back until now (InvalidateGPUCache, on the
     /// GPU thread): only those bytes changed.

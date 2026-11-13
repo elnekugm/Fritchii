@@ -368,7 +368,8 @@ u64 ThreadManager::PushCommand(CommandData&& command_data, bool block, bool is_a
             Common::Nx2Timeline::Instant("submit command", {"seq", fence});
         }
     }
-    state.queue.EmplaceWait(std::move(command_data), fence, block);
+    state.queue.EmplaceWait(std::move(command_data), fence, block,
+                            state.published_work_sequence.load(std::memory_order_acquire));
     state.pending_wake.Set();
 
     lk.unlock();
@@ -384,6 +385,7 @@ u64 ThreadManager::PushCommand(CommandData&& command_data, bool block, bool is_a
 }
 
 void ThreadManager::NotifyShutdown() {
+    state.shutting_down.store(true, std::memory_order_release);
     if (thread.joinable()) {
         thread.request_stop();
         state.pending_wake.Set();

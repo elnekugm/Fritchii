@@ -124,7 +124,7 @@ VK_DEFINE_HANDLE(VmaPool)
     EXTENSION(NV, GEOMETRY_SHADER_PASSTHROUGH, geometry_shader_passthrough)                        \
     EXTENSION(NV, VIEWPORT_ARRAY2, viewport_array2)                                                \
     EXTENSION(NV, VIEWPORT_SWIZZLE, viewport_swizzle)                                              \
-    EXTENSION(NV, COOPERATIVE_MATRIX, cooperative_matrix)                                             \
+    EXTENSION(NV, COOPERATIVE_MATRIX, cooperative_matrix_nv)                                          \
     EXTENSION(EXT, FILTER_CUBIC, filter_cubic)                                                         \
     EXTENSION(IMG, FILTER_CUBIC, filter_cubic_img)                                                 \
     EXTENSION(QCOM, FILTER_CUBIC_WEIGHTS, filter_cubic_weights)
@@ -852,7 +852,7 @@ FN_MAX_LIMIT_LIST
 
     /// Returns true if the device supports VK_NV_cooperative_matrix (used for tensor ops).
     bool IsExtCooperativeMatrixSupported() const {
-        return extensions.cooperative_matrix &&
+        return extensions.cooperative_matrix_nv &&
                features.cooperative_matrix_features.cooperativeMatrix &&
                IsFloat16Supported() && SupportedSpirvVersion() >= 0x00010400 &&
                cooperative_matrix_shape_supported &&
@@ -1421,7 +1421,7 @@ private:
         VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT graphics_pipeline_library{};
         VkPhysicalDeviceDepthStencilResolveProperties depth_stencil_resolve{};
         VkPhysicalDeviceCustomBorderColorPropertiesEXT custom_border_color{};
-        VkPhysicalDeviceCooperativeMatrixPropertiesKHR cooperative_matrix{};
+        VkPhysicalDeviceCooperativeMatrixPropertiesKHR cooperative_matrix_khr{};
         VkPhysicalDeviceShaderIntegerDotProductProperties integer_dot_product{};
 
         VkPhysicalDeviceProperties properties{};

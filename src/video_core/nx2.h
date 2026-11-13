@@ -15,6 +15,7 @@
 
 #include "common/common_types.h"
 #include "common/nx2_gpu_write_listener.h"
+#include "common/thread.h"
 #include "video_core/nx2_frame_fence.h"
 
 namespace Tegra {
@@ -28,6 +29,14 @@ inline std::atomic<u64> g_nx2_program_id{0};
 // Pokopia reads GPU-written data through a path the buffer cache does not observe.
 inline bool Nx2NeedsBufferDownloads() {
     return g_nx2_program_id.load(std::memory_order_relaxed) == 0x0400A3A01EE4C000ULL;
+}
+
+inline bool Nx2AcquireQueuedEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_ACQUIRE_QUEUED");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
 }
 
 // Device pages the GPU has written through the buffer cache (shader stores, copies), ever. Title 1
@@ -544,6 +553,11 @@ public:
         return waiters;
     }
 
+    void SetWakeEvent(Common::Event* event) {
+        std::scoped_lock lk{mutex};
+        wake_event = event;
+    }
+
     void Add(const void* owner, u64 device_address, u32 value, u32 operation) {
         std::scoped_lock lk{mutex};
         std::erase_if(waiters, [owner](const Waiter& w) { return w.owner == owner; });
@@ -576,11 +590,18 @@ public:
         if (count.load(std::memory_order_acquire) == 0) {
             return;
         }
-        std::scoped_lock lk{mutex};
-        for (auto& w : waiters) {
-            if (w.address == device_address && !w.latched && Matches(w, value)) {
-                w.latched = true;
+        Common::Event* to_wake = nullptr;
+        {
+            std::scoped_lock lk{mutex};
+            for (auto& w : waiters) {
+                if (w.address == device_address && !w.latched && Matches(w, value)) {
+                    w.latched = true;
+                    to_wake = wake_event;
+                }
             }
+        }
+        if (to_wake != nullptr) {
+            to_wake->Set();
         }
     }
 
@@ -609,6 +630,7 @@ private:
     std::mutex mutex;
     std::vector<Waiter> waiters;
     std::atomic<size_t> count{};
+    Common::Event* wake_event{};
 };
 
 // Render-frame clock (EDEN_NX2_RENDER_CLOCK=1, fable_answer_16 1b and 17): one count per guest

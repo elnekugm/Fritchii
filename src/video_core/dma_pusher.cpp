@@ -291,6 +291,7 @@ bool DmaPusher::Step() {
         }
         bool gpu_written = IsGpuWrittenCommands(dma_state.dma_get,
                                                  size_t{header.size} * sizeof(u32));
+        bool takes_gpu_parameters = false;
         if (subchannels[dma_state.subchannel] && dma_state.method_count) {
             const auto engine = subchannel_type[dma_state.subchannel];
             const bool kepler_payload = engine == Engines::EngineTypes::KeplerCompute && dma_state.method == ComputeInline && dma_state.non_incrementing;
@@ -601,15 +602,7 @@ static bool RecordParsedEntries() {
 
 size_t DmaPusher::ProcessCommands(std::span<const CommandHeader> commands, size_t word_offset) {
     RecordCapture("execute-begin", commands, word_offset);
-#ifdef ARCHITECTURE_x86_64
-    const bool trace_bind = !TuringMacroJit::RtDump::Directory().empty();
-#endif
     for (size_t index = 0; index < commands.size();) {
-#ifdef ARCHITECTURE_x86_64
-        if (trace_bind) {
-            TraceBindPacket(*this, commands, index, word_offset);
-        }
-#endif
         // Data word of methods command
         if (dma_state.method_count && dma_state.non_incrementing) {
             auto const& command_header = commands[index]; //must ref (MUltiMethod re)
@@ -842,16 +835,6 @@ void DmaPusher::CallMethod(u32 argument) {
             VideoCommon::Nx2Profile::Scope method_scope{VideoCommon::Nx2Profile::Zone::Method};
             subchannel->ConsumeSink(system);
             subchannel->current_dma_segment = dma_state.dma_get + dma_state.dma_word_offset;
-#ifdef ARCHITECTURE_x86_64
-            if (dma_state.method == NativeBindMethod &&
-                subchannel_type[dma_state.subchannel] == Engines::EngineTypes::Maxwell3D) {
-                auto& maxwell3d = *static_cast<Engines::Maxwell3D*>(subchannel);
-                if (maxwell3d.GetNativeMacroEngine().native_turing) {
-                    DumpInvalidNativeBind(*this, maxwell3d.regs.load_mme.start_address_ptr,
-                                          maxwell3d.GetNativeMacroPositions().size(), {&argument, 1});
-                }
-            }
-#endif
             subchannel->CallMethod(system, dma_state.method, argument, dma_state.is_last_call);
         }
     }
@@ -929,16 +912,6 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
         VideoCommon::Nx2Profile::Scope method_scope{VideoCommon::Nx2Profile::Zone::Method};
         subchannel->ConsumeSink(system);
         subchannel->current_dma_segment = dma_state.dma_get + dma_state.dma_word_offset;
-#ifdef ARCHITECTURE_x86_64
-        if (dma_state.method == NativeBindMethod &&
-            subchannel_type[dma_state.subchannel] == Engines::EngineTypes::Maxwell3D) {
-            auto& maxwell3d = *static_cast<Engines::Maxwell3D*>(subchannel);
-            if (maxwell3d.GetNativeMacroEngine().native_turing) {
-                DumpInvalidNativeBind(*this, maxwell3d.regs.load_mme.start_address_ptr,
-                                      maxwell3d.GetNativeMacroPositions().size(), {base_start, num_methods});
-            }
-        }
-#endif
         subchannel->CallMultiMethod(system, dma_state.method, base_start, num_methods, dma_state.method_count);
     }
 }

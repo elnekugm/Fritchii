@@ -36,6 +36,10 @@
 #include "video_core/query_cache/query_stream.h"
 #include "video_core/query_cache/types.h"
 
+namespace VideoCore {
+inline thread_local bool g_signaling_query_report_fence{};
+}
+
 namespace VideoCommon {
 
 using Maxwell = Tegra::Engines::Maxwell3D;

@@ -522,6 +522,24 @@ bool GpuSplit::WaitForSync() {
     return WaitFor(std::min(last_sync_position, write_position), DrainSite::ListSync);
 }
 
+void GpuSplit::PinCurrentThread(const char* variable) {
+    const char* const value = std::getenv(variable);
+    if (value == nullptr || *value == '\0') {
+        return;
+    }
+    const unsigned long cpu = std::strtoul(value, nullptr, 10);
+    if (cpu >= 64) {
+        return;
+    }
+#ifdef _WIN32
+    if (SetThreadAffinityMask(GetCurrentThread(), DWORD_PTR{1} << cpu) != 0) {
+        LOG_INFO(HW_GPU, "{}: thread pinned to logical CPU {}", variable, cpu);
+    } else {
+        LOG_WARNING(HW_GPU, "{}: pinning to logical CPU {} failed", variable, cpu);
+    }
+#endif
+}
+
 bool GpuSplit::WaitForSyncedWriters(DrainSite site) {
     return WaitFor(std::min({last_writer_position, last_sync_position, write_position}), site);
 }

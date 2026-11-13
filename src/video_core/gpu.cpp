@@ -20,6 +20,7 @@
 #include "common/settings_enums.h"
 #include "core/core.h"
 #include "core/core_timing.h"
+#include "core/hardware_properties.h"
 #include "core/gpu_dirty_memory_manager.h"
 #include "core/frontend/emu_window.h"
 #include "core/frontend/graphics_context.h"
@@ -331,7 +332,7 @@ struct GPU::Impl {
             const char* value = std::getenv("EDEN_NX2_UNSAFE_PREEMPTIVE_READS");
             return value != nullptr && std::strcmp(value, "1") == 0;
         }();
-        if ((unsafe_preemptive_reads || Settings::values.preemptive_cpu_reads) && g_nx2_ampere.load(std::memory_order_relaxed) &&
+        if (unsafe_preemptive_reads && g_nx2_ampere.load(std::memory_order_relaxed) &&
             system.GetCurrentHostThreadID() < Core::Hardware::NUM_CPU_CORES) {
             auto area = renderer->ReadRasterizer()->GetFlushArea(addr, size);
             if (area.preemtive) {
@@ -344,6 +345,7 @@ struct GPU::Impl {
                 return area;
             }
         }
+        auto raster_area = renderer->ReadRasterizer()->GetFlushArea(addr, size);
         namespace AsyncReadback = VideoCore::AsyncReadback;
         const u64 request = AsyncReadback::Now();
         const u64 area_size = raster_area.end_address - raster_area.start_address;

@@ -1472,6 +1472,7 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
                 // Turing MME memory reads (methods 0x550 SET_MME_MEM_ADDRESS_A/B, 0x558 data RAM
                 // address, 0x55c MME_DMA_READ into data RAM, 0x560 MME_DMA_READ_FIFOED into
                 // the load FIFO, which the macro then reads after a load barrier).
+                constexpr u32 MemAddressA = 0x154, MemAddressB = 0x155, DataRamAddress = 0x156;
                 constexpr u32 DmaRead = 0x157, DmaReadFifoed = 0x158;
                 if (address == DmaRead || address == DmaReadFifoed) {
                     read_memory = true;

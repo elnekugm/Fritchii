@@ -226,6 +226,7 @@ public:
     /// `segment`: the engine's current_dma_segment for the call, when the engine reads it.
     /// `effect`: what the entry may write (SplitWriteTracker; unknown unless the caller knows).
     using Effect = SplitWriteTracker::Effect;
+    static constexpr Effect FastDrawNeutral = Effect::None;
     void Method(Tegra::Engines::EngineInterface* engine, u32 method, u32 argument, bool is_last,
                 const GPUVAddr* segment, Effect effect = Effect::Unknown) {
         SelectEngine(engine);
@@ -670,6 +671,9 @@ public:
     /// Work that writes the device range [begin, begin + size) was just sent (an inline upload, a
     /// report, a semaphore release). size ~0 means an unknown range.
     void NoteMemoryWrite(u64 begin, u64 size, const char* what = "unknown") {
+        last_memory_writer_position = write_position;
+        last_memory_write_position = write_position;
+        last_memory_write_method = DeferredWrite;
         if (write_stamps) [[unlikely]] {
             if (size == ~u64{0}) {
                 unknown_write_position = write_position;
@@ -684,9 +688,17 @@ public:
         write.position = write_position;
         write.words = 0;
     }
+    void NoteMemoryWriteRange(GPUVAddr begin, GPUVAddr end) {
+        if (end > begin) {
+            NoteMemoryWrite(begin, end - begin, "semaphore");
+        }
+    }
     /// As NoteMemoryWrite, for a write whose words the front knows (a fence release payload,
     /// linear inline upload data): reads overlay them instead of waiting.
     void NoteMemoryWriteData(u64 begin, const u32* data, u32 words) {
+        last_memory_writer_position = write_position;
+        last_memory_write_position = write_position;
+        last_memory_write_method = DeferredWrite;
         if (write_stamps) [[unlikely]] {
             StampWrite(begin, begin + u64{words} * sizeof(u32), false);
         }
@@ -760,6 +772,11 @@ public:
     }
     /// Deferred work that can write memory was just sent (puller semaphore releases, maps).
     void NoteMemoryWrite() {
+        last_memory_write_position = write_position;
+        last_memory_write_method = DeferredWrite;
+    }
+    void NoteVisibilityPoint() {
+        NoteUnrangedWriter();
         last_memory_write_position = write_position;
         last_memory_write_method = DeferredWrite;
     }
@@ -916,6 +933,26 @@ public:
         queued_releases[(device_address >> 2) % queued_releases.size()] =
             {write_position, device_address, payload};
     }
+    template <typename Meets>
+    [[nodiscard]] bool QueuedReleaseMeets(u64 device_address, Meets&& meets) const {
+        const QueuedRelease& release = queued_releases[(device_address >> 2) % queued_releases.size()];
+        return release.device == device_address && release.position != 0 &&
+               consumed.load(std::memory_order_acquire) < release.position &&
+               release.position <= write_position && meets(release.payload);
+    }
+    static constexpr size_t SemSlot(u64 address) noexcept {
+        return static_cast<size_t>(((address >> 2) ^ (address >> 10) ^ (address >> 18)) & 63U);
+    }
+    void NoteSemaphoreWrite(u64 address) noexcept {
+        semaphore_write_positions[SemSlot(address)] = write_position;
+        last_release_position = write_position;
+    }
+    [[nodiscard]] u64 LastReleasePosition() const noexcept { return last_release_position; }
+    bool WaitForSemaphore(u64 address, DrainSite site = DrainSite::Acquire) {
+        return WaitFor((std::min)(semaphore_write_positions[SemSlot(address)], write_position),
+                       site);
+    }
+    static void PinCurrentThread(const char* variable);
 private:
     friend struct GpuSplitTestAccess;
 
@@ -1126,6 +1163,8 @@ private:
     static size_t MaxRangedWrites();
     std::deque<RangedWrite> ranged_writes;
     std::array<QueuedRelease, 64> queued_releases{};
+    std::array<u64, 64> semaphore_write_positions{};
+    u64 last_release_position{};
     /// Drops consumed ranged writes; returns the position a memory read of [begin, end) waits
     /// for and the method behind it.
     u64 MemoryWriterTarget(u64 done, GPUVAddr begin, GPUVAddr end, u32& target_method);

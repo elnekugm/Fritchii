@@ -96,6 +96,8 @@ public:
         // at each command list end): read once, every decision of this fence uses one value.
         const bool level_high = Settings::IsGPULevelHigh();
         const bool delay_fence = Settings::IsGPUFenceBehaviorDefault() ? level_high : Settings::IsGPUFenceBehaviorBalanced() || Settings::IsGPUFenceBehaviorAccurate();
+        const u8 fence_trims = static_cast<u8>(VideoCore::Nx2Debug::Experiment(28));
+        const bool trim = (fence_trims & 1) != 0;
         if constexpr (!can_async_check) {
             TryReleasePendingFences<false>();
         }
@@ -127,7 +129,7 @@ public:
                     SubmitDeferredWork();
                 }
                 rasterizer.InvalidateGPUCache();
-                return;
+                return true;
             }
         }
         TFence new_fence = CreateFence(!should_flush);

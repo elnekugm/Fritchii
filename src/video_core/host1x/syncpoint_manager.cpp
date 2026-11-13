@@ -38,7 +38,7 @@ SyncpointManager::ActionHandle SyncpointManager::RegisterAction(
         return {};
     }
 
-    std::scoped_lock lk(guard);
+    std::unique_lock lk(guard);
     if (syncpoint.load(std::memory_order_relaxed) >= expected_value) {
         action();
         return {};
@@ -58,7 +58,7 @@ void SyncpointManager::DeregisterAction(std::list<RegisteredAction>& action_stor
     if (handle == 0) {
         return;
     }
-    std::scoped_lock lk(guard);
+    std::unique_lock lk(guard);
 
     for (auto it = action_storage.begin(); it != action_storage.end(); it++) {
         if (it->id == handle) {

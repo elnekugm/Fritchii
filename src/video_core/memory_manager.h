@@ -310,6 +310,7 @@ private:
 
     Common::MultiLevelPageTable<u32> page_table;
     Common::RangeMap<GPUVAddr, PTEKind> kind_map;
+    std::atomic<u64> kind_generation{};
     Common::SparseLargeVector<u32> big_page_table_dev;
 
     std::vector<u64> big_page_continuous;
