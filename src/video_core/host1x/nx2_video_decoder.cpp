@@ -37,23 +37,6 @@ namespace Tegra::Host1x {
 
 namespace {
 
-std::optional<NvdecCommon::VideoCodec> CodecFromMime(std::string_view mime) {
-    if (mime.find("vp9") != std::string_view::npos) {
-        return NvdecCommon::VideoCodec::VP9;
-    }
-    if (mime.find("vp8") != std::string_view::npos) {
-        return NvdecCommon::VideoCodec::VP8;
-    }
-    // "video/av01" or "video/av1". FFmpeg decodes AV1 with libdav1d.
-    if (mime.find("av01") != std::string_view::npos || mime.find("av1") != std::string_view::npos) {
-        return NvdecCommon::VideoCodec::AV1;
-    }
-    if (mime.find("avc") != std::string_view::npos || mime.find("264") != std::string_view::npos) {
-        return NvdecCommon::VideoCodec::H264;
-    }
-    return std::nullopt;
-}
-
 #if defined(_MSC_VER)
 int FaultFilter(unsigned long code, unsigned long* out) {
     switch (code) {
@@ -140,6 +123,7 @@ bool IsH264Stream(std::span<const u8> data) {
 struct Nx2VideoDecoder::Impl {
     std::string name;
     std::optional<NvdecCommon::VideoCodec> codec;
+    std::vector<u8> extradata;
     // Pointers, not values: a context that faulted is abandoned, never freed (its state is
     // unknown, and freeing it calls into the same driver).
     std::unique_ptr<FFmpeg::Decoder> decoder;
@@ -189,7 +173,7 @@ struct Nx2VideoDecoder::Impl {
         }
         bool opened = false;
         unsigned long code = 0;
-        if (!Guarded([&] { opened = context->OpenContext(*decoder); }, code)) {
+        if (!Guarded([&] { opened = context->OpenContext(*decoder, extradata); }, code)) {
             LOG_CRITICAL(HW_GPU, "nx2 video: opening \"{}\" faulted ({:#x})", name, code);
             Abandon();
             return false;
@@ -234,12 +218,12 @@ struct Nx2VideoDecoder::Impl {
 
     /// Sends one packet and collects the pictures it completes. False when the decoder was
     /// replaced (a fault, or a failing GPU decoder): the packet should go to the new one.
-    bool SendReceive(const FFmpeg::Packet& packet, std::vector<Nx2Picture>& pictures) {
+    bool SendReceive(const FFmpeg::Packet& input_packet, std::vector<Nx2Picture>& pictures) {
         const size_t first = pictures.size();
         unsigned long code = 0;
         if (!Guarded(
                 [&] {
-                    context->SendPacket(packet);
+                    context->SendPacket(input_packet);
                     Receive(pictures);
                 },
                 code)) {
@@ -292,32 +276,26 @@ Nx2VideoDecoder::Nx2VideoDecoder(std::span<const u8> configuration) : impl{std::
     }
     impl->codec = cfg->codec;
     impl->extradata = cfg->extradata;
-    if (!impl->codec) {
-        LOG_ERROR(HW_GPU, "nx2 video: no decoder for codec");
-        return;
-    }
-    // Continue with existing logic using mime string representation? The rest of constructor expects mime string.
-    // We need to reconstruct mime string from codec.
-    // For simplicity, set impl->name accordingly.
-    // We'll use a placeholder mapping.
-    switch (impl->codec) {
+    switch (*impl->codec) {
         case NvdecCommon::VideoCodec::H264:
             impl->name = "video/avc";
             break;
-        case NvdecCommon::VideoCodec::HEVC:
+        case NvdecCommon::VideoCodec::H265:
             impl->name = "video/hevc";
             break;
-        default:
-            impl->name = "video/unknown";
+        case NvdecCommon::VideoCodec::VP8:
+            impl->name = "video/vp8";
             break;
+        case NvdecCommon::VideoCodec::VP9:
+            impl->name = "video/vp9";
+            break;
+        case NvdecCommon::VideoCodec::AV1:
+            impl->name = "video/av01";
+            break;
+        default:
+            LOG_ERROR(HW_GPU, "nx2 video: unsupported codec");
+            return;
     }
-    impl->codec = impl->codec; // already set
-    // Now reuse rest of logic: call original code after this block.
-    // We will move the original code that follows the initial part.
-    // For brevity, we will just call the original constructor body by rewriting.
-
-    // [original body continues]
-    // Initialize decoder
     if (Settings::values.nvdec_emulation.GetValue() == Settings::NvdecEmulation::Gpu) {
         impl->open = impl->Open(true);
         if (!impl->open && impl->decoder && impl->decoder->GetCodec() != nullptr) {
@@ -331,6 +309,11 @@ Nx2VideoDecoder::Nx2VideoDecoder(std::span<const u8> configuration) : impl{std::
     LOG_INFO(HW_GPU, "nx2 video: decoder for \"%s\" %s%s", impl->name.c_str(),
              impl->open ? "open" : "failed to open",
              impl->open ? (impl->using_hardware ? " (GPU)" : " (CPU)") : "");
+}
+
+Nx2VideoDecoder::Nx2VideoDecoder(std::string_view mime)
+    : Nx2VideoDecoder(std::span<const u8>{reinterpret_cast<const u8*>(mime.data()), mime.size()}) {
+}
 
 Nx2VideoDecoder::~Nx2VideoDecoder() = default;
 

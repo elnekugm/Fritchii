@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include "common/common_types.h"
@@ -19,7 +20,7 @@ namespace Tegra::Host1x {
 
 struct Nx2VideoConfiguration {
     NvdecCommon::VideoCodec codec;
-    std::span<const u8> extradata;
+    std::vector<u8> extradata;
 };
 
 std::optional<Nx2VideoConfiguration> ParseNx2VideoConfiguration(std::span<const u8> configuration);
@@ -48,6 +49,7 @@ bool IsH264Stream(std::span<const u8> data);
 class Nx2VideoDecoder {
 public:
     explicit Nx2VideoDecoder(std::span<const u8> configuration);
+    explicit Nx2VideoDecoder(std::string_view mime);
     ~Nx2VideoDecoder();
 
     bool IsOpen() const;
