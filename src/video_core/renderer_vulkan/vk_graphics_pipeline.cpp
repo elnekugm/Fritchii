@@ -1004,7 +1004,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                             return cbuf < cbufs.size() && cbufs[cbuf].enabled ? cbufs[cbuf].address
                                                                               : GPUVAddr{};
                         },
-                        storage_alignment);
+                        );
                 }};
                 // The program's storage offsets are relative to the buffer address aligned down
                 // to the host storage alignment (StorageOffset). EDEN_NX2_HANDLE_ALIGN=0 reads
@@ -1014,7 +1014,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                     return value == nullptr || *value != '0';
                 }()};
                 const u64 storage_alignment{device.GetStorageBufferAlignment()};
-                const u32 raw{evaluate(align_storage ? storage_alignment : 1)};
+                const u32 raw{evaluate()};
                 if (raw == 0) {
                     ++zero_texture_handles;
                     static std::set<std::pair<u64, u32>> logged;
