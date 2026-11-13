@@ -17,12 +17,14 @@
 #include <numeric>
 #include <optional>
 #include <source_location>
+#include <set>
 #include <span>
 #include <stop_token>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <utility>
+#include <tuple>
 
 #include "common/container/unordered_map.h"
 #include <boost/unordered/unordered_node_map.hpp>
@@ -42,6 +44,7 @@
 #include "shader_recompiler/shader_info.h"
 #include "video_core/buffer_cache/buffer_base.h"
 #include "video_core/buffer_cache/read_trap_tracker.h"
+#include "video_core/buffer_cache/sparse_uniform_upload.h"
 #include "video_core/buffer_cache/virtual_range_cache.h"
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/nx2.h"
@@ -262,8 +265,7 @@ public:
     void TickFrame();
 
     bool BindMultiRangeStorage(const Binding& binding, bool is_written,
-                               std::span<const MultiRangeSegment> pool,
-                               u64 write_mark_limit = ~u64{0});
+                               std::span<const MultiRangeSegment> pool);
 
     void ResolveMultiRangeStorage(Binding& binding, bool is_written,
                                   std::vector<MultiRangeSegment>& pool);
@@ -381,6 +383,44 @@ public:
         compute_shader_hash = hash;
     }
 
+    /// Cap experimental Switch 2 write marks only when explicitly requested.
+    u32 WrittenStorageMarkSize(u32 size) const {
+        static const u64 cap = [] {
+            const char* value = std::getenv("EDEN_NX2_WRITTEN_SSBO_MARK_KIB");
+            return value == nullptr ? u64{0} : std::strtoull(value, nullptr, 10) * 1024;
+        }();
+        if (cap == 0 || gpu_memory == nullptr || !gpu_memory->UsesNativeTiling()) {
+            return size;
+        }
+        return static_cast<u32>((std::min<u64>)(size, cap));
+    }
+
+    struct ExtentTrust {
+        std::array<u32, 3> block{};
+        std::array<u32, 3> grid{};
+        bool distrusted{};
+        bool probe_pending{};
+    };
+    struct ExtentProbeRequest {
+        bool active{};
+        u64 proven{};
+        u64 pointer{};
+        u64 pad{};
+        std::array<u32, 3> block{};
+        std::array<u32, 3> grid{};
+    };
+    struct ExtentProbe {
+        u64 shader_hash{};
+        BufferId buffer_id{};
+        DAddr device_addr{};
+        u64 binding_size{};
+        ExtentProbeRequest request{};
+        u64 span{};
+        Async_Buffer before{};
+        std::optional<Async_Buffer> after;
+        u64 tick{};
+    };
+
     /// Records the "after" copies of the write extent checks of the dispatch just recorded.
     void RecordComputeExtentProbes();
 
@@ -438,6 +478,26 @@ public:
     void PopAsyncFlushes();
     void PopAsyncBuffers();
 
+    /// The next higher storage base bounds an opt-in write mark; default is the binding size.
+    [[nodiscard]] static u64 SelectedWriteExtent(GPUVAddr address, u32 size,
+                                                  std::span<const GPUVAddr> bases,
+                                                  u64 alignment) {
+        u64 extent = size;
+        for (const GPUVAddr base : bases) {
+            if (base > address) {
+                extent = (std::min)(extent, base - address);
+            }
+        }
+        if (alignment > 1 && extent < size) {
+            extent = (std::min)(u64{size}, Common::AlignUp(extent, alignment));
+        }
+        return extent;
+    }
+
+    void QueueFenceDownload(DAddr address, u64 size) {
+        QueueDownload(address, size);
+    }
+
     bool DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 amount);
 
     bool DMAClear(GPUVAddr src_address, u64 amount, u32 value);
@@ -453,7 +513,7 @@ public:
     }
     /// True when it recorded copies, which the GPU completes at `tick` (the caller submits).
     /// `writer`: the dispatch's shader hash, 0 for a DMA copy (EDEN_NX2_LIST_WAIT_TRACE).
-    bool Nx2CopyListPages(u64 tick, u64 writer = 0);
+    bool Nx2CopyListPages(u64 tick);
     enum class Nx2ListRead { Unknown, Copied, Synced, NeedsSync };
     /// Front thread: Synced when guest memory holds the page `device_addr` lies in (flushed and
     /// written by no GPU work since), else Copied with `out` filled from the copy of its last
@@ -808,15 +868,13 @@ private:
 
     /// `capped`: `size` is EDEN_NX2_WRITTEN_SSBO_MARK_KIB's cap, below the binding's size, so the
     /// GPU may write past it (Nx2NoteListWrite).
-    void MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u32 size, bool needs_sync = false,
-                           bool capped = false);
+    void MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u32 size, bool needs_sync = false);
 
     /// Counts a GPU write to the command list pages in the range (invalidating their copies),
     /// notes the words it may write (Nx2ListPage::gpu_words) and, while collecting, asks for new
     /// copies. `to_page_end`: the GPU may write past the range (a capped mark), so the words up to
     /// the end of its last page count as written too.
-    void Nx2NoteListWrite(BufferId buffer_id, DAddr device_addr, u64 size,
-                          bool to_page_end = false);
+    void Nx2NoteListWrite(BufferId buffer_id, DAddr device_addr, u64 size);
 
     [[nodiscard]] BufferId FindBuffer(DAddr device_addr, u32 size, bool sparse_compatible);
 
@@ -825,7 +883,7 @@ private:
     [[nodiscard]] OverlapResult ResolveOverlaps(DAddr device_addr, u32 wanted_size);
 
     /// Returns whether it copied (false: skipped as wholly CPU-modified, EDEN_NX2_JOIN_SKIP_CPU).
-    bool JoinOverlap(BufferId new_buffer_id, BufferId overlap_id, bool accumulate_stream_score);
+    void JoinOverlap(BufferId new_buffer_id, BufferId overlap_id, bool accumulate_stream_score);
     /// The range's host contents are all stale and nothing else reads them (JoinOverlap).
     [[nodiscard]] bool JoinCopyIsDead(DAddr device_addr, u64 size);
 
@@ -841,9 +899,7 @@ private:
 
     void TouchBuffer(Buffer& buffer, BufferId buffer_id) noexcept;
 
-    bool SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 size,
-                           bool sparse_uniform = false,
-                           std::source_location caller = std::source_location::current());
+    bool SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 size);
     bool SynchronizeBufferPages(Buffer& buffer, DAddr device_addr, u32 size, bool sparse_uniform);
 
     /// EDEN_NX2_EXP59 & 8: before the full walk, counts and logs what the dirty-word walk would
@@ -851,13 +907,12 @@ private:
     bool VerifyComputeDirtyWalk(DAddr device_addr, u32 size);
 
     void UploadMemory(Buffer& buffer, u64 total_size_bytes, u64 largest_copy,
-                      std::span<BufferCopy> copies, bool sparse_uniform);
+                      std::span<BufferCopy> copies);
 
     void ImmediateUploadMemory(Buffer& buffer, u64 largest_copy,
-                               std::span<const BufferCopy> copies, bool sparse_uniform);
+                               std::span<const BufferCopy> copies);
 
-    void MappedUploadMemory(Buffer& buffer, u64 total_size_bytes, std::span<BufferCopy> copies,
-                            bool sparse_uniform);
+    void MappedUploadMemory(Buffer& buffer, u64 total_size_bytes, std::span<BufferCopy> copies);
 
     void DownloadBufferMemory(Buffer& buffer_id);
 
@@ -901,8 +956,7 @@ private:
     [[nodiscard]] TextureBufferBinding GetTextureBufferBinding(GPUVAddr gpu_addr, u32 size,
                                                                PixelFormat format);
 
-    [[nodiscard]] std::span<const u8> ImmediateBufferWithData(DAddr device_addr, size_t size,
-                                                              bool sparse_uniform = false);
+    [[nodiscard]] std::span<const u8> ImmediateBufferWithData(DAddr device_addr, size_t size);
 
     [[nodiscard]] std::span<u8> ImmediateBuffer(size_t wanted_capacity);
 
@@ -1000,6 +1054,8 @@ private:
         if (DownloadsAtFence(device_addr, size)) {
             return true;
         }
+        return memory_tracker.IsRegionPreflushable(device_addr, size) ||
+               cpu_read_ranges.Intersects(device_addr, size);
     }
 
     /// GPU writes that are not downloaded at fences: trap the guest CPU's next read of their
@@ -1048,21 +1104,6 @@ private:
             uncommitted_gpu_modified_ranges.Add(start, end - start);
         });
         ArmReadTraps(addr, size);
-    }
-
-    /// Writes downloaded bytes to guest memory, except where a held-back CPU write is newer.
-    void WriteDownloadToGuest(DAddr device_addr, const u8* data, u64 size) {
-        DAddr cursor = device_addr;
-        const auto write_until = [&](DAddr end) {
-            if (cursor < end) {
-                device_memory.WriteBlockUnsafe(cursor, data + (cursor - device_addr), end - cursor);
-            }
-        };
-        cpu_held_ranges.ForEachInRange(device_addr, size, [&](DAddr start, DAddr end) {
-            write_until(start);
-            cursor = (std::max)(cursor, end);
-        });
-        write_until(device_addr + size);
     }
 
     // Async Buffers
@@ -1177,6 +1218,12 @@ private:
     /// EDEN_NX2_TABLE_POINTER_TRACE: last table entry and size bound per table pointer slot.
     std::unordered_map<u64, std::pair<GPUVAddr, u32>> traced_table_pointers;
     u64 total_used_memory = 0;
+    u64 compute_shader_hash{};
+    std::unordered_map<u64, ExtentTrust> extent_trust;
+    std::array<ExtentProbeRequest, NUM_STORAGE_BUFFERS> extent_probe_requests{};
+    std::vector<ExtentProbe> extent_probes;
+    u64 extent_probes_trusted{};
+    u64 extent_probes_distrusted{};
     u64 buffer_bytes = 0; ///< The buffers' own size (total_used_memory may be the device's)
     u64 minimum_memory = 0;
     u64 critical_memory = 0;
@@ -1233,6 +1280,7 @@ private:
     std::vector<std::pair<u64, Nx2Staging>> nx2_retired_list_copies;
     boost::container::small_vector<std::pair<BufferId, DAddr>, 8> nx2_list_copy_requests;
     bool nx2_collect_list_copies{};
+    std::set<std::tuple<bool, size_t, u32, GPUVAddr, u32, u64>> logged_write_bounds;
 };
 
 } // namespace VideoCommon

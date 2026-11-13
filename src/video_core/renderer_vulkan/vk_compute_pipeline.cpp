@@ -21,6 +21,7 @@
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/pipeline_optimization.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
+#include "video_core/renderer_vulkan/pipeline_hitch_trace.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
@@ -41,6 +42,8 @@
 #include "shader_recompiler/exception.h"
 
 namespace Vulkan {
+
+namespace Profile = VideoCommon::Nx2Profile;
 
 using Shader::ImageBufferDescriptor;
 using Shader::Backend::SPIRV::RESCALING_LAYOUT_WORDS_OFFSET;
@@ -328,6 +331,10 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
             .basePipelineIndex = 0,
         };
         try {
+            const char* const hitch_trace = std::getenv("EDEN_NX2_HITCH_TRACE");
+            PipelineHitchTrace::Scope hitch{PipelineHitchTrace::Phase::DriverCreate,
+                                            "compute", shader_hash,
+                                            hitch_trace != nullptr && hitch_trace[0] != '0'};
             VideoCommon::StallDiagnostics::Scope diagnostic{
                 {VideoCommon::StallDiagnostics::Phase::ComputeCreate, "compute-build",
                  shader_hash}};

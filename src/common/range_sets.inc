@@ -272,13 +272,16 @@ bool RangeSet<AddressType>::Empty() const {
 
 template <typename AddressType>
 bool RangeSet<AddressType>::Contains(AddressType base_address, size_t size) const {
-    const auto& set = m_impl->m_ranges_set;
-    if (set.empty() || size == 0) {
+    if (m_impl->m_ranges.empty() || size == 0) {
         return false;
     }
     const AddressType end_address = base_address + static_cast<AddressType>(size);
-    const auto it = set.find(base_address);
-    return it != set.end() && it->lower() <= base_address && it->upper() >= end_address;
+    if (end_address <= base_address) {
+        return false;
+    }
+    const auto it = m_impl->FirstEndingAfter(base_address);
+    return it != m_impl->m_ranges.cend() && it->lower <= base_address &&
+           it->upper >= end_address;
 }
 
 template <typename AddressType>

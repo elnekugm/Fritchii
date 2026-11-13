@@ -15,6 +15,7 @@
 
 #include "common/common_types.h"
 #include "shader_recompiler/frontend/ir/type.h"
+#include "shader_recompiler/storage_write_extent.h"
 #include "shader_recompiler/varying_state.h"
 
 #include <boost/container/small_vector.hpp>
@@ -175,6 +176,10 @@ struct StorageBufferDescriptor {
     u32 cbuf_offset;
     u32 count;
     bool is_written;
+    /// When set, the buffer pointer is read from memory at this offset from its constant buffer.
+    u32 indirect_offset{~0U};
+    /// How far the program's stores reach past the pointer (unbounded unless proven).
+    StorageWriteExtent write_extent{};
 
     auto operator<=>(const StorageBufferDescriptor&) const = default;
 };
@@ -344,6 +349,7 @@ struct Info {
     bool uses_global_memory{};
     bool requires_coherent_global_memory{};
     bool requires_coherent_image_memory{};
+    bool uses_cooperative_matrix{};
     /// Native global accesses whose pointer is chosen at run time: every storage buffer descriptor
     /// is a candidate and its bound length (not an NVN size word) limits the range.
     bool native_global_bounds{};
