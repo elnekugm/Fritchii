@@ -37,6 +37,9 @@ inline bool Nx2NeedsBufferDownloads() {
 // reads the command list. One bit per 4 KiB of the 36-bit device address space (2 MiB).
 inline constexpr u64 Nx2WrittenPageBits = 12;
 inline std::array<std::atomic<u64>, (u64{1} << (36 - Nx2WrittenPageBits)) / 64> g_nx2_gpu_written_pages{};
+/// Counts the times pages were marked GPU-written for the first time: it stops moving once a
+/// title has written all the memory it reuses (Nx2CheckCommandPagesFirst).
+inline std::atomic<u64> g_nx2_gpu_written_generation{};
 
 /// Bumped when a page is marked GPU-written for the first time (read by nothing since
 /// EDEN_NX2_LIST_FAST went; a diagnostic count).
@@ -234,6 +237,18 @@ inline std::atomic<u64> g_nx2_guest_reads_handed{};
     return false;
 }
 
+template <typename Drain, typename Translate, typename Flush>
+void Nx2SynchronizeGpuWrittenCommands(GPUVAddr address, size_t size, Drain&& drain,
+                                     Translate&& translate, Flush&& flush) {
+    if (size == 0) return;
+    drain();
+    if (Nx2HasGpuWrittenPage(address, size, translate)) flush();
+}
+
+// NVN2 queues release their progress values into the second page of a two-page GPU-accessible
+// region and GPU acquires read the same offsets in the first page (the CPU polls the second).
+// Something on the console copies one into the other; until that is known, the puller mirrors
+// releases that land in a second page. Every queue has such a region, so keep a small table.
 inline constexpr size_t Nx2MaxSemaphoreRegions = 32;
 inline std::array<std::atomic<u64>, Nx2MaxSemaphoreRegions> g_nx2_semaphore_regions{}; // starts
 
@@ -602,8 +617,10 @@ inline int Nx2RenderClockSyncpt() {
 /// EDEN_NX2_RENDER_CLOCK: 0 unset, 1 the clock, 2 the clock on the poll-word source.
 inline int Nx2RenderClockEnv() {
     static const int env = [] {
+        // On (1) by default since 2026-11-08: flip-fence clock at 1.00 per host frame, 0 tombstone
+        // hits under EXP43=4, 11 loads 0 washed out. EDEN_NX2_RENDER_CLOCK=0 turns it off.
         const char* value = std::getenv("EDEN_NX2_RENDER_CLOCK");
-        return value == nullptr ? 0 : value[0] == '1' ? 1 : value[0] == '2' ? 2 : 0;
+        return value == nullptr ? 1 : value[0] == '1' ? 1 : value[0] == '2' ? 2 : 0;
     }();
     return env;
 }
