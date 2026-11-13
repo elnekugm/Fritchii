@@ -237,6 +237,25 @@ inline std::atomic<u64> g_nx2_guest_reads_handed{};
     return false;
 }
 
+template <typename Translate>
+[[nodiscard]] inline bool Nx2HasGpuWrittenPage(GPUVAddr address, size_t size,
+                                                Translate&& translate) {
+    if (size == 0 || address + size - 1 < address) {
+        return false;
+    }
+    constexpr GPUVAddr page_size = GPUVAddr{1} << Nx2WrittenPageBits;
+    const GPUVAddr last = (address + size - 1) & ~(page_size - 1);
+    for (GPUVAddr page = address & ~(page_size - 1);; page += page_size) {
+        if (const auto device = translate(page); device && Nx2IsGpuWritten(*device)) {
+            return true;
+        }
+        if (page == last || page > last - page_size) {
+            break;
+        }
+    }
+    return false;
+}
+
 template <typename Drain, typename Translate, typename Flush>
 void Nx2SynchronizeGpuWrittenCommands(GPUVAddr address, size_t size, Drain&& drain,
                                      Translate&& translate, Flush&& flush) {

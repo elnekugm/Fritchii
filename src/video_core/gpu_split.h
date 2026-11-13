@@ -916,18 +916,6 @@ public:
         queued_releases[(device_address >> 2) % queued_releases.size()] =
             {write_position, device_address, payload};
     }
-    /// The payload of a queued release to `device_address` the back has not executed yet.
-    [[nodiscard]] std::optional<u32> QueuedRelease(u64 device_address) const {
-        const QueuedRelease& release =
-            queued_releases[(device_address >> 2) % queued_releases.size()];
-        if (release.device != device_address || release.position == 0 ||
-            consumed.load(std::memory_order_acquire) >= release.position ||
-            release.position > write_position) {
-            return std::nullopt;
-        }
-        return release.payload;
-    }
-
 private:
     friend struct GpuSplitTestAccess;
 

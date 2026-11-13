@@ -170,7 +170,7 @@ public:
     /// Invalidates cached GPU translations/range checks after any address-space mapping change.
     /// This shared epoch also changes when an address space is constructed or destroyed.
     [[nodiscard]] u64 GpuMappingGeneration() const noexcept {
-        return kind_generation.load(std::memory_order_acquire);
+        return map_serial.load(std::memory_order_acquire);
     }
 
     /**

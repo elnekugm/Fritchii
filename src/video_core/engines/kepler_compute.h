@@ -279,7 +279,7 @@ private:
 
     bool DispatchNativeCompute(const NativeQmdScheduler::Descriptor& descriptor);
     void ProcessNativeReportSemaphore(u32 argument);
-    void DescribeNativeResources(const NativeQmdScheduler::Descriptor& qmd);
+    void DescribeNativeResources(const NativeQmdScheduler::Descriptor& qmd, bool always = false);
     void RememberDlssMotionVectors();
     bool TryFireEmblemUpscale(bool allow_history = true);
     void CaptureFireEmblemJitter();
@@ -321,6 +321,8 @@ private:
     /// colour image and camera jitter they go with.
     std::optional<Texture::TICEntry> dlss_motion_vectors;
     std::optional<Texture::TICEntry> dlss_depth;
+    std::unordered_set<u64> tensor_programs;
+    std::array<f32, 2> dlss_jitter{};
     u32 dlss_contract_trace_count{};
     GPUVAddr dlss_motion_color{};
     VideoCommon::FireEmblemUpscale::FrameJitter fe_upscale_jitter;
