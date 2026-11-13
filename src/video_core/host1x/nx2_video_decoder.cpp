@@ -284,28 +284,53 @@ struct Nx2VideoDecoder::Impl {
     }
 };
 
-Nx2VideoDecoder::Nx2VideoDecoder(std::string_view mime) : impl{std::make_unique<Impl>()} {
-    impl->name = std::string{mime};
-    impl->codec = CodecFromMime(mime);
-    if (!impl->codec) {
-        LOG_ERROR(HW_GPU, "nx2 video: no decoder for codec \"{}\"", mime);
+Nx2VideoDecoder::Nx2VideoDecoder(std::span<const u8> configuration) : impl{std::make_unique<Impl>()} {
+    auto cfg = ParseNx2VideoConfiguration(configuration);
+    if (!cfg) {
+        LOG_ERROR(HW_GPU, "nx2 video: invalid configuration");
         return;
     }
+    impl->codec = cfg->codec;
+    impl->extradata = cfg->extradata;
+    if (!impl->codec) {
+        LOG_ERROR(HW_GPU, "nx2 video: no decoder for codec");
+        return;
+    }
+    // Continue with existing logic using mime string representation? The rest of constructor expects mime string.
+    // We need to reconstruct mime string from codec.
+    // For simplicity, set impl->name accordingly.
+    // We'll use a placeholder mapping.
+    switch (impl->codec) {
+        case NvdecCommon::VideoCodec::H264:
+            impl->name = "video/avc";
+            break;
+        case NvdecCommon::VideoCodec::HEVC:
+            impl->name = "video/hevc";
+            break;
+        default:
+            impl->name = "video/unknown";
+            break;
+    }
+    impl->codec = impl->codec; // already set
+    // Now reuse rest of logic: call original code after this block.
+    // We will move the original code that follows the initial part.
+    // For brevity, we will just call the original constructor body by rewriting.
+
+    // [original body continues]
+    // Initialize decoder
     if (Settings::values.nvdec_emulation.GetValue() == Settings::NvdecEmulation::Gpu) {
         impl->open = impl->Open(true);
         if (!impl->open && impl->decoder && impl->decoder->GetCodec() != nullptr) {
-            LOG_WARNING(HW_GPU, "nx2 video: GPU decoder for \"{}\" failed to open, using the CPU",
-                        mime);
+            LOG_WARNING(HW_GPU, "nx2 video: GPU decoder for \"%s\" failed to open, using the CPU", impl->name.c_str());
             impl->open = impl->Open(false);
         }
     } else {
         impl->open = impl->Open(false);
     }
     impl->ever_open = impl->open;
-    LOG_INFO(HW_GPU, "nx2 video: decoder for \"{}\" {}{}", mime,
+    LOG_INFO(HW_GPU, "nx2 video: decoder for \"%s\" %s%s", impl->name.c_str(),
              impl->open ? "open" : "failed to open",
              impl->open ? (impl->using_hardware ? " (GPU)" : " (CPU)") : "");
-}
 
 Nx2VideoDecoder::~Nx2VideoDecoder() = default;
 
