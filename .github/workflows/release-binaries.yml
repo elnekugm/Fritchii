@@ -652,7 +652,7 @@ jobs:
   # unticked.
   release:
     name: Publish release
-    needs: [name, build]
+    needs: [prepare-release, build]
     if: github.event_name == 'push' || inputs.publish_release
     runs-on: ubuntu-24.04
     permissions:
