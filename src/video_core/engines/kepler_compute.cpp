@@ -705,7 +705,8 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
     // Title 4's version 458752 keeps the pair at cbuf0+0x60 (1280x720) and +0x70 (1920x1080); the
     // screen stayed the output's clear colour (blue) until camera mode skipped the pass.
     std::optional<Texture::TICEntry> input, output;
-    for (const auto [in_offset, out_offset] : {std::pair{0x90U, 0xa0U}, std::pair{0x60U, 0x70U}}) {
+    for (const auto& [in_offset, out_offset] : {std::pair{0x90U, 0xa0U},
+                                                std::pair{0x60U, 0x70U}}) {
         input = image(in_offset);
         output = image(out_offset);
         if (usable(input, output)) break;
