@@ -4,8 +4,6 @@
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <chrono>
-#include <cstdlib>
 #include <chrono>
 #include <cstdlib>
 #include <memory>
@@ -40,23 +38,6 @@
 namespace Vulkan {
 
 namespace {
-class SecondaryPools final : public ParallelRecord::SecondarySource {
-public:
-    explicit SecondaryPools(MasterSemaphore& master_semaphore, const Device& device, u32 threads) {
-        for (u32 thread = 0; thread < threads; ++thread) {
-            pools.push_back(std::make_unique<CommandPool>(master_semaphore, device,
-                                                          VK_COMMAND_BUFFER_LEVEL_SECONDARY));
-        }
-    }
-
-    VkCommandBuffer Acquire(u32 thread) override {
-        return pools[thread]->Commit();
-    }
-
-private:
-    std::vector<std::unique_ptr<CommandPool>> pools;
-};
-
 std::atomic<u64> g_profile_submits{};
 std::atomic<u64> g_profile_renderpasses{};
 std::atomic<u64> g_profile_finishes{};
@@ -166,15 +147,6 @@ Scheduler::Scheduler(const Device& device_, StateTracker& state_tracker_)
         }
     }
 
-    if (const u32 threads = ParallelRecord::ThreadsFromEnv(); threads != 0) {
-        if (device.GetDispatchLoader().vkCmdExecuteCommands == nullptr) {
-            LOG_WARNING(Render_Vulkan, "EDEN_NX2_PARALLEL_RECORD ignored: no vkCmdExecuteCommands");
-        } else {
-            secondary_pools = std::make_unique<SecondaryPools>(*master_semaphore, device, threads);
-            parallel_record = std::make_unique<ParallelRecord>(device.GetDispatchLoader(), threads,
-                                                               *secondary_pools);
-        }
-    }
     AcquireNewChunk();
     AllocateWorkerCommandBuffer();
     worker_thread = std::jthread([this](std::stop_token token) { WorkerThread(token); });
@@ -215,7 +187,7 @@ bool Scheduler::DeferFlush() {
     // for about 5%.
     static const s64 interval_us = [] {
         const char* value = std::getenv("EDEN_NX2_FENCE_FLUSH_US");
-        return value == nullptr ? s64{5000} : static_cast<s64>(std::atoll(value));
+        return value == nullptr ? s64{500} : static_cast<s64>(std::atoll(value));
     }();
     if (interval_us <= 0 || !VideoCommon::GpuSplit::OnBackThread() ||
         std::chrono::steady_clock::now() - last_flush >= std::chrono::microseconds{interval_us}) {
@@ -247,17 +219,9 @@ bool Scheduler::WaitSubmitted(u64 tick) {
         }
         if (const auto now = std::chrono::steady_clock::now(); now >= next_log) {
             next_log = now + std::chrono::seconds{2};
-            // The back serves the request between entries: one that never does is blocked in
-            // an entry. Name the wait when it is a tracked one (BackWaitScope).
-            const char* const back_site = VideoCommon::back_wait_site.load(std::memory_order_relaxed);
-            LOG_WARNING(Render_Vulkan,
-                        "Waited {} s for the GPU thread to submit tick {} (submitted up to {}); "
-                        "GPU back thread blocked in: {}",
+            LOG_WARNING(Render_Vulkan, "Waited {} s for the GPU thread to submit tick {}",
                         std::chrono::duration_cast<std::chrono::seconds>(now - start).count(),
-                        tick, master_semaphore->CurrentTick() - 1,
-                        back_site != nullptr ? back_site
-                                             : "no tracked wait (an untracked lock or wait, or "
-                                               "a long entry)");
+                        tick);
             split.RequestIdleHook();
         }
         if (spins < 64) {
@@ -339,7 +303,6 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
     }
     const VkFramebuffer framebuffer_handle = framebuffer->Handle();
     const VkExtent2D render_area = framebuffer->RenderArea();
-    ++render_pass_serial;
     state.renderpass = renderpass;
     state.framebuffer = framebuffer_handle;
     state.render_area = render_area;
@@ -561,16 +524,11 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
             // Perform the work, tracking whether the chunk was a submission
             // before executing.
             const bool has_submit = work->HasSubmit();
-            work->ExecuteAll(parallel_record ? parallel_record->Wrap(*current_cmdbuf)
-                                             : current_cmdbuf,
-                             current_upload_cmdbuf);
+            work->ExecuteAll(current_cmdbuf, current_upload_cmdbuf);
 
             // If the chunk was a submission, reallocate the command buffer.
             if (has_submit) {
                 AllocateWorkerCommandBuffer();
-                if (parallel_record) {
-                    parallel_record->BeginPrimary();
-                }
             }
         }
 
@@ -887,9 +845,7 @@ void Scheduler::InvalidateState() {
 }
 
 void Scheduler::EndPendingOperations() {
-    // Pause, don't reset: a submission can land between a guest's counter reset and its report,
-    // and resetting here would drop the samples counted so far (the report then reads too low).
-    query_cache->CounterClose(VideoCommon::QueryType::ZPassPixelCount64);
+    query_cache->CounterReset(VideoCommon::QueryType::ZPassPixelCount64);
     EndRenderPass();
 }
 
@@ -901,7 +857,6 @@ void Scheduler::EndRenderPass()
         }
         fragment_barrier_pending = false;
         render_pass_has_stores = false;
-        ++render_pass_serial;
 
         query_cache->CounterClose(VideoCommon::QueryType::StreamingByteCount);
 

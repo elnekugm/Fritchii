@@ -7,16 +7,13 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
-#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <span>
-#include <string_view>
 #include <thread>
 #include <vector>
 #include <bit>
-#include <cstring>
 #include <numeric>
 #include "common/cityhash.h"
 #include "common/scope_exit.h"
@@ -29,7 +26,6 @@
 #include "shader_recompiler/frontend/maxwell/control_flow.h"
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/ir_opt/passes.h"
-#include "shader_recompiler/ir_opt/oot_visual_workaround.h"
 #include "shader_recompiler/program_header.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
@@ -46,7 +42,6 @@
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
-#include "video_core/renderer_vulkan/vk_state_tracker.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/shader_cache.h"
 #include "video_core/shader_environment.h"
@@ -400,15 +395,10 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
       use_asynchronous_shaders{Settings::values.use_asynchronous_shaders.GetValue()},
       use_vulkan_pipeline_cache{Settings::values.use_vulkan_driver_pipeline_cache.GetValue() &&
                                 !DriverCachesPipelines(device_)},
-      oot_visual_workaround{[] {
-          const char* value = std::getenv("EDEN_NX2_OOT_VISUAL_WORKAROUND");
-          return value != nullptr && std::string_view{value} == "1";
-      }()},
       workers(device.HasBrokenParallelShaderCompiling() ? 1ULL : GetTotalPipelineWorkers(),
               "VkPipelineBuilder", {}, Common::ThreadPlacement::Background),
       serialization_thread(1, "VkPipelineSerialization", {},
-                           Common::ThreadPlacement::Background),
-      translation_workers(2, "VkPipelineTranslator", {}, Common::ThreadPlacement::Background) {
+                           Common::ThreadPlacement::Background) {
     const auto& float_control{device.FloatControlProperties()};
     const VkDriverId driver_id{device.GetDriverID()};
     const VkShaderStageFlags subgroup_stages{device.GetSubgroupSupportedStages()};
@@ -712,277 +702,7 @@ void PipelineCache::SaveUsedPipelines() {
     }
 }
 
-namespace {
-// EDEN_NX2_PIPELINE_CLEAN=1 (default off): see CurrentGraphicsPipelineClean.
-bool PipelineCleanEnabled() {
-    static const bool enabled = [] {
-        const char* value = std::getenv("EDEN_NX2_PIPELINE_CLEAN");
-        return value != nullptr && value[0] != '0';
-    }();
-    return enabled;
-}
-} // Anonymous namespace
-
-void PipelineCache::BuildCleanWatch() {
-    using Range = CleanLookup::Range;
-    const Maxwell& regs = maxwell3d->regs;
-    const DynamicFeatures& features = dynamic_features;
-    const auto watch_into = [&regs](std::vector<Range>& ranges, const auto& field) {
-        const auto offset = static_cast<size_t>(reinterpret_cast<const char*>(&field) -
-                                                reinterpret_cast<const char*>(&regs));
-        const size_t first = offset / sizeof(u32);
-        const size_t last = (offset + sizeof(field) + sizeof(u32) - 1) / sizeof(u32);
-        ranges.push_back({static_cast<u32>(first), static_cast<u32>(last - first)});
-    };
-    std::vector<Range> ranges;
-    const auto watch = [&](const auto& field) { watch_into(ranges, field); };
-
-    // Every register FixedPipelineState::Refresh (and what it calls) reads with these features.
-    // Refresh itself, always:
-    watch(regs.transform_feedback_enabled);
-    watch(regs.depth_mode);
-    watch(regs.polygon_mode_front);
-    watch(regs.tessellation);
-    watch(regs.patch_vertices);
-    watch(regs.anti_alias_samples_mode);
-    watch(regs.blend);                    // ComputeAttachment0DualSourceBlend
-    watch(regs.blend_per_target_enabled); // ComputeAttachment0DualSourceBlend
-    watch(regs.blend_per_target[0]);      // ComputeAttachment0DualSourceBlend
-    watch(regs.alpha_test_enabled);
-    watch(regs.alpha_test_func);
-    watch(regs.alpha_test_ref);
-    watch(regs.mandated_early_z);
-    watch(regs.zeta_enable);
-    watch(regs.zeta.format);
-    watch(regs.window_origin);
-    watch(regs.provoking_vertex);
-    watch(regs.conservative_raster_enable);
-    watch(regs.line_anti_alias_enable);
-    watch(regs.anti_alias_alpha_control);
-    watch(regs.depth_bounds);
-    watch(regs.line_stipple_params);
-    for (const auto& rt : regs.rt) {
-        watch(rt.format);
-    }
-    watch(regs.point_size);
-    // Dirty::VertexInput (both branches) and the static vertex repack:
-    watch(regs.vertex_attrib_format);
-    const bool repack = !features.has_dynamic_vertex_input && features.has_static_vertex_repack;
-    if (!features.has_dynamic_vertex_input) {
-        watch(regs.vertex_stream_instances);
-        for (const auto& stream : regs.vertex_streams) {
-            watch(stream.frequency);
-        }
-    }
-    if (!features.has_extended_dynamic_state || repack) {
-        // Strides (DynamicState::Refresh's vertex_strides, the repack): the first word of each
-        // stream, VertexStream's leading union of stride and enable.
-        for (const auto& stream : regs.vertex_streams) {
-            const auto offset = static_cast<size_t>(reinterpret_cast<const char*>(&stream) -
-                                                    reinterpret_cast<const char*>(&regs));
-            ranges.push_back({static_cast<u32>(offset / sizeof(u32)), 1});
-        }
-    }
-    // Dirty::ViewportSwizzles:
-    for (const auto& viewport : regs.viewport_transform) {
-        watch(viewport.swizzle);
-    }
-    // DynamicState::Refresh (no extended dynamic state):
-    if (!features.has_extended_dynamic_state) {
-        watch(regs.gl_front_face);
-        watch(regs.stencil_front_op);
-        watch(regs.stencil_two_side_enable);
-        watch(regs.stencil_back_op);
-        watch(regs.stencil_enable);
-        watch(regs.depth_write_enabled);
-        watch(regs.depth_bounds_enable);
-        watch(regs.depth_test_enable);
-        watch(regs.depth_test_func);
-        watch(regs.gl_cull_face);
-        watch(regs.gl_cull_test_enabled);
-    }
-    // DynamicState::Refresh2:
-    if (!features.has_extended_dynamic_state_2_logic_op) {
-        watch(regs.logic_op);
-        if (!features.has_extended_dynamic_state_2) {
-            watch(regs.polygon_offset_point_enable);
-            watch(regs.polygon_offset_line_enable);
-            watch(regs.polygon_offset_fill_enable);
-            watch(regs.rasterize_enable);
-            watch(regs.primitive_restart);
-        }
-    }
-    // Dirty::Blending, BlendingAttachment::Refresh (no extended dynamic state 3 blending):
-    if (!features.has_extended_dynamic_state_3_blend) {
-        watch(regs.color_mask_common);
-        watch(regs.color_mask);
-        watch(regs.blend_per_target);
-        watch(regs.iterated_blend);
-    }
-    // DynamicState::Refresh3:
-    if (!features.has_dynamic_state3_logic_op_enable) {
-        watch(regs.logic_op);
-    }
-    if (!features.has_dynamic_state3_depth_clamp_enable) {
-        watch(regs.viewport_clip_control);
-    }
-    if (!features.has_dynamic_state3_line_stipple_enable) {
-        watch(regs.line_stipple_enable);
-    }
-
-    // Sorted and merged: contiguous words compare as one block.
-    const auto merge = [](std::vector<Range> input) {
-        std::ranges::sort(input, {}, &Range::first);
-        std::vector<Range> merged;
-        for (const Range& range : input) {
-            if (!merged.empty() && range.first <= merged.back().first + merged.back().count) {
-                const u32 end = (std::max)(merged.back().first + merged.back().count,
-                                           range.first + range.count);
-                merged.back().count = end - merged.back().first;
-            } else {
-                merged.push_back(range);
-            }
-        }
-        return merged;
-    };
-    clean.ranges = merge(std::move(ranges));
-    // RefreshXfbState, while transform_feedback_enabled (watched above) is set:
-    std::vector<Range> xfb_ranges;
-    watch_into(xfb_ranges, regs.transform_feedback.controls);
-    watch_into(xfb_ranges, regs.stream_out_layout);
-    clean.xfb_ranges = merge(std::move(xfb_ranges));
-
-    size_t words = 0;
-    for (const Range& range : clean.ranges) {
-        words += range.count;
-    }
-    clean.snapshot.assign(words, 0);
-    size_t xfb_words = 0;
-    for (const Range& range : clean.xfb_ranges) {
-        xfb_words += range.count;
-    }
-    clean.xfb_snapshot.assign(xfb_words, 0);
-    clean.built = true;
-    LOG_INFO(Render_Vulkan, "EDEN_NX2_PIPELINE_CLEAN: watching {} register words in {} ranges",
-             words, clean.ranges.size());
-}
-
-bool PipelineCache::CleanInputsUnchanged() const {
-    const u32* const words = maxwell3d->regs.reg_array.data();
-    const u32* saved = clean.snapshot.data();
-    for (const CleanLookup::Range& range : clean.ranges) {
-        if (std::memcmp(words + range.first, saved, range.count * sizeof(u32)) != 0) {
-            return false;
-        }
-        saved += range.count;
-    }
-    if (maxwell3d->regs.transform_feedback_enabled != 0) {
-        saved = clean.xfb_snapshot.data();
-        for (const CleanLookup::Range& range : clean.xfb_ranges) {
-            if (std::memcmp(words + range.first, saved, range.count * sizeof(u32)) != 0) {
-                return false;
-            }
-            saved += range.count;
-        }
-    }
-    return true;
-}
-
-void PipelineCache::TakeCleanSnapshot() {
-    const u32* const words = maxwell3d->regs.reg_array.data();
-    u32* saved = clean.snapshot.data();
-    for (const CleanLookup::Range& range : clean.ranges) {
-        std::memcpy(saved, words + range.first, range.count * sizeof(u32));
-        saved += range.count;
-    }
-    if (maxwell3d->regs.transform_feedback_enabled != 0) {
-        saved = clean.xfb_snapshot.data();
-        for (const CleanLookup::Range& range : clean.xfb_ranges) {
-            std::memcpy(saved, words + range.first, range.count * sizeof(u32));
-            saved += range.count;
-        }
-    }
-    clean.hashes = graphics_key.unique_hashes;
-    clean.maxwell3d = maxwell3d;
-    clean.topology = maxwell3d->draw_manager.draw_state.topology;
-    clean.engine_state = maxwell3d->engine_state;
-}
-
-// The key is (unique_hashes, FixedPipelineState). Refresh's output depends only on: the
-// registers in clean.ranges (and clean.xfb_ranges while transform feedback is on), the dirty
-// flags VertexInput, ViewportSwizzles and Blending (it recomputes those groups only while set,
-// and clears some), dynamic_features (set once at construction), the draw's topology and the
-// engine hint. When all of these equal their values at the last Refresh and the flags are
-// clear, Refresh would rewrite the same key and Next(graphics_key) would return
-// current_pipeline (whose key it is): the lookup returns it as that fast path does.
-GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineClean() {
-    if (!RefreshStages(graphics_key.unique_hashes)) {
-        current_pipeline = nullptr;
-        clean.pipeline = nullptr;
-        return nullptr;
-    }
-    if (!clean.built) {
-        BuildCleanWatch();
-    }
-    const auto& flags = maxwell3d->dirty.flags;
-    const bool blending_dirty =
-        !dynamic_features.has_extended_dynamic_state_3_blend && flags[Dirty::Blending];
-    if (clean.pipeline != nullptr && clean.pipeline == current_pipeline &&
-        clean.maxwell3d == maxwell3d && !flags[Dirty::VertexInput] &&
-        !flags[Dirty::ViewportSwizzles] && !blending_dirty &&
-        clean.hashes == graphics_key.unique_hashes &&
-        clean.topology == maxwell3d->draw_manager.draw_state.topology &&
-        clean.engine_state == maxwell3d->engine_state && CleanInputsUnchanged()) {
-        ++clean.hits;
-    } else {
-        ++clean.misses;
-        clean.pipeline = nullptr;
-    }
-    if (((clean.hits + clean.misses) & 0xfff) == 0) {
-        const auto now = std::chrono::steady_clock::now();
-        if (clean.last_log == std::chrono::steady_clock::time_point{}) {
-            clean.last_log = now;
-        } else if (now - clean.last_log >= std::chrono::seconds{10}) {
-            const double seconds = std::chrono::duration<double>(now - clean.last_log).count();
-            LOG_INFO(Render_Vulkan,
-                     "EDEN_NX2_PIPELINE_CLEAN per second: lookups without Refresh {}, "
-                     "with Refresh {}",
-                     static_cast<u64>(static_cast<double>(clean.hits) / seconds),
-                     static_cast<u64>(static_cast<double>(clean.misses) / seconds));
-            clean.last_log = now;
-            clean.hits = 0;
-            clean.misses = 0;
-        }
-    }
-    if (clean.pipeline != nullptr) {
-        current_pipeline->MarkUsed(frame_count);
-        return BuiltPipeline(current_pipeline);
-    }
-
-    TakeCleanSnapshot();
-    graphics_key.state.Refresh(*maxwell3d, dynamic_features);
-    if (current_pipeline) {
-        GraphicsPipeline* const next{current_pipeline->Next(graphics_key)};
-        if (next) {
-            current_pipeline = next;
-            clean.pipeline = next;
-            current_pipeline->MarkUsed(frame_count);
-            return BuiltPipeline(current_pipeline);
-        }
-    }
-    // The slow path makes graphics_cache[graphics_key] current, unless it has no pipeline.
-    GraphicsPipeline* const previous = current_pipeline;
-    GraphicsPipeline* const result = CurrentGraphicsPipelineSlowPath();
-    if (current_pipeline != previous) {
-        clean.pipeline = current_pipeline;
-    }
-    return result;
-}
-
 GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
-    if (PipelineCleanEnabled()) {
-        return CurrentGraphicsPipelineClean();
-    }
 
     if (!RefreshStages(graphics_key.unique_hashes)) {
         current_pipeline = nullptr;
@@ -1035,7 +755,6 @@ ComputePipeline* PipelineCache::CurrentComputePipeline() {
 
 void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading,
                                       const VideoCore::DiskResourceLoadCallback& callback) {
-    visual_workaround_title = title_id;
     if (title_id == 0) {
         return;
     }
@@ -1284,73 +1003,11 @@ void ReportNewPipelineKey(const GraphicsPipelineCacheKey& key) {
 }
 } // Anonymous namespace
 
-namespace {
-// Background translation of Switch 2 graphics pipelines: counts logged every 10 s.
-struct BackgroundTranslationReport {
-    u32 queued{}, skipped{}, waited{}, adopted{}, rebuilt{};
-    std::chrono::steady_clock::time_point window{std::chrono::steady_clock::now()};
-
-    void Tick() {
-        const auto now = std::chrono::steady_clock::now();
-        if (now - window < std::chrono::seconds{10}) {
-            return;
-        }
-        if (queued + skipped + waited + adopted != 0) {
-            LOG_INFO(Render_Vulkan,
-                     "Background pipeline translation in the last 10 s: {} queued, {} done ({} "
-                     "rebuilt, a texture changed), {} draws skipped meanwhile, {} waited for",
-                     queued, adopted, rebuilt, skipped, waited);
-        }
-        *this = {};
-    }
-};
-BackgroundTranslationReport g_background_report;
-} // Anonymous namespace
-
 GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
-    g_background_report.Tick();
-    if (const auto pending = pending_graphics.find(graphics_key); pending != pending_graphics.end()) {
-        const bool ready =
-            pending->second.wait_for(std::chrono::seconds{0}) == std::future_status::ready;
-        if (!ready && CanSkipNativeDraw()) {
-            ++g_background_report.skipped;
-            return nullptr;
-        }
-        if (!ready) {
-            ++g_background_report.waited;
-        }
-        TranslatedGraphics translated{pending->second.get()};
-        pending_graphics.erase(pending);
-        ++g_background_report.adopted;
-        bool fits = true;
-        for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
-            if (graphics_key.unique_hashes[index] != 0 &&
-                !translated.envs[index].TexturesMatch(*maxwell3d)) {
-                fits = false;
-            }
-        }
-        if (!fits) {
-            // A texture it was translated for changed type or format meanwhile: build it here,
-            // as it would have been without the background translation.
-            ++g_background_report.rebuilt;
-        } else {
-            if (translated.pipeline) {
-                StoreGraphicsPipeline(*translated.pipeline, graphics_key, std::move(translated.envs));
-            }
-            graphics_cache[graphics_key] = std::move(translated.pipeline);
-        }
-    }
     const auto [pair, is_new]{graphics_cache.try_emplace(graphics_key)};
     auto& pipeline{pair->second};
     if (is_new) {
         ReportNewPipelineKey(graphics_key);
-        if (CanSkipNativeDraw() && QueueGraphicsTranslation()) {
-            // Built in the background; this draw is skipped, later ones take it once done.
-            graphics_cache.erase(pair);
-            ++g_background_report.queued;
-            ++g_background_report.skipped;
-            return nullptr;
-        }
         pipeline = CreateGraphicsPipeline();
     }
     if (!pipeline) {
@@ -1432,83 +1089,8 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const
     const bool discard = CanDiscardPendingDraw(maxwell3d->GetNativeMacroEngine().native_turing,
                                               maxwell3d->regs.zeta_enable != 0,
                                               draw_state.draw_element_count,
-                                              draw_state.draw_element_count) ||
-                         CanSkipNativeDraw();
+                                              draw_state.draw_element_count);
     return discard ? nullptr : pipeline;
-}
-
-bool PipelineCache::CanSkipNativeDraw() const {
-    // Performance build 5's rule for native draws: depth-tested ones, or larger than a full screen
-    // quad, are scene geometry the next frames draw again. Small ones without depth often build a
-    // texture once (a full screen pass), so they wait.
-    static const bool enabled = [] {
-        const char* value = std::getenv("EDEN_NX2_ASYNC_SKIP");
-        return value == nullptr || value[0] != '0';
-    }();
-    if (!enabled || !use_asynchronous_shaders || !maxwell3d->GetNativeMacroEngine().native_turing) {
-        return false;
-    }
-    if (maxwell3d->regs.zeta_enable) {
-        return true;
-    }
-    return maxwell3d->draw_manager.draw_state.draw_element_count > 6;
-}
-
-bool PipelineCache::QueueGraphicsTranslation() {
-    // Why a pipeline was built on the GPU thread instead (the first few of each reason).
-    const auto refuse = [](const char* reason) {
-        static std::atomic<u32> logged{};
-        if (logged.fetch_add(1) < 12) {
-            LOG_INFO(Render_Vulkan, "Graphics pipeline built on the GPU thread: {}", reason);
-        }
-        return false;
-    };
-    // Only programs lowered up front: their translation never reads guest memory for code.
-    for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
-        if (graphics_key.unique_hashes[index] != 0 &&
-            (!shader_infos[index] || !shader_infos[index]->lowered_native)) {
-            return refuse("a stage was not lowered up front");
-        }
-    }
-    // Null for a pool too large to copy (Switch 2 pools usually are): translation then reads the
-    // live pool, and the pipeline is checked against it when the GPU thread takes it.
-    const auto texture_pool{GraphicsEnvironment::CopyTexturePool(*maxwell3d, *gpu_memory)};
-    GraphicsEnvironments environments;
-    GetGraphicsEnvironments(environments, graphics_key.unique_hashes);
-    for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
-        if (graphics_key.unique_hashes[index] != 0 && !environments.envs[index].Detach(texture_pool)) {
-            return refuse("an environment could not detach");
-        }
-    }
-    auto promise{std::make_shared<std::promise<TranslatedGraphics>>()};
-    pending_graphics.emplace(graphics_key, promise->get_future());
-    translation_workers.QueueWork([this, key = graphics_key, envs = std::move(environments.envs),
-                                   promise]() mutable {
-        TranslatedGraphics result;
-        try {
-            ShaderPools pools;
-            boost::container::static_vector<Shader::Environment*, Maxwell::MaxShaderProgram> env_ptrs;
-            for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
-                if (key.unique_hashes[index] != 0) {
-                    env_ptrs.push_back(&envs[index]);
-                }
-            }
-            const auto begin = std::chrono::steady_clock::now();
-            result.pipeline = CreateGraphicsPipeline(pools, key, std::span(env_ptrs), nullptr, true);
-            if (const auto elapsed = std::chrono::steady_clock::now() - begin;
-                elapsed > std::chrono::milliseconds{100}) {
-                LOG_INFO(Render_Vulkan, "Graphics pipeline {:016x} translated in the background in {} ms",
-                         key.Hash(),
-                         std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
-            }
-        } catch (const std::exception& exception) {
-            // Shader errors are handled inside; nothing else may end the worker thread.
-            LOG_ERROR(Render_Vulkan, "Background pipeline translation failed: {}", exception.what());
-        }
-        result.envs = std::move(envs);
-        promise->set_value(std::move(result));
-    });
-    return true;
 }
 
 std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
@@ -1571,14 +1153,6 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             programs[index] = MergeDualVertexPrograms(program_va, program_vb, env);
         }
 
-        if (const auto edits = Shader::Optimization::ApplyOotVisualWorkaround(
-                programs[index], program_id != 0 ? program_id : visual_workaround_title,
-                key.unique_hashes[index],
-                oot_visual_workaround)) {
-            LOG_WARNING(Render_Vulkan,
-                        "TEMPORARY OoT visual workaround: shader {:016x}, {} scalar edits",
-                        key.unique_hashes[index], *edits);
-        }
         if (device.GetDriverID() != VK_DRIVER_ID_NVIDIA_PROPRIETARY && Shader::Optimization::HasBrokenPattern(programs[index])) {
             LOG_WARNING(Render_Vulkan, "0x{:016x}: Skipping shader with known issues", key.unique_hashes[index]);
             return nullptr;
@@ -1648,10 +1222,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
 
         const auto runtime_info{MakeRuntimeInfo(programs, key, program, previous_stage, device)};
         ConvertLegacyToGeneric(program, runtime_info);
-        Shader::Profile stage_profile{profile};
-        stage_profile.has_broken_spirv_dynamic_subgroup_shuffle =
-            device.NeedsGraphicsSubgroupShuffleWorkaround(MaxwellToVK::ShaderStage(program.stage));
-        const std::vector<u32> code{EmitSPIRV(stage_profile, runtime_info, program, binding)};
+        const std::vector<u32> code{EmitSPIRV(profile, runtime_info, program, binding)};
         device.SaveShader(code);
         modules[stage_index] = BuildShader(device, code);
 
@@ -1757,31 +1328,22 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline() {
     main_pools.ReleaseContents();
     auto pipeline{
         CreateGraphicsPipeline(main_pools, graphics_key, environments.Span(), nullptr, true)};
-    if (pipeline) {
-        StoreGraphicsPipeline(*pipeline, graphics_key, std::move(environments.envs));
+    if (!pipeline || pipeline_cache_filename.empty()) {
+        return pipeline;
     }
-    return pipeline;
-}
-
-void PipelineCache::StoreGraphicsPipeline(
-    const GraphicsPipeline& pipeline, const GraphicsPipelineCacheKey& key,
-    std::array<GraphicsEnvironment, Maxwell::MaxShaderProgram>&& envs) {
-    if (pipeline_cache_filename.empty()) {
-        return;
-    }
-    if (pipeline.IsMeshPipeline()) {
+    if (pipeline->IsMeshPipeline()) {
         // Not stored: task and mesh programs are translated with the mesh registers, which the
         // cache format does not carry. The few of them rebuild quickly from the driver cache.
         QueueVulkanPipelineCacheFlush();
-        return;
+        return pipeline;
     }
-    if (disk_pipelines.contains(key.Hash())) {
+    if (disk_pipelines.contains(graphics_key.Hash())) {
         // In the disk cache already, only not built at boot.
         QueueVulkanPipelineCacheFlush();
-        return;
+        return pipeline;
     }
-    disk_pipelines.insert(key.Hash());
-    serialization_thread.QueueWork([this, key, envs = std::move(envs)] {
+    disk_pipelines.insert(graphics_key.Hash());
+    serialization_thread.QueueWork([this, key = graphics_key, envs = std::move(environments.envs)] {
         boost::container::static_vector<const GenericEnvironment*, Maxwell::MaxShaderProgram>
             env_ptrs;
         for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
@@ -1792,36 +1354,23 @@ void PipelineCache::StoreGraphicsPipeline(
         SerializePipeline(key, env_ptrs, pipeline_cache_filename, CACHE_VERSION);
     });
     QueueVulkanPipelineCacheFlush();
+    return pipeline;
 }
-
-namespace {
-// Where a runtime compute build spends its time, logged with it when it is slow.
-thread_local std::array<double, 5> g_compute_phase_ms{};
-} // Anonymous namespace
 
 ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
     const ComputePipelineCacheKey& key, const ShaderInfo* shader) {
     const auto begin = std::chrono::steady_clock::now();
-    g_compute_phase_ms = {};
     SCOPE_EXIT {
-        const auto& p = g_compute_phase_ms;
         ReportRuntimePipeline("Compute", begin,
-                              fmt::format("pipeline={:016x} s6:{:016x} address={:#x} (environment "
-                                          "{:.1f}, cfg {:.1f}, translate {:.1f}, spirv {:.1f}, "
-                                          "module {:.1f} ms)",
-                                          key.Hash(), key.unique_hash,
+                              fmt::format("pipeline={:016x} s6:{:016x} address={:#x}", key.Hash(),
+                                          key.unique_hash,
                                           kepler_compute->regs.code_loc.Address() +
-                                              kepler_compute->launch_description.program_start,
-                                          p[0], p[1], p[2], p[3], p[4]));
+                                              kepler_compute->launch_description.program_start));
     };
     const GPUVAddr program_base{kepler_compute->regs.code_loc.Address()};
     const auto& qmd{kepler_compute->launch_description};
-    const auto env_begin = std::chrono::steady_clock::now();
     ComputeEnvironment env{*kepler_compute, *gpu_memory, program_base, qmd.program_start,
                            shader->lowered_native};
-    g_compute_phase_ms[0] = std::chrono::duration<double, std::milli>(
-                                std::chrono::steady_clock::now() - env_begin)
-                                .count();
     env.SetCachedSize(shader->size_bytes);
 
     main_pools.ReleaseContents();
@@ -1859,30 +1408,14 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
 
     LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);
 
-    auto phase_begin = std::chrono::steady_clock::now();
-    const auto end_phase = [&](size_t phase) {
-        const auto now = std::chrono::steady_clock::now();
-        g_compute_phase_ms[phase] = std::chrono::duration<double, std::milli>(now - phase_begin).count();
-        phase_begin = now;
-    };
     Shader::Maxwell::Flow::CFG cfg{env, pools.flow_block, env.StartAddress()};
-    end_phase(1);
 
     // Dump it before error.
     if (Settings::values.dump_guest_shaders) {
         env.Dump(hash, key.unique_hash);
     }
 
-    phase_begin = std::chrono::steady_clock::now();
     auto program{TranslateProgram(pools.inst, pools.block, env, cfg, host_info)};
-    end_phase(2);
-    if (const auto edits = Shader::Optimization::ApplyOotVisualWorkaround(
-            program, program_id != 0 ? program_id : visual_workaround_title, key.unique_hash,
-            oot_visual_workaround)) {
-        LOG_WARNING(Render_Vulkan,
-                    "TEMPORARY OoT visual workaround: shader {:016x}, {} scalar edits",
-                    key.unique_hash, *edits);
-    }
     const VkDriverIdKHR driver_id = device.GetDriverID();
     const bool needs_shared_mem_clamp =
         driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY ||
@@ -1896,18 +1429,9 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
                     max_shared_memory / 1024);
         program.shared_memory_size = max_shared_memory;
     }
-    phase_begin = std::chrono::steady_clock::now();
     const std::vector<u32> code{EmitSPIRV(profile, program)};
-    end_phase(3);
     device.SaveShader(code);
     vk::ShaderModule spv_module{BuildShader(device, code)};
-    end_phase(4);
-    if (const auto& p = g_compute_phase_ms; p[1] + p[2] + p[3] + p[4] > 100.0) {
-        LOG_INFO(Render_Vulkan,
-                 "Slow compute shader {:016x}: cfg {:.1f}, translate {:.1f}, spirv {:.1f}, module "
-                 "{:.1f} ms ({} blocks, {} SPIR-V words)",
-                 key.unique_hash, p[1], p[2], p[3], p[4], program.blocks.size(), code.size());
-    }
 
     // Text log + .spv dump. Same split as the graphics path.
     const bool should_log = GPU::Logging::IsActive();

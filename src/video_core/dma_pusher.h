@@ -7,10 +7,8 @@
 #pragma once
 
 #include <array>
-#include <chrono>
 #include <atomic>
 #include <condition_variable>
-#include <mutex>
 #include <optional>
 #include <span>
 #include <vector>
@@ -125,57 +123,11 @@ struct CommandList final {
     /// executed instead of the memory, which the game may already be refilling for a later frame.
     std::vector<CommandHeader> submitted_words;
     std::vector<u32> submitted_offsets;
-    /// Entries (ascending) not copied when submitted, because a GPU map still queued covers them:
-    /// DmaPusher::Push copies them after the map, and until then they read memory.
-    std::vector<u32> deferred_entries;
     /// DmaPusher::suspensions when the words were copied. A list copied during a suspension, or
     /// that waited behind one, reads memory instead: games write the commands it runs before they
     /// release the acquire.
     u64 snapshot_suspensions = 0;
 };
-
-namespace GpfifoCapture {
-bool Enabled() noexcept;
-u64 BeginSubmission(s32 fd, u32 ioctl, u32 variant, u64 session,
-                    std::span<const u8> input, std::size_t inline_size) noexcept;
-void RecordEnqueue(u64 submit_id, s32 channel, const char* origin, CommandList& entries) noexcept;
-void Flush(const char* reason) noexcept;
-}
-
-/// Submit time of the list the GPU is running (0: none yet), for GPU time reports.
-inline std::atomic<u64> g_nx2_list_submit_ns;
-
-/// The GPU time a report shows: when the game submitted the work, not when the host got to it.
-/// Games time their GPU work with these reports, and the host's command processing is no
-/// measure of it (Wonder took its frames for GPU-bound and switched its light mask to a
-/// cheaper pass every other frame: flickering dark scenery). Never later than now, never
-/// behind an earlier report.
-constexpr u64 Nx2ReportTimeNs(u64 now, u64 submitted, u64 last) {
-    const u64 time = submitted != 0 && submitted < now ? submitted : now;
-    return time > last ? time : last;
-}
-
-/// The GPU times reports show, never behind an earlier one (reports come from several threads).
-class Nx2ReportClock {
-public:
-    u64 Next(u64 now) {
-        std::scoped_lock lock{mutex};
-        last = Nx2ReportTimeNs(now, g_nx2_list_submit_ns.load(std::memory_order_relaxed), last);
-        return last;
-    }
-
-private:
-    std::mutex mutex;
-    u64 last{};
-};
-
-/// The GPU starts on `list`: its reports show its submit time (lists from before it was known
-/// keep the previous one).
-inline void Nx2NoteRunningList(const CommandList& list) {
-    if (list.submit_ns != 0) {
-        g_nx2_list_submit_ns.store(list.submit_ns, std::memory_order_relaxed);
-    }
-}
 
 /// FNV-1a over pushbuffer words (EDEN_NX2_PB_CHECK).
 inline u64 HashPushbufferWords(std::span<const u32> words) {
@@ -203,13 +155,9 @@ public:
     void Push(CommandList&& entries) {
         // Copied during a suspension, or behind one: copy again now, unless still suspended.
         const u64 now = suspensions.load(std::memory_order_acquire);
-        if (!entries.submitted_offsets.empty() && (now & 1) == 0) {
-            if (ResnapshotEnabled() && entries.snapshot_suspensions != now) {
-                RefreshSnapshot(entries, now);
-            } else if (!entries.deferred_entries.empty()) {
-                // Behind a GPU map when submitted: the map has run by now (GPU::MapInOrder).
-                RefreshDeferredEntries(entries);
-            }
+        if (ResnapshotEnabled() && !entries.submitted_offsets.empty() && (now & 1) == 0 &&
+            entries.snapshot_suspensions != now) {
+            RefreshSnapshot(entries, now);
         }
         dma_pushbuffer.push_back(std::move(entries));
     }
@@ -247,8 +195,6 @@ private:
     [[nodiscard]] bool WantsSegment() const;
     void ReportUnboundSubchannel();
     void WatchArgument(u32 method, u32 argument) const;
-    void RecordCapture(const char* phase, std::span<const CommandHeader> commands = {},
-                       std::size_t word_offset = 0) const noexcept;
 
 public:
     /// Logs the GPFIFO entry being processed (and the one before it), read through the GPU MMU
@@ -258,11 +204,8 @@ public:
     void RecordParsedEntry(const CommandListHeader& header, std::span<const CommandHeader> commands);
     /// Whether the entry lies on device pages the GPU has written (NX2).
     bool IsGpuWrittenCommands(GPUVAddr address, size_t size);
-    /// Copies the list's words from memory again, as of suspension count `now`, from entry
-    /// `first_entry` on (the entries before it ran already).
-    void RefreshSnapshot(CommandList& list, u64 now, size_t first_entry = 0);
-    /// Copies the list's deferred entries (CommandList::deferred_entries) from memory.
-    void RefreshDeferredEntries(CommandList& list);
+    /// Copies the list's words from memory again, as of suspension count `now`.
+    void RefreshSnapshot(CommandList& list, u64 now);
 
     /// EDEN_NX2_RESNAPSHOT=0 turns snapshot refreshes off.
     static bool ResnapshotEnabled() {
@@ -277,26 +220,8 @@ public:
     /// since. False when not all are current (or the list isn't GPU-written): the caller drains,
     /// flushes and reads guest memory.
     bool ReadGpuWrittenCommands(GPUVAddr address, u32 count);
-    /// EDEN_NX2_LIST_VERIFY: reads the list ReadGpuWrittenCommands just read again as before
-    /// EXP40 (Nx2ListVerify) and leaves the words read last in command_headers.
-    void VerifyGpuWrittenCommands(GPUVAddr address, u32 count);
     /// Brings command list words the GPU wrote (still only in host buffers) to guest memory.
     bool FlushGpuWrittenCommands(GPUVAddr address, size_t size);
-
-private:
-    /// FlushGpuWrittenCommands under Nx2CheckCommandPagesFirst: entries checked since a page was
-    /// last marked GPU-written for the first time (g_nx2_gpu_written_generation), up to the
-    /// count after which they check the page bits before draining.
-    static constexpr u32 CommandChecksBeforeBitsFirst = 2048;
-    u64 command_check_generation{~u64{0}};
-    u32 command_checks_since_mark{};
-    /// The same for the wait for queued writers before reading an entry (WaitForEntryWriters).
-    u64 entry_wait_generation{~u64{0}};
-    u32 entry_checks_since_mark{};
-    /// Whether an entry not on GPU-written pages must still wait for the split's queued writers.
-    bool WaitForEntryWriters();
-
-public:
 
 private:
 
@@ -356,12 +281,10 @@ public:
 
     VideoCore::RasterizerInterface* rasterizer = nullptr;
 
-    // Not bitfields: the fence thread sets synced, and a bitfield write would rewrite the byte it
-    // shares with dma_increment_once and signal_sync (#479).
-    const bool ib_enable = true; ///< IB mode enabled
-    bool dma_increment_once = false;
-    bool signal_sync = false;
-    std::atomic<bool> synced{false};
+    const bool ib_enable : 1 = true; ///< IB mode enabled
+    bool dma_increment_once : 1 = false;
+    bool signal_sync : 1 = false;
+    bool synced : 1 = false;
 };
 
 } // namespace Tegra

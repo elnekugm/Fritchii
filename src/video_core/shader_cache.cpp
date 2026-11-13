@@ -9,10 +9,7 @@
 #include <cstdlib>
 #include <exception>
 #include <functional>
-#include <chrono>
-#include <cstdlib>
 #include <string>
-#include <string_view>
 #include <unordered_set>
 #include <fmt/ranges.h>
 #include <array>
@@ -33,50 +30,11 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/memory_manager.h"
-#include "video_core/nx2_debug_control.h"
-#include "video_core/pipeline_cache_policy.h"
 #include "video_core/shader_cache.h"
 #include "video_core/shader_environment.h"
 #include "video_core/texture_cache/util.h"
 
 namespace VideoCommon {
-
-u64 VertexAttributeMaskOf(const Shader::Environment& env) {
-    static const bool key_all = [] {
-        const char* value = std::getenv("EDEN_NX2_KEY_ALL_ATTRIBUTES");
-        return value != nullptr && value[0] == '1';
-    }();
-    if (key_all) {
-        return ~u64{0};
-    }
-    const Shader::Stage stage{env.ShaderStage()};
-    if (stage == Shader::Stage::Task || stage == Shader::Stage::Mesh) {
-        // No vertex input (Ocarina of Time: 191 keys for 31 sets of shaders, split only by the
-        // attribute registers).
-        return 0;
-    }
-    if (stage != Shader::Stage::VertexB || !env.IsNativeProgram()) {
-        return ~u64{0};
-    }
-    // The hardware only fetches the attributes in the input map, so a read outside it is never
-    // valid (none of Ocarina of Time's 1,250 cached vertex programs makes one).
-    std::array<std::array<bool, 4>, Tegra::Engines::Maxwell3D::Regs::NumVertexAttributes>
-        input_generic{};
-    for (size_t index = 0; index < input_generic.size(); ++index) {
-        input_generic[index] = env.SPH().vtg.InputGeneric(index);
-    }
-    return VertexAttributeMask(input_generic);
-}
-
-u32 GenericReadMask(const Shader::ProgramHeader& sph) noexcept {
-    u32 mask = 0;
-    for (size_t index = 0; index < 32; ++index) {
-        if ((sph.vtg.imap_generic_vector[index >> 1] >> ((index % 2) * 4)) & 0xF) {
-            mask |= 1U << index;
-        }
-    }
-    return mask;
-}
 
 void ShaderCache::InvalidateRegion(VAddr addr, size_t size) {
     std::scoped_lock lock{invalidation_mutex};
@@ -100,54 +58,9 @@ void ShaderCache::OnCacheInvalidation(VAddr addr, size_t size) {
     InvalidatePagesInRegion(addr, size);
 }
 
-std::vector<std::pair<DAddr, size_t>> ShaderCache::GetShaderCodeRanges() {
-    std::scoped_lock lock{invalidation_mutex, lookup_mutex, rejected_mutex};
-    std::vector<std::pair<DAddr, size_t>> ranges;
-    ranges.reserve(lookup_cache.size() + rejected_native.size());
-    for (const auto& [addr, entry] : lookup_cache) {
-        ranges.emplace_back(addr, entry->addr_end - entry->addr_start);
-    }
-    for (const auto& [addr, rejection] : rejected_native) {
-        ranges.emplace_back(addr, rejection.bytes.size());
-    }
-    return ranges;
-}
-
 void ShaderCache::SyncGuestHost() {
     std::scoped_lock lock{invalidation_mutex};
     RemovePendingShaders();
-}
-
-void ShaderCache::RefreshDebugRejections(bool unrejected) {
-    std::vector<std::pair<VAddr, VAddr>> ranges;
-    {
-        std::scoped_lock lock{lookup_mutex};
-        for (const auto& [addr, entry] : lookup_cache) {
-            const ShaderInfo* const info = entry->data;
-            if (info->lowered_native &&
-                (VideoCore::Nx2Debug::IsRejected(info->unique_hash) ||
-                 VideoCore::Nx2Debug::IsRejected(info->lowered_native->native_program_key))) {
-                ranges.emplace_back(entry->addr_start, entry->addr_end);
-            }
-        }
-    }
-    {
-        std::scoped_lock lock{invalidation_mutex};
-        for (const auto& [start, end] : ranges) {
-            InvalidatePagesInRegion(start, end - start);
-        }
-        RemovePendingShaders();
-    }
-    if (unrejected) {
-        std::scoped_lock lock{rejected_mutex};
-        rejected_native.clear();
-    }
-    // shader_infos may point at removed programs: every channel must refresh its stages.
-    for (const size_t id : active_channel_ids) {
-        channel_storage[id].maxwell3d.dirty.flags[VideoCommon::Dirty::Shaders] = true;
-    }
-    LOG_INFO(HW_GPU, "Debug server rejections applied: {} cached programs dropped{}", ranges.size(),
-             unrejected ? ", earlier rejections forgotten" : "");
 }
 
 ShaderCache::ShaderCache(Tegra::MaxwellDeviceMemoryManager& device_memory_)
@@ -170,23 +83,10 @@ u64 ShaderCache::MeshStateHash() const {
 }
 
 bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
-    ReclaimInvalidatedShaders();
     auto& dirty{maxwell3d->dirty.flags};
     if (!dirty[VideoCommon::Dirty::Shaders]) {
-        if (last_shaders_valid) {
-            return true;
-        }
-        // A native program may have been bound before its upload completed. Failed
-        // programs are not write tracked, so no register dirtiness need follow the upload.
-        // Allow the existing byte-change check to recover without another shader bind.
-        if (std::chrono::steady_clock::now() < next_failed_stage_retry) {
-            return false;
-        }
+        return last_shaders_valid;
     }
-    next_failed_stage_retry = std::chrono::steady_clock::now() + std::chrono::milliseconds{250};
-    NativeShaderHitchTrace::SlowScope refresh_hitch{
-        "refresh-stages", 0, ~0U,
-        Common::HitchDiagnostic::Enabled() && maxwell3d->GetNativeMacroEngine().native_turing};
     dirty[VideoCommon::Dirty::Shaders] = false;
 
     const GPUVAddr base_addr{maxwell3d->regs.program_region.Address()};
@@ -219,8 +119,7 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
             return false;
         }
         const ShaderInfo* shader_info{TryGet(*cpu_shader_addr)};
-        if (!shader_info && native && IsRejected(*cpu_shader_addr) &&
-            !RecheckRejection(*cpu_shader_addr)) {
+        if (!shader_info && native && IsRejected(*cpu_shader_addr)) {
             // A rejected program fails the same way every time it is bound: skip its draws
             // without rethrowing (two C++ throws each time cost ~1-2% of the GPU thread).
             maxwell3d->GetNativeMacroEngine().native_execution_failed = true;
@@ -233,16 +132,10 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
                 // Native programs are lowered while the environment is built (once: the
                 // ShaderInfo keeps the result for the pipeline's environments).
                 RethrowIfRejected(*cpu_shader_addr);
-                GraphicsEnvironment env{*maxwell3d, *gpu_memory, program, native ? shader_addr : base_addr,
-                                       start_address, {}, support_cooperative_matrix};
-                NativeShaderHitchTrace::SlowScope info_hitch{
-                    "shader-info", shader_addr, static_cast<u32>(env.ShaderStage()),
-                    Common::HitchDiagnostic::Enabled() && native};
-                info_hitch.SourceBytes(env.SourceSizeBytes());
+                GraphicsEnvironment env{*maxwell3d, *gpu_memory, program, native ? shader_addr : base_addr, start_address};
                 shader_info = MakeShaderInfo(env, *cpu_shader_addr);
-                info_hitch.Finish("ok");
             } catch (const Shader::Exception&) {
-                RememberRejection(*cpu_shader_addr, shader_addr);
+                RememberRejection(*cpu_shader_addr);
                 // Once per program: which stage slot it is bound to, its header and the slot's
                 // registers (to tell how a pipeline with task/mesh programs is set up).
                 static std::unordered_set<GPUVAddr> described;
@@ -288,7 +181,6 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
             }
         }
         shader_infos[index] = shader_info;
-        vertex_attribute_masks[index] = shader_info->vertex_attribute_mask;
         unique_hashes[index] = shader_info->unique_hash;
         if (mesh && (program == Tegra::Engines::Maxwell3D::Regs::ShaderType::VertexB ||
                      program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Tessellation)) {
@@ -327,7 +219,6 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
 }
 
 const ShaderInfo* ShaderCache::ComputeShader() {
-    ReclaimInvalidatedShaders();
     const GPUVAddr program_base{kepler_compute->regs.code_loc.Address()};
     const auto& qmd{kepler_compute->launch_description};
     const GPUVAddr shader_addr{program_base + qmd.program_start};
@@ -345,12 +236,6 @@ const ShaderInfo* ShaderCache::ComputeShader() {
                                                      *kepler_compute, *gpu_memory, bank, offset);
                                              }))
             throw Shader::Ampere::TrapGuardError{};
-    } else if (kepler_compute->IsNativeMode() && IsRejected(*cpu_shader_addr)) {
-        // A rejected program fails the same way on every dispatch. GetGraphicsEnvironments
-        // skips those draws without rethrowing; doing the same here avoids two C++ throws, a
-        // mutex-guarded insert and an exception_ptr for each dispatch of the program. The
-        // caller already turns a missing shader into a failed dispatch.
-        return nullptr;
     } else {
         try {
             RethrowIfRejected(*cpu_shader_addr);
@@ -372,10 +257,6 @@ const ShaderInfo* ShaderCache::ComputeShader() {
         kepler_compute->TraceDlssContract(shader->lowered_native->native_program_key);
     }
     if (kepler_compute->IsNativeMode() && shader->lowered_native &&
-        kepler_compute->BypassOotNetwork(program_id, shader->lowered_native->native_program_key)) {
-        throw FireEmblemUpscale::DispatchReplaced{};
-    }
-    if (kepler_compute->IsNativeMode() && shader->lowered_native &&
         kepler_compute->ProcessGameDlss(program_id, shader->lowered_native->native_program_key)) {
         throw FireEmblemUpscale::DispatchReplaced{};
     }
@@ -385,7 +266,7 @@ const ShaderInfo* ShaderCache::ComputeShader() {
 void ShaderCache::RethrowIfRejected(VAddr addr) {
     std::scoped_lock lock{rejected_mutex};
     if (const auto it = rejected_native.find(addr); it != rejected_native.end()) {
-        std::rethrow_exception(it->second.error);
+        std::rethrow_exception(it->second);
     }
 }
 
@@ -394,105 +275,18 @@ bool ShaderCache::IsRejected(VAddr addr) {
     return rejected_native.contains(addr);
 }
 
-// Programs can be rejected before the guest has finished writing them (Yoshi binds programs
-// that still read as zeros), and their pages are not write tracked, so the rejection would
-// stick for the rest of the run. Keep the bytes a rejection was made from and compare them
-// again at most every 250 ms; a change drops the rejection. EDEN_NX2_REJECT_RECHECK=0 turns
-// this off. Ported from zortos293/Eglantine 46a184c4e (opt-in there).
-static bool RejectRecheckEnabled() {
-    static const bool enabled = [] {
-        const char* const value = std::getenv("EDEN_NX2_REJECT_RECHECK");
-        return !value || std::string_view{value} != "0";
-    }();
-    return enabled;
-}
-
-static std::vector<u8> ReadRejectedWindow(Tegra::MemoryManager& gpu_memory, GPUVAddr addr) {
-    size_t length = 0x2000;
-    while (length > 0x80 && !gpu_memory.IsFullyMappedRange(addr, length)) {
-        length /= 2;
-    }
-    std::vector<u8> bytes(length);
-    // Rejected programs may be uploaded by the guest GPU after their first bind. Read the
-    // coherent bytes just as NativeInstructionReader does, otherwise the retry only compares
-    // stale CPU memory and never notices that the GPU completed the upload.
-    gpu_memory.ReadBlock(addr, bytes.data(), length);
-    return bytes;
-}
-
-bool ShaderCache::RecheckRejection(VAddr addr) {
-    if (!RejectRecheckEnabled()) {
-        return false;
-    }
-    const auto now = std::chrono::steady_clock::now();
-    GPUVAddr gpu_addr;
-    std::vector<u8> before;
-    std::chrono::steady_clock::time_point made;
-    {
-        std::scoped_lock lock{rejected_mutex};
-        const auto it = rejected_native.find(addr);
-        if (it == rejected_native.end() ||
-            now - it->second.checked < std::chrono::milliseconds{250}) {
-            return false;
-        }
-        it->second.checked = now;
-        gpu_addr = it->second.gpu_addr;
-        before = it->second.bytes;
-        made = it->second.made;
-    }
-    const std::vector<u8> after = ReadRejectedWindow(*gpu_memory, gpu_addr);
-    if (before == after) {
-        return false;
-    }
-    {
-        std::scoped_lock lock{rejected_mutex};
-        rejected_native.erase(addr);
-    }
-    const size_t length = (std::min)(before.size(), after.size());
-    const size_t offset = static_cast<size_t>(
-        std::mismatch(before.begin(), before.begin() + static_cast<std::ptrdiff_t>(length),
-                      after.begin())
-            .first -
-        before.begin());
-    static std::atomic<u32> reports{};
-    if (reports.fetch_add(1, std::memory_order_relaxed) < 256) {
-        LOG_INFO(HW_GPU,
-                 "Rejected program {:#x} changed {} ms after its rejection at +{:#x}, lowering again",
-                 gpu_addr,
-                 std::chrono::duration_cast<std::chrono::milliseconds>(now - made).count(), offset);
-    }
-    return true;
-}
-
-void ShaderCache::RememberRejection(VAddr addr, GPUVAddr gpu_addr) {
-    Rejection rejection{};
-    rejection.error = std::current_exception();
-    rejection.gpu_addr = gpu_addr;
-    if (RejectRecheckEnabled()) {
-        rejection.bytes = ReadRejectedWindow(*gpu_memory, gpu_addr);
-        rejection.made = rejection.checked = std::chrono::steady_clock::now();
-    }
+void ShaderCache::RememberRejection(VAddr addr) {
     std::scoped_lock lock{rejected_mutex};
-    if (rejected_native.contains(addr)) {
-        // Called from a catch block: keep the first exception for that address instead of
-        // capturing and inserting a new one on every rejected dispatch.
-        return;
-    }
     rejected_native.emplace(addr, std::current_exception());
-    // InnerInvalidation only reaches InvalidateRegions on marked pages, and a rejection can
-    // outlive (or precede) the registration that marked its page.
-    page_filter.Mark(addr, 1);
     rejected_lowest.store((std::min)(rejected_lowest.load(std::memory_order_relaxed), addr),
                           std::memory_order_relaxed);
     rejected_highest.store((std::max)(rejected_highest.load(std::memory_order_relaxed), addr),
                            std::memory_order_relaxed);
 }
 
-size_t ShaderCache::GetGraphicsEnvironments(GraphicsEnvironments& result,
-                                            const std::array<u64, NUM_PROGRAMS>& unique_hashes,
-                                            bool snapshot) {
+void ShaderCache::GetGraphicsEnvironments(GraphicsEnvironments& result,
+                                          const std::array<u64, NUM_PROGRAMS>& unique_hashes) {
     size_t env_index{};
-    size_t snapshot_bytes{};
     const GPUVAddr base_addr{maxwell3d->regs.program_region.Address()};
     const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
     for (size_t index = 0; index < NUM_PROGRAMS; ++index) {
@@ -507,14 +301,10 @@ size_t ShaderCache::GetGraphicsEnvironments(GraphicsEnvironments& result,
             ? (static_cast<u64>(config.reserved[0] & 0xff) << 32) | config.reserved[1]
             : base_addr;
         env = GraphicsEnvironment{*maxwell3d, *gpu_memory, program, address, start_address,
-                                  shader_infos[index]->lowered_native, support_cooperative_matrix};
+                                  shader_infos[index]->lowered_native};
         env.SetCachedSize(shader_infos[index]->size_bytes);
-        if (snapshot) {
-            snapshot_bytes += env.TakeSnapshot();
-        }
         result.env_ptrs[env_index++] = &env;
     }
-    return snapshot_bytes;
 }
 
 ShaderInfo* ShaderCache::TryGet(VAddr addr) const {
@@ -532,7 +322,6 @@ void ShaderCache::Register(std::unique_ptr<ShaderInfo> data, VAddr addr, size_t 
 
     const VAddr addr_end = addr + size;
     Entry* const entry = NewEntry(addr, addr_end, data.get());
-    page_filter.Mark(addr, size);
 
     const u64 page_end = (addr_end + YUZU_PAGESIZE - 1) >> YUZU_PAGEBITS;
     for (u64 page = addr >> YUZU_PAGEBITS; page < page_end; ++page) {
@@ -585,40 +374,18 @@ void ShaderCache::RemovePendingShaders() {
     marked_for_removal.clear();
 
     if (!removed_shaders.empty()) {
-        const bool sorted = removed_shaders.size() > 16;
-        if (sorted) {
+        if (removed_shaders.size() > 16) {
             std::ranges::sort(removed_shaders, std::less<ShaderInfo*>{});
+            std::erase_if(storage, [&removed_shaders](const std::unique_ptr<ShaderInfo>& shader) {
+                return std::binary_search(removed_shaders.begin(), removed_shaders.end(),
+                                          shader.get(), std::less<ShaderInfo*>{});
+            });
+        } else {
+            std::erase_if(storage, [&removed_shaders](const std::unique_ptr<ShaderInfo>& shader) {
+                return std::ranges::find(removed_shaders, shader.get()) != removed_shaders.end();
+            });
         }
-        for (auto& shader : storage) {
-            const bool removed = sorted
-                ? std::binary_search(removed_shaders.begin(), removed_shaders.end(), shader.get(),
-                                     std::less<ShaderInfo*>{})
-                : std::ranges::find(removed_shaders, shader.get()) != removed_shaders.end();
-            if (removed) {
-                retired_shaders.push_back(std::move(shader));
-            }
-        }
-        std::erase(storage, nullptr);
-        invalidation_generation.fetch_add(1, std::memory_order_release);
     }
-}
-
-void ShaderCache::ReclaimInvalidatedShaders() {
-    if (invalidation_generation.load(std::memory_order_acquire) ==
-        observed_invalidation_generation) {
-        return;
-    }
-    // Apart from the bound stages, no raw ShaderInfo pointer survives between pipeline lookups.
-    // Environments sent to workers own their lowered code, so dropping those stages is sufficient.
-    // CPU invalidation holds this same lock while retiring objects and publishing a generation.
-    std::scoped_lock lock{lookup_mutex};
-    shader_infos.fill(nullptr);
-    last_shaders_valid = false;
-    if (maxwell3d) {
-        maxwell3d->dirty.flags[VideoCommon::Dirty::Shaders] = true;
-    }
-    retired_shaders.clear();
-    observed_invalidation_generation = invalidation_generation.load(std::memory_order_relaxed);
 }
 
 void ShaderCache::InvalidatePageEntries(std::vector<Entry*>& entries, VAddr addr, VAddr addr_end) {
@@ -682,10 +449,6 @@ const ShaderInfo* ShaderCache::MakeShaderInfo(GenericEnvironment& env, VAddr cpu
         info->size_bytes = env.ReadSizeBytes();
     }
     info->lowered_native = env.LoweredNative();
-    info->vertex_attribute_mask = VertexAttributeMaskOf(env);
-    if (env.IsNativeProgram() && env.ShaderStage() == Shader::Stage::VertexB) {
-        info->generic_read_mask = GenericReadMask(env.SPH());
-    }
     const size_t size_bytes{env.SourceSizeBytes() ? env.SourceSizeBytes() : info->size_bytes};
     const ShaderInfo* const result{info.get()};
     Register(std::move(info), cpu_addr, size_bytes);
