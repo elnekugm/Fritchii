@@ -141,6 +141,29 @@ inline u64 Now() {
     return static_cast<u64>(Common::g_wall_clock.GetTimeNS().count());
 }
 
+/// What a front macro memory read (MME DMA) had to wait for: the newest unexecuted writer.
+enum class DmaWaitCause : u32 {
+    ComputeCopy,       ///< Compute or copy work
+    HostSync,          ///< The work before a host-level wait
+    ConstBufferUpload, ///< A 3D constant buffer upload (const_buffer.buffer)
+    InlineUpload,      ///< 3D inline data
+    Macro3D,           ///< A 3D macro register
+    Report,            ///< A 3D report (report_semaphore.query)
+    DmaLaunch,         ///< 3D launch_dma
+    SyncInfo,          ///< 3D sync_info
+    WaitForIdle,       ///< 3D wait_for_idle
+    Other3D,           ///< Another memory-writing 3D method
+    OtherEngine,       ///< A compute, DMA, inline-to-memory or 2D engine method
+    Deferred,          ///< Puller semaphore releases and maps
+    AvoidedByRange,    ///< Not waited: the pending writes' ranges miss the read (RangeLastWrite)
+    Count,
+};
+
+inline constexpr std::array<const char*, static_cast<size_t>(DmaWaitCause::Count)>
+    dma_wait_cause_names{"compute/copy",  "host sync",    "cbuf upload", "inline upload",
+                         "3D macro",      "report",       "dma launch",  "sync info",
+                         "wait for idle", "other 3D",     "other engine", "deferred",
+                         "avoided (range)"};
 // What the zones and drain waits measure in: the time stamp counter without the fences the wall
 // clock reads it with (those fences cost ~10% of the GPU back thread with ~45,000 draws a
 // second). Report converts it with the wall clock.
@@ -151,6 +174,25 @@ inline u64 Ticks() {
     return Now();
 #endif
 }
+
+/// TEST: amounts counted with EDEN_NX2_GPU_PROFILE=2, logged per second in a line of their own.
+enum class FineCounter : u32 {
+    UniformRebinds,  ///< Small uniform buffers bound again from the same stream allocation
+    UniformStreamed, ///< Small uniform buffers copied into the stream buffer
+    UniformCached,   ///< Uniform buffers bound from their host buffer
+    UniformOther,    ///< Uniform buffers bound otherwise (root tables, OpenGL, fallbacks)
+    UniformBytes,    ///< Bytes of the uniform buffers bound (all paths)
+    StorageBinds,    ///< Graphics storage buffers bound
+    TextureHandles,  ///< Graphics texture handles read
+    Count,
+};
+
+inline constexpr std::array<const char*, static_cast<size_t>(FineCounter::Count)>
+    fine_counter_names{
+        "uniform rebinds", "uniform streamed", "uniform cached",  "uniform other",
+        "uniform bytes",   "storage binds",    "texture handles",
+    };
+static_assert(fine_counter_names.back() != nullptr, "a fine counter without a name");
 
 struct ThreadData {
     std::array<u64, static_cast<size_t>(FineCounter::Count)> fine_counters{}; ///< TEST
@@ -215,8 +257,10 @@ public:
         if (!enabled) {
             return;
         }
-        parent_child_ns = t_data.child_ns;
-        t_data.child_ns = 0;
+        auto& data = t_data;
+        ++data.depth;
+        parent_child_ns = data.child_ns;
+        data.child_ns = 0;
         start = Ticks();
     }
 
@@ -465,6 +509,13 @@ inline std::unordered_set<u64>& DmaReadPages() {
 inline void Add(Counter counter, u64 amount) {
     if (Enabled()) {
         t_data.counters[static_cast<size_t>(counter)] += amount;
+    }
+}
+
+/// TEST: EDEN_NX2_GPU_PROFILE=2 only.
+inline void AddFine(FineCounter counter, u64 amount) {
+    if (Fine()) [[unlikely]] {
+        t_data.fine_counters[static_cast<size_t>(counter)] += amount;
     }
 }
 
