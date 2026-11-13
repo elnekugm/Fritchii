@@ -997,23 +997,14 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         const auto read_handle{[&](const auto& desc, u32 index) {
             if (desc.handle_program != ~0U) {
                 // Read by the shader from a storage buffer: computed for this draw.
-                const auto evaluate{[&](u64 storage_alignment) {
+                const auto evaluate{[&]() {
                     return VideoCommon::EvaluateTextureHandle(
                         info, desc.handle_program, *gpu_memory,
                         [&](u32 cbuf) -> GPUVAddr {
                             return cbuf < cbufs.size() && cbufs[cbuf].enabled ? cbufs[cbuf].address
                                                                               : GPUVAddr{};
-                        },
-                        );
+                        });
                 }};
-                // The program's storage offsets are relative to the buffer address aligned down
-                // to the host storage alignment (StorageOffset). EDEN_NX2_HANDLE_ALIGN=0 reads
-                // the words at the unaligned address instead (A/B).
-                static const bool align_storage{[] {
-                    const char* const value{std::getenv("EDEN_NX2_HANDLE_ALIGN")};
-                    return value == nullptr || *value != '0';
-                }()};
-                const u64 storage_alignment{device.GetStorageBufferAlignment()};
                 const u32 raw{evaluate()};
                 if (raw == 0) {
                     ++zero_texture_handles;
@@ -1021,10 +1012,8 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                     const std::pair key_program{key.unique_hashes[stage + 1], desc.handle_program};
                     if (logged.size() < 64 && logged.insert(key_program).second) {
                         LOG_INFO(Render_Vulkan,
-                                 "Texture handle program {} of stage {} (shader {:016x}) gave 0; "
-                                 "aligned to {} it gives {:#x}, unaligned {:#x}",
-                                 desc.handle_program, stage, key_program.first, storage_alignment,
-                                 evaluate(storage_alignment), evaluate(1));
+                                 "Texture handle program {} of stage {} (shader {:016x}) gave 0",
+                                 desc.handle_program, stage, key_program.first);
                     }
                 }
                 return TexturePair(raw, via_header_index);
