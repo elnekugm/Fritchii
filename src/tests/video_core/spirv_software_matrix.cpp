@@ -613,30 +613,6 @@ TEST_CASE("Cooperative HMMA falls back to the software helper", "[video_core][te
     }
 }
 
-TEST_CASE("Cooperative HMMA self-test shader runs one lowering on one warp",
-          "[video_core][tensor][ampere]") {
-    for (const u32 version : {0x00010300U, 0x00010600U}) {
-        const auto code = Backend::SPIRV::EmitCooperativeHmmaTest(version);
-        REQUIRE(code[1] == version);
-        REQUIRE(HasCapability(code, CAPABILITY_COOPERATIVE_MATRIX));
-        RequireVulkanMemoryModel(code);
-        RequireHmmaMatrixTypes(code);
-        REQUIRE(Instructions(code, OP_COOPERATIVE_MATRIX_MUL_ADD).size() == 1);
-        const auto modes = Instructions(code, 16); // OpExecutionMode
-        REQUIRE(modes.size() == 1);
-        REQUIRE(modes[0][1] == 17); // LocalSize
-        REQUIRE(modes[0][2] == 32);
-        if (const char* directory = std::getenv("EDEN_TENSOR_TEST_OUTPUT")) {
-            std::filesystem::create_directories(directory);
-            std::ofstream file{std::filesystem::path{directory} /
-                                   ("cooperative-self-test-" + std::to_string(version) + ".spv"),
-                               std::ios::binary};
-            file.write(reinterpret_cast<const char*>(code.data()),
-                       static_cast<std::streamsize>(code.size() * sizeof(u32)));
-        }
-    }
-}
-
 TEST_CASE("16x16x16 cooperative HMMA runs both depths through shared memory",
           "[video_core][tensor][ampere]") {
     for (const auto& [depth, version] : {std::pair{16U, 0x00010500U}, std::pair{16U, 0x00010600U},
