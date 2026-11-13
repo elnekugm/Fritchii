@@ -101,9 +101,9 @@ public:
         }
         auto [should_flush, committed_flushes] = CommitCacheFlushes();
         if (Nx2Profile::Enabled()) [[unlikely]] {
-            NoteFenceDecision(delay_fence, committed_flushes, false);
+            NoteFenceDecision(delay_fence, committed_flushes, trim);
         }
-        if (!delay_fence && committed_flushes == 0 && SkipEmptyFence(false)) {
+        if (!delay_fence && committed_flushes == 0 && SkipEmptyFence(trim)) {
             Nx2Profile::Scope skipped_scope{Nx2Profile::Zone::FenceSkipped};
             gpu.BeginAsyncGuestWrite();
             SCOPE_EXIT { gpu.EndAsyncGuestWrite(); };
@@ -117,7 +117,7 @@ public:
         if constexpr (can_async_check) {
             // EXP28 & 2: a fence with nothing to wait for on the host GPU carries only queued
             // work (FoldStubbedFence).
-            if (false && !should_flush && committed_flushes == 0) {
+            if ((fence_trims & 2) != 0 && !should_flush && committed_flushes == 0) {
                 // As the made fence below: its callback runs now, before its queued work.
                 if (!delay_fence) {
                     func();
@@ -127,7 +127,7 @@ public:
                     SubmitDeferredWork();
                 }
                 rasterizer.InvalidateGPUCache();
-                return true;
+                return;
             }
         }
         TFence new_fence = CreateFence(!should_flush);

@@ -437,18 +437,6 @@ Id EmitGlobalAtomicIAdd32(EmitContext& ctx, const IR::Value& address, Id value) 
     return ctx.OpFunctionCall(ctx.U32[1], ctx.atomic_add_global_func_u32, ctx.Def(address), value);
 }
 
-namespace {
-
-// index: the operation's slot in EmitContext::atomic_global_func_u32.
-Id GlobalAtomicU32(EmitContext& ctx, size_t index, Id address, Id value) {
-    if (!ctx.profile.support_int64) {
-        throw NotImplementedException("Global atomic address without Int64 support");
-    }
-    return ctx.OpFunctionCall(ctx.U32[1], ctx.atomic_global_func_u32[index], address, value);
-}
-
-} // Anonymous namespace
-
 Id EmitGlobalAtomicSMin32(EmitContext& ctx, Id address, Id value) {
     return GlobalAtomicU32(ctx, 1, address, value);
 }

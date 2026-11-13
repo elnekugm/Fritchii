@@ -7,7 +7,6 @@
 #pragma once
 
 #include <array>
-#include <bit>
 #include <optional>
 
 #include <sirit/sirit.h>
@@ -23,9 +22,6 @@
 namespace Shader::Backend::SPIRV {
 
 using Sirit::Id;
-
-// The clip distances a program writes, so the ones a fragment does not write keep their old value.
-static std::bitset<8> clip_distance_written;
 
 class VectorTypes {
 public:
@@ -388,7 +384,6 @@ public:
     Id write_storage_cas_loop_func{};
 
     Id load_global_func_u32{};
-    std::array<Id, 2> software_matrix_functions{}; ///< Software HMMA helpers, K=8 and K=16
     Id load_global_func_u32x2{};
     Id load_global_func_u32x4{};
     Id write_global_func_u32{};
@@ -396,9 +391,6 @@ public:
     Id write_global_func_u32x4{};
     Id atomic_add_global_func_u32{};
     Id atomic_umax_global_func_u32{};
-    // Global 32-bit atomics routed through the storage buffers, (address, value) -> old value.
-    // Indexed like the operations table in DefineGlobalMemoryFunctions.
-    std::array<Id, 9> atomic_global_func_u32{};
     Id atomic_cas_global_func_u32{};
 
     bool need_input_position_indirect{};
@@ -417,6 +409,7 @@ public:
     Id sample_mask{};
     Id frag_depth{};
 
+    std::array<Id, 2> software_matrix_functions{};
     std::optional<CooperativeHmmaTypes> cooperative_hmma; ///< Set when a program lowers HMMA to it
     /// Set when HMMA runs on 16x16x16 matrices: each 32-lane subgroup owns 384 words of shared
     /// memory from this word (A, B and C/D tiles of 16x16 fp16, 128 words each).

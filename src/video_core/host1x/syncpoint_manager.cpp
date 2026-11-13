@@ -5,11 +5,30 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "common/logging.h"
+#include "common/nx2_timeline.h"
 #include "video_core/host1x/syncpoint_manager.h"
 
 namespace Tegra {
 
 namespace Host1x {
+
+// Set while this thread runs due actions; a cancel from inside one must not wait for itself.
+static thread_local bool running_on_this_thread = false;
+
+// The puller's fence action and the 3D sync_info register take the syncpoint id from the guest's
+// command stream (24 and 16 bits): an id past the table indexed unrelated memory as an action list
+// and crashed in Increment.
+static bool IsValidSyncpoint(u32 syncpoint_id) {
+    if (syncpoint_id < SyncpointManager::NUM_MAX_SYNCPOINTS) [[likely]] {
+        return true;
+    }
+    static std::atomic_flag logged;
+    if (!logged.test_and_set()) {
+        LOG_ERROR(HW_GPU, "Syncpoint {} is out of range, increment dropped (logged once)",
+                  syncpoint_id);
+    }
+    return false;
+}
 
 SyncpointManager::ActionHandle SyncpointManager::RegisterAction(
     std::atomic<u32>& syncpoint, std::list<RegisteredAction>& action_storage, u32 expected_value,
@@ -31,6 +50,7 @@ SyncpointManager::ActionHandle SyncpointManager::RegisterAction(
         }
         ++it;
     }
+    pending_waiters.fetch_add(1, std::memory_order_seq_cst);
     return action_storage.emplace(it, expected_value, ++last_action_id, std::move(action))->id;
 }
 
@@ -44,8 +64,14 @@ void SyncpointManager::DeregisterAction(std::list<RegisteredAction>& action_stor
     for (auto it = action_storage.begin(); it != action_storage.end(); it++) {
         if (it->id == handle) {
             action_storage.erase(it);
+            pending_waiters.fetch_sub(1, std::memory_order_relaxed);
             return;
         }
+    }
+    // Not registered any more: it may be due and about to run outside the guard. Return only once
+    // it ran, so a cancelled action never fires after its cancel, as when actions ran under it.
+    if (!running_on_this_thread) {
+        actions_done_cv.wait(lk, [this] { return running_actions == 0; });
     }
 }
 
@@ -62,14 +88,19 @@ void SyncpointManager::IncrementGuest(u32 syncpoint_id) {
         LOG_ERROR(HW_GPU, "Ignoring increment of invalid syncpoint {:#x}", syncpoint_id);
         return;
     }
-    Increment(syncpoints_guest[syncpoint_id], wait_guest_cv, guest_action_storage[syncpoint_id]);
+    Increment(syncpoints_guest[syncpoint_id], wait_guest_cv, guest_action_storage[syncpoint_id],
+              "syncpoint: guest increment", syncpoint_id);
+    if (const auto hook = guest_increment_hook.load(std::memory_order_acquire)) {
+        hook(guest_increment_context.load(std::memory_order_relaxed));
+    }
 }
 
 void SyncpointManager::IncrementHost(u32 syncpoint_id) {
     if (syncpoint_id >= NUM_MAX_SYNCPOINTS) {
         return;
     }
-    Increment(syncpoints_host[syncpoint_id], wait_host_cv, host_action_storage[syncpoint_id]);
+    Increment(syncpoints_host[syncpoint_id], wait_host_cv, host_action_storage[syncpoint_id],
+              "syncpoint: host increment", syncpoint_id);
 }
 
 void SyncpointManager::WaitGuest(u32 syncpoint_id, u32 expected_value) {
@@ -82,7 +113,10 @@ void SyncpointManager::WaitHost(u32 syncpoint_id, u32 expected_value) {
 
 void SyncpointManager::Increment(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv,
                                  std::list<RegisteredAction>& action_storage) {
-    auto new_value{syncpoint.fetch_add(1, std::memory_order_acq_rel) + 1};
+    const auto new_value{syncpoint.fetch_add(1, std::memory_order_seq_cst) + 1};
+    if (pending_waiters.load(std::memory_order_seq_cst) == 0) {
+        return;
+    }
 
     std::scoped_lock lk(guard);
     auto it = action_storage.begin();
@@ -92,19 +126,50 @@ void SyncpointManager::Increment(std::atomic<u32>& syncpoint, std::condition_var
         }
         it->action();
         it = action_storage.erase(it);
+        pending_waiters.fetch_sub(1, std::memory_order_relaxed);
     }
-    wait_cv.notify_all();
+
+    // The due actions run after the guard is released: the composite action can block on the
+    // display (AcquireNextImage), and every other syncpoint user (the fencing thread's Increment,
+    // the guest's RegisterAction) then waited on the guard behind it, freezing Donkey Kong
+    // Bananza. Splicing keeps their value order.
+    std::list<RegisteredAction> due;
+    {
+        std::scoped_lock lk(guard);
+        auto it = action_storage.begin();
+        while (it != action_storage.end() && it->expected_value <= new_value) {
+            due.splice(due.end(), action_storage, it++);
+        }
+        running_actions += due.empty() ? 0 : 1;
+        wait_cv.notify_all();
+    }
+    if (due.empty()) {
+        return;
+    }
+    const bool outer = running_on_this_thread;
+    running_on_this_thread = true;
+    for (auto& registered : due) {
+        registered.action();
+    }
+    running_on_this_thread = outer;
+    std::scoped_lock lk(guard);
+    --running_actions;
+    actions_done_cv.notify_all();
 }
 
 void SyncpointManager::Wait(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv,
                             u32 expected_value) {
-    const auto pred = [&]() { return syncpoint.load(std::memory_order_acquire) >= expected_value; };
+    const auto pred = [&]() { return syncpoint.load(std::memory_order_seq_cst) >= expected_value; };
     if (pred()) {
         return;
     }
 
     std::unique_lock lk(guard);
-    wait_cv.wait(lk, pred);
+    pending_waiters.fetch_add(1, std::memory_order_seq_cst);
+    if (!pred()) {
+        wait_cv.wait(lk, pred);
+    }
+    pending_waiters.fetch_sub(1, std::memory_order_relaxed);
 }
 
 } // namespace Host1x

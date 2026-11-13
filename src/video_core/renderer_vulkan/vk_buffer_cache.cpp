@@ -6,12 +6,16 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <unordered_map>
 #include <cstring>
 #include <cstdlib>
 #include <span>
 #include <vector>
 
 #include "video_core/buffer_cache/buffer_cache_base.h"
+#include "video_core/nx2_debug_control.h"
+#include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vertex_repack.h"
@@ -27,6 +31,18 @@
 
 namespace Vulkan {
 namespace {
+/// Device writes so far made visible to host reads of mapped staging memory.
+void HostReadBarrier(vk::CommandBuffer cmdbuf) {
+    const VkMemoryBarrier barrier{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .pNext = nullptr,
+        .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+    };
+    cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0,
+                           barrier);
+}
+
 VkBufferCopy MakeBufferCopy(const VideoCommon::BufferCopy& copy) {
     return VkBufferCopy{
         .srcOffset = copy.src_offset,
@@ -68,7 +84,10 @@ vk::Buffer CreateBuffer(const Device& device, const MemoryAllocator& memory_allo
         VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
         VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
     if (device.IsExtTransformFeedbackSupported()) {
-        flags |= VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT;
+        // The counter usage too: draws can take their vertex count from any buffer
+        // (DrawIndirectByteCountEXT, nx2_indirect_grid.h).
+        flags |= VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT |
+                 VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_COUNTER_BUFFER_BIT_EXT;
     }
     if (device.IsExtConditionalRendering()) {
         flags |= VK_BUFFER_USAGE_CONDITIONAL_RENDERING_BIT_EXT;
@@ -137,17 +156,11 @@ VkBufferView Buffer::View(u32 offset, u32 size, VideoCore::Surface::PixelFormat 
         offset = 0;
         size = 0;
     }
-    const auto it{std::ranges::find_if(views, [offset, size, format](const BufferView& view) {
-        return offset == view.offset && size == view.size && format == view.format;
-    })};
-    if (it != views.end()) {
-        return *it->handle;
+    const ViewKey key{offset, size, format};
+    if (const auto it = views.find(key); it != views.end()) {
+        return *it->second;
     }
-    views.push_back({
-        .offset = offset,
-        .size = size,
-        .format = format,
-        .handle = device->GetLogical().CreateBufferView({
+    const auto [it, inserted] = views.emplace(key, device->GetLogical().CreateBufferView({
             .sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO,
             .pNext = nullptr,
             .flags = 0,
@@ -155,9 +168,8 @@ VkBufferView Buffer::View(u32 offset, u32 size, VideoCore::Surface::PixelFormat 
             .format = MaxwellToVK::SurfaceFormat(*device, FormatType::Buffer, false, format).format,
             .offset = offset,
             .range = size,
-        }),
-    });
-    return *views.back().handle;
+        }));
+    return *it->second;
 }
 
 class QuadIndexBuffer {
@@ -170,13 +182,21 @@ public:
     virtual ~QuadIndexBuffer() = default;
 
     void UpdateBuffer(u32 num_indices_) {
+        while (!retired_buffers.empty() && scheduler.IsFree(retired_buffers.front().first)) {
+            retired_buffers.erase(retired_buffers.begin());
+        }
         if (num_indices_ <= num_indices) {
             return;
         }
 
-        scheduler.Finish();
+        // Commands recorded so far may still use the old buffer: it stays until the GPU is past
+        // them. Waiting for the GPU here stalled the thread ~150 ms in the middle of a load.
+        if (buffer) {
+            retired_buffers.emplace_back(scheduler.CurrentTick(), std::move(buffer));
+        }
 
-        num_indices = num_indices_;
+        // Grown by at least half, so that a draw count creeping up doesn't redo this every time.
+        num_indices = (std::max)(num_indices_, num_indices + num_indices / 2);
         index_type = IndexTypeFromNumElements(device, num_indices);
 
         const u32 num_quads = GetQuadsNum(num_indices);
@@ -267,6 +287,7 @@ protected:
     StagingBufferPool& staging_pool;
 
     vk::Buffer buffer{};
+    std::vector<std::pair<u64, vk::Buffer>> retired_buffers; ///< GPU tick that frees each one
     MemoryCommit memory_commit{};
     VkIndexType index_type{};
     u32 num_indices = 0;
@@ -361,6 +382,8 @@ BufferCacheRuntime::BufferCacheRuntime(const Device& device_, MemoryAllocator& m
       staging_pool{staging_pool_}, guest_descriptor_queue{guest_descriptor_queue_},
       quad_index_pass(device, scheduler, descriptor_pool, staging_pool,
                       compute_pass_descriptor_queue),
+      quad_indirect_pass(device, scheduler, descriptor_pool, staging_pool,
+                         compute_pass_descriptor_queue),
       multi_range_buffers(device_) {
     const VkDriverIdKHR driver_id = device.GetDriverID();
     const bool enable_vertex_repack = VertexRepackEnabled();
@@ -403,10 +426,16 @@ u32 BufferCacheRuntime::SetVertexRepackLayout(const Tegra::Engines::Maxwell3D::R
 }
 
 StagingBufferRef BufferCacheRuntime::UploadStagingBuffer(size_t size) {
+    VideoCommon::ReadbackDiagnostics::Scope diagnostic{
+        VideoCommon::ReadbackDiagnostics::Event::UploadStaging, size};
     return staging_pool.Request(size, MemoryUsage::Upload);
 }
 
 StagingBufferRef BufferCacheRuntime::DownloadStagingBuffer(size_t size, bool deferred) {
+    VideoCommon::ReadbackDiagnostics::Scope diagnostic{
+        deferred ? VideoCommon::ReadbackDiagnostics::Event::DeferredDownloadStaging
+                 : VideoCommon::ReadbackDiagnostics::Event::DownloadStaging,
+        size};
     return staging_pool.Request(size, MemoryUsage::Download, deferred);
 }
 
@@ -416,6 +445,10 @@ VkFormat BufferCacheRuntime::TexelBufferFormat(VideoCore::Surface::PixelFormat f
 
 void BufferCacheRuntime::FreeDeferredStagingBuffer(StagingBufferRef& ref) {
     staging_pool.FreeDeferred(ref);
+}
+
+void BufferCacheRuntime::FreeCompletedDeferredStagingBuffer(StagingBufferRef& ref) {
+    staging_pool.FreeCompletedDeferred(ref);
 }
 
 u64 BufferCacheRuntime::GetDeviceLocalMemory() const {
@@ -438,12 +471,46 @@ u32 BufferCacheRuntime::GetStorageBufferAlignment() const {
     return static_cast<u32>(device.GetStorageBufferAlignment());
 }
 
+u64 BufferCacheRuntime::GetMaxStorageBufferRange() const {
+    return device.GetMaxStorageBufferRange();
+}
+
 void BufferCacheRuntime::TickFrame(Common::SlotVector<Buffer>& slot_buffers) noexcept {
     for (auto it = slot_buffers.begin(); it != slot_buffers.end(); it++) {
         if (scheduler.IsFree(it->LastUsageTick())) {
             it->ResetUsageTracking();
         }
     }
+}
+
+bool BufferCacheRuntime::BindSmallUniformReusing(
+    Tegra::MaxwellDeviceMemoryManager& device_memory, size_t stage, u32 index,
+    DAddr device_addr, u32 size) {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_UBOREUSE");
+        return value != nullptr && value[0] == '1' && value[1] == '\0';
+    }();
+    if (!enabled || size == 0 || size > UniformStreamReuse::MaxBytes || stage >= 5 || index >= 18) {
+        return false;
+    }
+    if (!uniform_stream_reuse) {
+        uniform_stream_reuse = std::make_unique<UniformStreamReuse>();
+    }
+    auto& reuse = *uniform_stream_reuse;
+    auto& slot = reuse.slots[stage][index];
+    device_memory.ReadBlockUnsafe(device_addr, reuse.scratch.data(), size);
+    if (slot.size != size || slot.tick != scheduler.CurrentTick() ||
+        std::memcmp(slot.bytes.data(), reuse.scratch.data(), size) != 0) {
+        slot.ref = staging_pool.Request(size, MemoryUsage::Upload, true);
+        staging_pool.FreeDeferred(slot.ref);
+        std::memcpy(slot.ref.mapped_span.data(), reuse.scratch.data(), size);
+        std::memcpy(slot.bytes.data(), reuse.scratch.data(), size);
+        slot.size = size;
+        slot.tick = scheduler.CurrentTick();
+    }
+    guest_descriptor_queue.AddBuffer(slot.ref.buffer, slot.ref.device_address,
+                                    static_cast<u32>(slot.ref.offset), size);
+    return true;
 }
 
 u64 BufferCacheRuntime::CurrentTick() {
@@ -458,7 +525,93 @@ void BufferCacheRuntime::Wait(u64 tick) {
     scheduler.Wait(tick);
 }
 
-void BufferCacheRuntime::WaitSubmittedTick(u64 tick) {
+namespace {
+// EDEN_NX2_LIST_WAIT_TRACE=1: the front's waits for GPU-written command list copies, per writer
+// (the dispatch's shader hash, 0 for a DMA copy): count, time, and how many submissions the GPU
+// still had to finish when the wait began. Logged every 2 s.
+class ListWaitTrace {
+public:
+    static ListWaitTrace* Get() {
+        static const bool enabled = std::getenv("EDEN_NX2_LIST_WAIT_TRACE") != nullptr;
+        static ListWaitTrace trace;
+        return enabled ? &trace : nullptr;
+    }
+
+    void Note(u64 writer, u64 behind, bool unsubmitted, std::chrono::steady_clock::duration wait) {
+        const u64 us = static_cast<u64>(
+            std::chrono::duration_cast<std::chrono::microseconds>(wait).count());
+        Entry& entry = entries[writer];
+        ++entry.count;
+        entry.us += us;
+        entry.max_us = (std::max)(entry.max_us, us);
+        entry.behind += behind;
+        entry.unsubmitted += unsubmitted ? 1 : 0;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last < std::chrono::seconds{2}) {
+            return;
+        }
+        const double seconds = std::chrono::duration<double>(now - last).count();
+        last = now;
+        std::vector<std::pair<u64, Entry>> sorted(entries.begin(), entries.end());
+        std::ranges::sort(sorted, [](const auto& a, const auto& b) { return a.second.us > b.second.us; });
+        u64 total = 0;
+        u64 count = 0;
+        for (const auto& [key, value] : sorted) {
+            total += value.us;
+            count += value.count;
+        }
+        LOG_INFO(Render_Vulkan, "List waits: {:.1f}/s, {:.2f} ms/s", count / seconds,
+                 total / 1000.0 / seconds);
+        for (size_t i = 0; i < (std::min<size_t>)(sorted.size(), 8); ++i) {
+            const auto& [key, value] = sorted[i];
+            LOG_INFO(Render_Vulkan,
+                     "  writer {:016x}: {:.1f}/s, {:.2f} ms/s, max {} us, {:.1f} submissions "
+                     "behind, {} unsubmitted",
+                     key, value.count / seconds, value.us / 1000.0 / seconds, value.max_us,
+                     static_cast<double>(value.behind) / value.count, value.unsubmitted);
+        }
+        entries.clear();
+    }
+
+private:
+    struct Entry {
+        u64 count{};
+        u64 us{};
+        u64 max_us{};
+        u64 behind{};
+        u64 unsubmitted{};
+    };
+    std::unordered_map<u64, Entry> entries;
+    std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+};
+} // Anonymous namespace
+
+void BufferCacheRuntime::WaitSubmittedTick(u64 tick, u64 writer) {
+    auto& master = scheduler.GetMasterSemaphore();
+    if (master.IsFree(tick)) {
+        return;
+    }
+    // The split's front waits for the GPU: the back runs meanwhile what the front sent, also the
+    // entries since the front's last publish, which it does not see yet (fewer than 256 words;
+    // zortos293/Lichii#805 34656e8225).
+    if (auto& split = VideoCommon::GpuSplit::Get();
+        split.Active() && !VideoCommon::GpuSplit::OnBackThread()) {
+        split.Publish();
+    }
+    if (ListWaitTrace* const trace = ListWaitTrace::Get()) [[unlikely]] {
+        master.Refresh();
+        const u64 known = master.KnownGpuTick();
+        const bool unsubmitted = !scheduler.IsSubmitted(tick);
+        const auto start = std::chrono::steady_clock::now();
+        WaitSubmittedTickImpl(tick);
+        trace->Note(writer, tick > known ? tick - known : 0, unsubmitted,
+                    std::chrono::steady_clock::now() - start);
+        return;
+    }
+    WaitSubmittedTickImpl(tick);
+}
+
+void BufferCacheRuntime::WaitSubmittedTickImpl(u64 tick) {
     auto& master = scheduler.GetMasterSemaphore();
     if (master.IsFree(tick)) {
         return;
@@ -479,7 +632,44 @@ void BufferCacheRuntime::WaitSubmittedTick(u64 tick) {
 }
 
 void BufferCacheRuntime::Finish() {
+    VideoCommon::ReadbackDiagnostics::Scope diagnostic{
+        VideoCommon::ReadbackDiagnostics::Event::BufferFinish};
     scheduler.Finish();
+}
+
+u64 BufferCacheRuntime::SubmitForHostRead() {
+    scheduler.RequestOutsideRenderPassOperationContext();
+    scheduler.Record(HostReadBarrier);
+    return scheduler.Flush();
+}
+
+void BufferCacheRuntime::WaitForHostRead(u64 tick) {
+    auto& master = scheduler.GetMasterSemaphore();
+    if (master.IsFree(tick)) {
+        return;
+    }
+    // SubmitForHostRead flushed it, so it is handed to the worker: wait without flushing, which
+    // only the recording thread may do. Should a tick not be submitted yet, ask the split's back
+    // for it, as WaitSubmittedTickImpl does.
+    if (!scheduler.IsSubmitted(tick) && VideoCommon::GpuSplit::Get().Active() &&
+        !VideoCommon::GpuSplit::OnBackThread()) {
+        if (!scheduler.WaitSubmitted(tick)) {
+            scheduler.Wait(tick);
+            return;
+        }
+    }
+    master.Wait(tick);
+}
+
+bool BufferCacheRuntime::IsFreeNow(u64 tick) {
+    if (scheduler.IsFree(tick)) {
+        return true;
+    }
+    if (!scheduler.IsSubmitted(tick)) {
+        return false;
+    }
+    scheduler.GetMasterSemaphore().Refresh();
+    return scheduler.IsFree(tick);
 }
 
 bool BufferCacheRuntime::CanReorderUpload(const Buffer& buffer,
@@ -525,6 +715,17 @@ void BufferCacheRuntime::CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
     }
 
     scheduler.RequestOutsideRenderPassOperationContext();
+    // EDEN_NX2_EXP62 (live, 0 = off): zortos293/Lichii#1245's batched uploads. OoT records ~600
+    // inline uploads a frame, each with two barriers; in-order ones share one command and one
+    // pair of barriers (#805's test: 55.9 -> 57.8 fps, GPU 8.2 -> 7.55 ms a frame).
+    if (barrier && VideoCore::Nx2Debug::Experiment(62) != 0 && src_buffer == staging_pool.StreamBuf() &&
+        !vk_copies.empty()) {
+        // Only in-order stream uploads share barriers. Dedicated staging buffers retain their
+        // normal recording path and tick-based reuse.
+        scheduler.RecordUpload(src_buffer, dst_buffer,
+                               std::span<const VkBufferCopy>{vk_copies.data(), vk_copies.size()});
+        return;
+    }
     scheduler.Record([src_buffer, dst_buffer, vk_copies, barrier](vk::CommandBuffer cmdbuf) {
         if (barrier) {
             cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,
@@ -532,8 +733,12 @@ void BufferCacheRuntime::CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
         }
         cmdbuf.CopyBuffer(src_buffer, dst_buffer, vk_copies);
         if (barrier) {
+            // Later transfers too: a reordered upload of the same bytes in a later submission
+            // (RecordWithUploadBuffer, ahead of that submission's work) has no barrier of its
+            // own before it, and in-order copies don't count as uses for CanReorderUpload.
             cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                   vk::PIPELINE_STAGE_GRAPHICS_COMPUTE, 0, WRITE_BARRIER);
+                                   vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER, 0,
+                                   WRITE_BARRIER);
         }
     });
 }
@@ -561,8 +766,11 @@ void BufferCacheRuntime::PostCopyBarrier() {
     };
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([](vk::CommandBuffer cmdbuf) {
-        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, vk::PIPELINE_STAGE_GRAPHICS_COMPUTE,
-                               0, WRITE_BARRIER);
+        // Later transfers too, as after CopyBuffer's own barrier: the downloads, gathers and
+        // compute uploads this closes are in-order copies a later reordered upload of the same
+        // bytes would not wait for.
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                               vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER, 0, WRITE_BARRIER);
     });
 }
 
@@ -650,12 +858,27 @@ void BufferCacheRuntime::BindIndexBuffer(PrimitiveTopology topology, IndexFormat
         ReserveNullBuffer();
         vk_buffer = *null_buffer;
     }
+    // The same index buffer is still bound in this command buffer (PR #161): skip the rebind.
+    if (VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::IndexRebind) && !VideoCommon::Nx2Perf::Verify()) {
+        const u64 epoch = scheduler.RecordingEpoch();
+        if (bound_index_valid && vk_buffer == bound_index_buffer &&
+            vk_offset == bound_index_offset && vk_index_type == bound_index_type &&
+            epoch == bound_index_epoch) {
+            return;
+        }
+        bound_index_valid = true;
+        bound_index_buffer = vk_buffer;
+        bound_index_offset = vk_offset;
+        bound_index_type = vk_index_type;
+        bound_index_epoch = epoch;
+    }
     scheduler.Record([vk_buffer, vk_offset, vk_index_type](vk::CommandBuffer cmdbuf) {
         cmdbuf.BindIndexBuffer(vk_buffer, vk_offset, vk_index_type);
     });
 }
 
 void BufferCacheRuntime::BindHostUint8IndexBuffer(std::span<const u8> indices) {
+    bound_index_valid = false;
     const auto staging = staging_pool.Request(indices.size() * sizeof(u16), MemoryUsage::Upload);
     u16* const widened = reinterpret_cast<u16*>(staging.mapped_span.data());
     std::ranges::transform(indices, widened, [](u8 index) -> u16 { return index == 0xff ? 0xffff : index; });
@@ -665,6 +888,7 @@ void BufferCacheRuntime::BindHostUint8IndexBuffer(std::span<const u8> indices) {
 }
 
 void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 first, u32 count) {
+    bound_index_valid = false;
     if (count == 0) {
         ReserveNullBuffer();
         scheduler.Record([this](vk::CommandBuffer cmdbuf) {
@@ -680,6 +904,26 @@ void BufferCacheRuntime::BindQuadIndexBuffer(PrimitiveTopology topology, u32 fir
         quad_strip_index_buffer->UpdateBuffer(first + count);
         quad_strip_index_buffer->BindBuffer(first);
     }
+}
+
+// shortcut: an indirect quad draw stops at 2^18 vertices; raise it if a title draws more.
+constexpr u32 MAX_INDIRECT_QUAD_VERTICES = 1U << 18;
+
+void BufferCacheRuntime::ReserveQuadIndirect() {
+    // UpdateBuffer submits the command buffer when it grows. Grown in BindArrayIndirect, after the
+    // vertex buffers were bound, the first indirect quad draw ran in a new command buffer without
+    // them: a device loss on drivers without nullDescriptor (Hyrule Warriors after a movie skip).
+    quad_array_index_buffer->UpdateBuffer(MAX_INDIRECT_QUAD_VERTICES);
+}
+
+void BufferCacheRuntime::BindArrayIndirect(VkBuffer src_buffer, u32 src_offset, bool quads) {
+    if (!quads) {
+        array_indirect_args = quad_indirect_pass.Convert(src_buffer, src_offset, 0);
+        return;
+    }
+    array_indirect_args =
+        quad_indirect_pass.Convert(src_buffer, src_offset, MAX_INDIRECT_QUAD_VERTICES);
+    quad_array_index_buffer->BindBuffer(0);
 }
 
 void BufferCacheRuntime::BindVertexBuffer(u32 index, VkBuffer buffer, u32 offset, u32 size, u32 stride) {

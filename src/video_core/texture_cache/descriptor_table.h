@@ -8,8 +8,6 @@
 
 #include <algorithm>
 #include <cstdlib>
-
-#include <cstdlib>
 #include <vector>
 
 #include "common/alignment.h"
@@ -21,7 +19,7 @@
 
 namespace VideoCommon {
 
-template <typename T, typename Id = u32>
+template <typename T>
 class DescriptorTable {
 public:
     [[nodiscard]] bool Synchronize(GPUVAddr gpu_addr, u32 limit) noexcept {
@@ -35,8 +33,6 @@ public:
     void Invalidate() noexcept {
         // Cleared on the next read: the texture cache invalidates every channel's tables for
         // each image it deletes, dozens of times a frame while its collector runs.
-        // EDEN_NX2_LAZY_DESCRIPTORS=0 clears at once, as before.
-
         // EDEN_NX2_LAZY_DESCRIPTORS=0 clears at once, as before.
         static const bool lazy = [] {
             const char* value = std::getenv("EDEN_NX2_LAZY_DESCRIPTORS");
@@ -83,12 +79,10 @@ public:
         invalidated = false;
         //
         descriptors.resize(num_descriptors);
-        bound_ids.resize(num_descriptors, Id{0});
     }
 
     std::vector<u64> read_descriptors;
     std::vector<T> descriptors;
-    std::vector<Id> bound_ids;
     GPUVAddr current_gpu_addr{};
     u32 current_limit{};
     bool invalidated{}; ///< read_descriptors is to be cleared before the next read

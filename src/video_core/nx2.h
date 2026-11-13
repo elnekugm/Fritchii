@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <cstdlib>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -14,21 +13,13 @@
 #include <vector>
 
 #include "common/common_types.h"
-#include "common/nx2_gpu_write_listener.h"
-#include "video_core/nx2_frame_fence.h"
+#include "common/thread.h"
 
 namespace Tegra {
 
 // Set once a Switch 2 (Ampere, NVN2) driver is talking to the GPU. Its command streams use
 // Ampere classes and the Turing+ macro ISA, which Eden's Maxwell engines don't implement.
 inline std::atomic<bool> g_nx2_ampere{false};
-// Current title ID for title-specific cache policy.
-inline std::atomic<u64> g_nx2_program_id{0};
-
-// Pokopia reads GPU-written data through a path the buffer cache does not observe.
-inline bool Nx2NeedsBufferDownloads() {
-    return g_nx2_program_id.load(std::memory_order_relaxed) == 0x0400A3A01EE4C000ULL;
-}
 
 // Device pages the GPU has written through the buffer cache (shader stores, copies), ever. Title 1
 // runs command lists the GPU writes each frame (20-byte entries its culling fills in); read
@@ -37,13 +28,6 @@ inline bool Nx2NeedsBufferDownloads() {
 // reads the command list. One bit per 4 KiB of the 36-bit device address space (2 MiB).
 inline constexpr u64 Nx2WrittenPageBits = 12;
 inline std::array<std::atomic<u64>, (u64{1} << (36 - Nx2WrittenPageBits)) / 64> g_nx2_gpu_written_pages{};
-/// Counts the times pages were marked GPU-written for the first time: it stops moving once a
-/// title has written all the memory it reuses (Nx2CheckCommandPagesFirst).
-inline std::atomic<u64> g_nx2_gpu_written_generation{};
-
-/// Bumped when a page is marked GPU-written for the first time (read by nothing since
-/// EDEN_NX2_LIST_FAST went; a diagnostic count).
-inline std::atomic<u64> g_nx2_new_written_pages{};
 
 inline void Nx2MarkGpuWritten(u64 device_address, u64 size) {
     if (size == 0) {
@@ -51,18 +35,12 @@ inline void Nx2MarkGpuWritten(u64 device_address, u64 size) {
     }
     const u64 last = std::min<u64>((device_address + size - 1) >> Nx2WrittenPageBits,
                                    g_nx2_gpu_written_pages.size() * 64 - 1);
-    // A word at a time: storage buffer binds mark megabytes, mostly marked already.
-    for (u64 page = device_address >> Nx2WrittenPageBits; page <= last;) {
-        const u64 first_bit = page % 64;
-        const u64 bits = std::min<u64>(64 - first_bit, last - page + 1);
-        const u64 mask = (bits == 64 ? ~u64{0} : (u64{1} << bits) - 1) << first_bit;
+    for (u64 page = device_address >> Nx2WrittenPageBits; page <= last; ++page) {
         auto& word = g_nx2_gpu_written_pages[page / 64];
-        if ((word.load(std::memory_order_relaxed) & mask) != mask) {
-            if ((word.fetch_or(mask, std::memory_order_relaxed) & mask) != mask) {
-                g_nx2_new_written_pages.fetch_add(1, std::memory_order_relaxed);
-            }
+        const u64 bit = u64{1} << (page % 64);
+        if ((word.load(std::memory_order_relaxed) & bit) == 0) {
+            word.fetch_or(bit, std::memory_order_relaxed);
         }
-        page += bits;
     }
 }
 
@@ -94,108 +72,34 @@ inline void Nx2MarkCommandListPage(u64 device_address) {
     return (g_nx2_command_list_pages[page / 64].load(std::memory_order_relaxed) >> (page % 64)) & 1;
 }
 
-// Query results written when their host work completes (counter reports): per 16-byte slot
-// hash, how many the back issued and how many completed. Equal counts mean the words in memory
-// are final, so the split's front can read them without draining the back.
-inline constexpr u64 Nx2AsyncReportSlots = u64{1} << 16;
-inline std::array<std::atomic<u32>, Nx2AsyncReportSlots> g_nx2_async_reports_issued{};
-inline std::array<std::atomic<u32>, Nx2AsyncReportSlots> g_nx2_async_reports_completed{};
+// Pages seen not GPU-written at a point where no queued work could have written them first
+// (EDEN_NX2_DMA_RANGES for macro memory reads, EDEN_NX2_LIST_TRUST for command lists). Index 0:
+// macro reads (no compute, copy or earlier draw work queued), 1: command lists (no compute or copy
+// queued). Front thread only.
+inline std::array<std::array<u64, (u64{1} << (36 - Nx2WrittenPageBits)) / 64>, 2> g_nx2_clean_pages{};
 
-[[nodiscard]] inline u64 Nx2AsyncReportSlot(u64 device_address) {
-    return (device_address >> 4) % Nx2AsyncReportSlots;
+[[nodiscard]] inline bool Nx2IsCleanPage(size_t kind, u64 device_address) {
+    const u64 page = device_address >> Nx2WrittenPageBits;
+    if (page >= g_nx2_clean_pages[kind].size() * 64) {
+        return false;
+    }
+    return (g_nx2_clean_pages[kind][page / 64] >> (page % 64)) & 1;
 }
 
-[[nodiscard]] inline bool Nx2AsyncReportsSettled(u64 device_address, u64 size) {
-    if (size == 0) {
-        return true;
+inline void Nx2MarkCleanPage(size_t kind, u64 device_address) {
+    const u64 page = device_address >> Nx2WrittenPageBits;
+    if (page < g_nx2_clean_pages[kind].size() * 64) {
+        g_nx2_clean_pages[kind][page / 64] |= u64{1} << (page % 64);
     }
-    for (u64 slot = device_address >> 4; slot <= (device_address + size - 1) >> 4; ++slot) {
-        const u64 index = slot % Nx2AsyncReportSlots;
-        if (g_nx2_async_reports_completed[index].load(std::memory_order_acquire) !=
-            g_nx2_async_reports_issued[index].load(std::memory_order_acquire)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-// Bumped after every completed report; threads in Nx2WaitAsyncReportsSettled wait on it
-// (zortos293/Lichii#559).
-inline std::atomic<u32> g_nx2_async_reports_generation{};
-inline std::atomic<u32> g_nx2_async_reports_waiters{};
-
-/// A report was issued to device_address (the thread that owns the query cache).
-inline void Nx2IssueAsyncReport(u64 device_address) {
-    g_nx2_async_reports_issued[Nx2AsyncReportSlot(device_address)].fetch_add(
-        1, std::memory_order_release);
-}
-
-/// A report's host work completed and its words are in memory (the fencing thread).
-inline void Nx2CompleteAsyncReport(u64 device_address) {
-    g_nx2_async_reports_completed[Nx2AsyncReportSlot(device_address)].fetch_add(
-        1, std::memory_order_release);
-    g_nx2_async_reports_generation.fetch_add(1, std::memory_order_seq_cst);
-    if (g_nx2_async_reports_waiters.load(std::memory_order_seq_cst) != 0) {
-        g_nx2_async_reports_generation.notify_all();
-    }
-}
-
-/// One asynchronous report's issued/completed pair. Complete counts it once, and destruction
-/// does if nothing did: an operation dropped without running (fences discarded when emulation
-/// stops) would otherwise leave its slot unequal for good, and a later wait on that slot would
-/// never end. Owned by the report's operation (shared by its copies); not thread-safe, as the
-/// operation runs or is dropped on one thread at a time.
-class Nx2AsyncReport {
-public:
-    explicit Nx2AsyncReport(u64 device_address_) : device_address{device_address_} {}
-    ~Nx2AsyncReport() {
-        Complete();
-    }
-    Nx2AsyncReport(const Nx2AsyncReport&) = delete;
-    Nx2AsyncReport& operator=(const Nx2AsyncReport&) = delete;
-
-    void Issue() {
-        if (!issued) {
-            issued = true;
-            Nx2IssueAsyncReport(device_address);
-        }
-    }
-    void Complete() {
-        if (issued && !completed) {
-            completed = true;
-            Nx2CompleteAsyncReport(device_address);
-        }
-    }
-
-private:
-    u64 device_address;
-    bool issued{};
-    bool completed{};
-};
-
-/// Blocks until every report issued so far to [device_address, device_address + size) is in
-/// memory. Only for the thread that issues reports, so none can be issued while it waits; the
-/// fences carrying them must already be submitted. A slot shared with another address only
-/// waits for that report too.
-inline void Nx2WaitAsyncReportsSettled(u64 device_address, u64 size) {
-    if (Nx2AsyncReportsSettled(device_address, size)) {
-        return;
-    }
-    g_nx2_async_reports_waiters.fetch_add(1, std::memory_order_seq_cst);
-    for (;;) {
-        const u32 generation = g_nx2_async_reports_generation.load(std::memory_order_seq_cst);
-        if (Nx2AsyncReportsSettled(device_address, size)) {
-            break;
-        }
-        g_nx2_async_reports_generation.wait(generation, std::memory_order_seq_cst);
-    }
-    g_nx2_async_reports_waiters.fetch_sub(1, std::memory_order_relaxed);
 }
 
 /// A new emulation session starts: no page has been written by its GPU yet.
 inline void Nx2ClearGpuWrittenPages() {
     for (auto& word : g_nx2_gpu_written_pages) {
         word.store(0, std::memory_order_relaxed);
+    }
+    for (auto& kind : g_nx2_clean_pages) {
+        kind.fill(0);
     }
     for (auto& word : g_nx2_command_list_pages) {
         word.store(0, std::memory_order_relaxed);
@@ -211,44 +115,6 @@ inline void Nx2ClearGpuWrittenPages() {
     return (g_nx2_gpu_written_pages[page / 64].load(std::memory_order_relaxed) >> (page % 64)) & 1;
 }
 
-/// Guest writes of cached pages no GPU write ever marked, collected for the split's back without
-/// OnCPUWrite's cache mutexes (EDEN_NX2_EXP35, Core::Memory::HandleRasterizerWrite); counted for
-/// RasterizerVulkan's guest access log.
-inline std::atomic<u64> g_nx2_guest_writes_collected{};
-/// Guest reads of cached memory sent to the split's back as flush requests because the cache
-/// mutexes stayed taken (EDEN_NX2_EXP60).
-inline std::atomic<u64> g_nx2_guest_reads_handed{};
-
-/// Whether any page of the range may have been written by the GPU (zortos293/Lichii#463).
-[[nodiscard]] inline bool Nx2MayBeGpuWritten(u64 device_address, u64 size) {
-    if (size == 0) {
-        return false;
-    }
-    const u64 first = device_address >> Nx2WrittenPageBits;
-    const u64 last = (device_address + size - 1) >> Nx2WrittenPageBits;
-    if (last < first || last >= g_nx2_gpu_written_pages.size() * 64) {
-        return true;
-    }
-    for (u64 page = first; page <= last; ++page) {
-        if ((g_nx2_gpu_written_pages[page / 64].load(std::memory_order_relaxed) >> (page % 64)) & 1) {
-            return true;
-        }
-    }
-    return false;
-}
-
-template <typename Drain, typename Translate, typename Flush>
-void Nx2SynchronizeGpuWrittenCommands(GPUVAddr address, size_t size, Drain&& drain,
-                                     Translate&& translate, Flush&& flush) {
-    if (size == 0) return;
-    drain();
-    if (Nx2HasGpuWrittenPage(address, size, translate)) flush();
-}
-
-// NVN2 queues release their progress values into the second page of a two-page GPU-accessible
-// region and GPU acquires read the same offsets in the first page (the CPU polls the second).
-// Something on the console copies one into the other; until that is known, the puller mirrors
-// releases that land in a second page. Every queue has such a region, so keep a small table.
 inline constexpr size_t Nx2MaxSemaphoreRegions = 32;
 inline std::array<std::atomic<u64>, Nx2MaxSemaphoreRegions> g_nx2_semaphore_regions{}; // starts
 
@@ -485,31 +351,6 @@ inline bool Nx2SparseUnwritten(u64 gpu_address, u64 size) {
     return true;
 }
 
-// GPU semaphore writes as they land in guest memory: EXP13=2 marks the release records they
-// belong to (#717's landed counter, per record: VideoCommon::QmdPrediction::NoteLanded, which
-// sets the hook once it records). The landing sites call it BEFORE they write the word, so a
-// front that reads the new word also finds the record marked.
-enum class Nx2Landing : u32 {
-    QueryCompletion, ///< A query cache payload write when its fence or query completes (plain)
-    QueryImmediate,  ///< A query cache payload write as the back runs it (plain)
-    QmdMax,          ///< A QMD max release: max(word, payload)
-    QmdReduction,    ///< A QMD release reduction's result
-    ReportReduction, ///< A compute report semaphore reduction's result
-};
-inline std::atomic<void (*)(u64, u32, Nx2Landing)> g_nx2_landed_hook{};
-
-/// Whether anything listens for landings (EXP13=2 recorded once this session).
-[[nodiscard]] inline bool Nx2LandedHooked() {
-    return g_nx2_landed_hook.load(std::memory_order_relaxed) != nullptr;
-}
-
-/// A GPU semaphore write of `value` to the u32 at `device_address` is about to land.
-inline void Nx2NoteLanded(u64 device_address, u32 value, Nx2Landing kind) {
-    if (const auto hook = g_nx2_landed_hook.load(std::memory_order_acquire)) [[unlikely]] {
-        hook(device_address, value, kind);
-    }
-}
-
 /// Channels suspended on a semaphore acquire. A console channel polls and sees every release;
 /// Eden writes releases in bursts when fences signal and resumes waiters only between command
 /// lists, so an acquire-equal could miss its value. Writes latch the waiters they satisfy.
@@ -523,6 +364,11 @@ public:
     static Nx2SemaphoreWaiters& Get() {
         static Nx2SemaphoreWaiters waiters;
         return waiters;
+    }
+
+    void SetWakeEvent(Common::Event* event) {
+        std::scoped_lock lk{mutex};
+        wake_event = event;
     }
 
     void Add(const void* owner, u64 device_address, u32 value, u32 operation) {
@@ -552,16 +398,21 @@ public:
 
     /// A GPU write of `value` to the u32 at `device_address`.
     void OnWrite(u64 device_address, u32 value) {
-        // (Common::Nx2GpuWrite::Notify, for Ocarina of Time's present poll, and Nx2NoteLanded
-        // are called by each write site itself.)
         if (count.load(std::memory_order_acquire) == 0) {
             return;
         }
-        std::scoped_lock lk{mutex};
-        for (auto& w : waiters) {
-            if (w.address == device_address && !w.latched && Matches(w, value)) {
-                w.latched = true;
+        Common::Event* to_wake = nullptr;
+        {
+            std::scoped_lock lk{mutex};
+            for (auto& w : waiters) {
+                if (w.address == device_address && !w.latched && Matches(w, value)) {
+                    w.latched = true;
+                    to_wake = wake_event;
+                }
             }
+        }
+        if (to_wake != nullptr) {
+            to_wake->Set();
         }
     }
 
@@ -590,70 +441,7 @@ private:
     std::mutex mutex;
     std::vector<Waiter> waiters;
     std::atomic<size_t> count{};
+    Common::Event* wake_event{};
 };
-
-// Render-frame clock (EDEN_NX2_RENDER_CLOCK=1, fable_answer_16 1b and 17): one count per guest
-// frame, bumped where the frame's last GPU work is, so the texture cache's relocation rules can
-// tell frames apart where the host present tick (mid-stream) cannot. Sources:
-// - by default the flip's frame fence (Nx2FrameFenceClock, video_core/nx2_frame_fence.h),
-//   bumped on the split's back in stream order (FenceManager::SignalSyncPoint);
-// - EDEN_NX2_RENDER_CLOCK_SYNCPT=<id>: every back signal of that syncpoint (manual override);
-// - EDEN_NX2_RENDER_CLOCK=2: a write to the present poll's learned word
-//   (core/hle/kernel/svc/svc_nx2_oot_present.cpp OnGpuWrite, needs EXP24=1). A guest thread
-//   writes that word, so it never fires (fable_answer_17 0); kept to compare.
-// Nothing counts while the texture cache does not want the clock (EDEN_NX2_RENDER_CLOCK or
-// EXP43=4).
-inline std::atomic<bool> g_nx2_render_clock_wanted{false};
-inline std::atomic<u64> g_nx2_render_frame{};
-// Read on first use, not at static initialization: that runs before main() applies
-// nx2_switches.txt, so the file's value would be lost.
-inline int Nx2RenderClockSyncpt() {
-    static const int syncpt = [] {
-        const char* value = std::getenv("EDEN_NX2_RENDER_CLOCK_SYNCPT");
-        return value != nullptr && value[0] != '\0' ? std::atoi(value) : -1;
-    }();
-    return syncpt;
-}
-/// EDEN_NX2_RENDER_CLOCK: 0 unset, 1 the clock, 2 the clock on the poll-word source.
-inline int Nx2RenderClockEnv() {
-    static const int env = [] {
-        // On (1) by default since 2026-11-08: flip-fence clock at 1.00 per host frame, 0 tombstone
-        // hits under EXP43=4, 11 loads 0 washed out. EDEN_NX2_RENDER_CLOCK=0 turns it off.
-        const char* value = std::getenv("EDEN_NX2_RENDER_CLOCK");
-        return value == nullptr ? 1 : value[0] == '1' ? 1 : value[0] == '2' ? 2 : 0;
-    }();
-    return env;
-}
-inline bool Nx2RenderClockWordSource() {
-    return Nx2RenderClockSyncpt() < 0 && Nx2RenderClockEnv() == 2;
-}
-inline bool Nx2RenderClockFlipSource() {
-    return Nx2RenderClockSyncpt() < 0 && Nx2RenderClockEnv() != 2;
-}
-// Syncpoint signals by id while the clock is wanted (logged with the clock).
-inline constexpr size_t Nx2SyncpointSignalSlots = 192;
-inline std::array<std::atomic<u32>, Nx2SyncpointSignalSlots> g_nx2_syncpoint_signals{};
-// Numbers the nx2:syncpt sessions (the frame fence's slot key is (session << 32) | slot).
-inline std::atomic<u32> g_nx2_syncpt_sessions{};
-
-/// The back signals syncpoint `id`, which then reads `new_value` (FenceManager::SignalSyncPoint,
-/// before the increment; only called while the clock is wanted).
-inline void Nx2NoteSyncpointSignal(u32 id, u32 new_value) {
-    if (!g_nx2_render_clock_wanted.load(std::memory_order_relaxed) ||
-        id >= Nx2SyncpointSignalSlots) {
-        return;
-    }
-    g_nx2_syncpoint_signals[id].fetch_add(1, std::memory_order_relaxed);
-    if (const int override_id = Nx2RenderClockSyncpt(); override_id >= 0) {
-        if (static_cast<int>(id) == override_id) {
-            g_nx2_render_frame.fetch_add(1, std::memory_order_relaxed);
-        }
-    } else if (id == g_nx2_frame_fence.syncpoint.load(std::memory_order_relaxed) &&
-               Nx2RenderClockFlipSource()) {
-        if (g_nx2_frame_fence.NoteSignal(new_value)) {
-            g_nx2_render_frame.fetch_add(1, std::memory_order_relaxed);
-        }
-    }
-}
 
 } // namespace Tegra

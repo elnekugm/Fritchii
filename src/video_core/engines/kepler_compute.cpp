@@ -5,30 +5,28 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <bitset>
+#include <cstdio>
 #include <cstdlib>
-#include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include "common/assert.h"
-#include "common/dkb_frame_trace.h"
 #include "common/logging.h"
-#include "common/settings.h"
 #include "shader_recompiler/exception.h"
 #include "core/core.h"
 #include "video_core/gpu_split.h"
-#include "video_core/fire_emblem_upscale.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/nx2.h"
 #include "video_core/engines/fermi_2d.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
-#include "video_core/game_dlss_status.h"
 #include "video_core/memory_manager.h"
 #include "video_core/native_query_trace.h"
 #ifdef ARCHITECTURE_x86_64
@@ -367,6 +365,9 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             },
             [&](u64 address, u32 payload, u32 flags) {
                 if (!memory_manager.IsFullyMappedRange(address, sizeof(payload))) return false;
+                if (const auto device = memory_manager.GpuToCpuAddress(address)) {
+                    Tegra::Nx2NoteQmdReleaseTarget(*device);
+                }
                 if (flags & (1U << 26)) {
                     rasterizer->SignalFence([this, address, payload] {
                         const u32 value = memory_manager.Read<u32>(address) + payload;
@@ -526,6 +527,7 @@ void KeplerCompute::CallMultiMethod(Core::System& system, u32 method, const u32*
 
 bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& qmd) {
     launch_description = {};
+    launch_description.linked_tsc.Assign((qmd[11] >> 30) & 1);
     launch_description.grid_dim_x.Assign(qmd[12]);
     launch_description.grid_dim_y.Assign(qmd[13] & 0xffff);
     launch_description.grid_dim_z.Assign(qmd[14] & 0xffff);
@@ -551,318 +553,57 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
     }
     if (!launch_description.block_dim_x || !launch_description.block_dim_y || !launch_description.block_dim_z)
         return false;
-    dlss_chain.output_pass = false;
-    // Fortune's Weave's evaluation is 13 dispatches. Bound incomplete evaluations, including
-    // skipped dispatches, so a missing output pass cannot keep the chain active indefinitely.
-    constexpr u32 max_dispatches = 64;
-    if (dlss_chain.active && ++dlss_chain.dispatches > max_dispatches) {
-        dlss_chain.active = false;
-        dlss_chain.pending.clear();
-        dlss_motion_vectors.reset();
-        dlss_depth.reset();
-        (void)fe_upscale_jitter.Take();
+    const u64 program = (u64{qmd[49] & 0x1ffff} << 32) | qmd[48];
+    // EDEN_NX2_SKIP_GRID=<x>x<y>x<z>: skip compute dispatches with that grid (a test aid: program
+    // addresses change from run to run; Kirby Air Riders' colour table bake is 9x9x9).
+    if (static const std::array<u32, 3> skip_grid = [] {
+            std::array<u32, 3> grid{};
+            if (const char* text = std::getenv("EDEN_NX2_SKIP_GRID")) {
+                std::sscanf(text, "%ux%ux%u", &grid[0], &grid[1], &grid[2]);
+            }
+            return grid;
+        }();
+        skip_grid[0] != 0 && qmd[12] == skip_grid[0] && (qmd[13] & 0xffff) == skip_grid[1] &&
+        (qmd[14] & 0xffff) == skip_grid[2]) {
+        static bool logged{};
+        if (!std::exchange(logged, true)) {
+            LOG_INFO(HW_GPU, "EDEN_NX2_SKIP_GRID: skipping compute program {:#x}", program);
+        }
+        return true;
     }
-    bool dispatched = true;
+    if (g_nx2_trace_draws_after_upscale > 0) {
+        --g_nx2_trace_draws_after_upscale;
+        LOG_INFO(HW_GPU, "after upscale: compute program {:#x}{}", program,
+                 tensor_programs.contains(program) ? " (tensor, upscaled instead)" : "");
+        DescribeNativeResources(qmd, true);
+    }
+    if (tensor_programs.contains(program)) {
+        return UpscaleInsteadOfNativeProgram();
+    }
     try {
         rasterizer->DispatchCompute();
-    } catch (const VideoCommon::FireEmblemUpscale::DispatchReplaced&) {
-        return true;
     } catch (const Shader::Exception& error) {
-        if (Common::DkbFrameTrace::Enabled()) {
-            static thread_local Common::DkbFrameTrace::RateLimit limit;
-            static thread_local u64 rejected{};
-            ++rejected;
-            if (limit.Ready(std::chrono::steady_clock::now())) {
-                LOG_INFO(HW_GPU,
-                         "DKB shader rejected stage=compute address={:#x} count={} reason={}",
-                         regs.code_loc.Address() + launch_description.program_start, rejected,
-                         error.what());
-                rejected = 0;
-            }
-        }
-        dlss_motion_vectors.reset();
-        dlss_depth.reset();
-        (void)fe_upscale_jitter.Take();
         static std::unordered_set<std::string> logged;
         if (logged.insert(error.what()).second) {
             LOG_ERROR(HW_GPU, "Native compute shader rejected: {}", error.what());
         }
-        dispatched = false;
-        if (dlss_chain.active) {
-            ++dlss_chain.rejected;
-        } else if (std::string_view{error.what()}.find("matrix multiply") !=
-                   std::string_view::npos) {
+        if (std::string_view{error.what()}.find("matrix multiply") != std::string_view::npos) {
+            tensor_programs.insert(program);
             DescribeNativeResources(qmd);
-            LOG_ERROR(HW_GPU, "Native tensor dispatch is unsupported; no validated replacement was available");
+            // The console runs this on tensor cores; stand in with a plain upscale of its input.
+            return UpscaleInsteadOfNativeProgram();
         }
-    }
-    if (dlss_chain.output_pass) {
-        return FinishDlssEvaluation() || dispatched;
-    }
-    return dispatched;
-}
-
-namespace {
-constexpr u32 DLSS_NETWORK_CLEAN_EVALUATIONS = 8;
-/// Health checks in a row the network must pass before it is shown (about a second: a network that
-/// goes bad does so within its first few evaluations), and fail to be dropped.
-constexpr u32 DLSS_NETWORK_GOOD_CHECKS = 30;
-constexpr u32 DLSS_NETWORK_BAD_CHECKS = 10;
-/// A check fails when more than this percentage of its blocks is mismatched (working networks:
-/// at most 0.2% on Fortune's Weave's title and Kunlun Base; frozen ones: 6-10%), or when any output
-/// sample is NaN or infinite.
-constexpr u32 DLSS_CHECK_MISMATCH_PERCENT = 3;
-} // Anonymous namespace
-
-bool KeplerCompute::ProcessGameDlss(u64 program_id, u64 native_key) {
-    using namespace VideoCommon::FireEmblemUpscale;
-    const auto passes = CapturedPasses(program_id);
-    if (!passes) {
+        RememberDlssMotionVectors();
         return false;
     }
-    if (passes->spatial_only && (native_key == passes->prepass || native_key == passes->output)) {
-        TraceDlssContract(native_key, false);
-    }
-    if (native_key == passes->prepass) {
-        dlss_chain.spatial_only = passes->spatial_only;
-        CaptureFireEmblemJitter();
-        dlss_chain.active = true;
-        dlss_chain.rejected = 0;
-        dlss_chain.dispatches = 0;
-        dlss_chain.pending.clear();
-    }
-    if (!dlss_chain.active) {
-        return false;
-    }
-    dlss_chain.pending.insert(native_key);
-    dlss_chain.output_pass = native_key == passes->output;
-    if (dlss_chain.spatial_only) {
-        return false;
-    }
-    const bool replacement = dlss_chain.failure != VideoCore::GameDlssReason::None ||
-                             GameDlssBlocker() != VideoCore::GameDlssReason::None;
-    if (dlss_chain.output_pass) {
-        return replacement && FinishDlssEvaluation();
-    }
-    return dlss_chain.failure != VideoCore::GameDlssReason::None &&
-           native_key != passes->prepass &&
-           dlss_chain.programs.contains(native_key);
-}
-
-// The game's own DLSS network (its translated programs) is shown once every pass of an
-// evaluation has run several times in a row and its output has passed several health checks in
-// a row. Until then, when any pass can't run, and for the rest of the session once the network
-// fails its checks, the replacement upscale draws over the output pass's result. The setting
-// "Use the game's own DLSS" defaults off; an explicit native override enables it, while fsr/dlss
-// overrides keep the replacement. The network's image sizes are fixed by the game, so it is used
-// only without resolution scaling; its matrix multiplies need shaders 32 threads wide.
-VideoCore::GameDlssReason KeplerCompute::GameDlssBlocker() const {
-    using VideoCore::GameDlssReason;
-    static const char* const option = std::getenv("EDEN_NX2_DLSS_REPLACEMENT");
-    const bool forced_replacement = option && VideoCommon::FireEmblemUpscale::UseReplacement(
-        VideoCommon::FireEmblemUpscale::ProgramId,
-        VideoCommon::FireEmblemUpscale::OutputProgramKey, option);
-    const bool forced_native = option && !forced_replacement;
-    if (forced_replacement ||
-        (!forced_native && !Settings::values.game_dlss_network.GetValue())) {
-        return GameDlssReason::TurnedOff;
-    }
-    // NVIDIA DLSS, when turned on and running, comes first.
-    if (rasterizer->UsesNvidiaDlss()) {
-        return GameDlssReason::NvidiaDlss;
-    }
-    const auto& scale = Settings::values.resolution_info;
-    if (scale.up_scale != 1 || scale.down_shift != 0) {
-        return GameDlssReason::ResolutionScaling;
-    }
-    if (!rasterizer->SupportsGameDlssNetwork()) {
-        return GameDlssReason::Unsupported;
-    }
-    return GameDlssReason::None;
-}
-
-// Checks the network's output against its input (on the GPU; the result arrives a few frames
-// later) and drops the network for the session after DLSS_NETWORK_BAD_CHECKS failed checks in a
-// row: a network that produces NaN, freezes on an old image or draws garbage would otherwise stay
-// on screen.
-void KeplerCompute::CheckDlssNetwork() {
-    dlss_chain.checked = rasterizer->CanProbeGameDlssOutput();
-    if (!dlss_chain.checked) {
-        return;
-    }
-    const auto& cbuf = launch_description.const_buffer_config[0];
-    const GPUVAddr cbuf_address = (GPUVAddr{cbuf.address_high} << 32) | cbuf.address_low;
-    if (!(launch_description.const_buffer_enable_mask & 1) || cbuf.size.Value() < 0x34c ||
-        !memory_manager.IsFullyMappedRange(cbuf_address, 0x34c)) {
-        return;
-    }
-    const auto surface = [&](u32 offset) -> std::optional<Fermi2D::Surface> {
-        const u32 tic_index = memory_manager.Read<u32>(cbuf_address + offset) & 0xfffff;
-        if (tic_index > regs.tic.limit || !memory_manager.IsFullyMappedRange(
-                regs.tic.Address() + u64{tic_index} * sizeof(Texture::TICEntry),
-                sizeof(Texture::TICEntry))) {
-            return std::nullopt;
-        }
-        const auto tic = GetTICEntry(tic_index);
-        using RTFormat = Tegra::RenderTargetFormat;
-        Fermi2D::Surface result{};
-        switch (tic.format) {
-        case Texture::TextureFormat::B10G11R11:
-            result.format = RTFormat::B10G11R11_FLOAT;
-            break;
-        case Texture::TextureFormat::R16G16B16A16:
-            result.format = RTFormat::R16G16B16A16_FLOAT;
-            break;
-        case Texture::TextureFormat::A8B8G8R8:
-            result.format = RTFormat::A8B8G8R8_UNORM;
-            break;
-        case Texture::TextureFormat::A2B10G10R10:
-            result.format = RTFormat::A2B10G10R10_UNORM;
-            break;
-        default:
-            return std::nullopt;
-        }
-        if (tic.Address() == 0 || !tic.IsBlockLinear()) {
-            return std::nullopt;
-        }
-        result.linear = Fermi2D::MemoryLayout::BlockLinear;
-        result.block_width.Assign(tic.block_width);
-        result.block_height.Assign(tic.block_height);
-        result.block_depth.Assign(tic.block_depth);
-        result.depth = 1;
-        result.width = tic.Width();
-        result.height = tic.Height();
-        result.addr_upper = static_cast<u32>(tic.Address() >> 32);
-        result.addr_lower = static_cast<u32>(tic.Address());
-        return result;
-    };
-    const auto input = surface(0x328);
-    const auto output = surface(0x348);
-    if (!input || !output) {
-        return;
-    }
-    const auto probe = rasterizer->ProbeGameDlssOutput(*input, *output);
-    if (!probe) {
-        return;
-    }
-    const bool invalid = probe->invalid_samples != 0;
-    const bool mismatched = probe->mismatched * 100 > probe->blocks * DLSS_CHECK_MISMATCH_PERCENT;
-    if (!invalid && !mismatched) {
-        ++dlss_chain.good_checks;
-        dlss_chain.bad_checks = 0;
-        return;
-    }
-    dlss_chain.good_checks = 0;
-    if (++dlss_chain.bad_checks < DLSS_NETWORK_BAD_CHECKS) {
-        return;
-    }
-    dlss_chain.failure = invalid ? VideoCore::GameDlssReason::InvalidOutput
-                                 : VideoCore::GameDlssReason::OutputMismatch;
-    LOG_WARNING(HW_GPU,
-                "Game DLSS network: {} in {} checks in a row (last: {}/{} blocks mismatched, worst "
-                "{:.3f}, {} invalid samples); the replacement upscale draws the output from now on",
-                VideoCore::GameDlssReasonText(dlss_chain.failure), dlss_chain.bad_checks,
-                probe->mismatched, probe->blocks, probe->worst, probe->invalid_samples);
-}
-
-// Tells the Graphics tab what draws the game's DLSS evaluation, when that changes.
-void KeplerCompute::UpdateGameDlssStatus(bool complete, VideoCore::GameDlssReason blocker) {
-    using VideoCore::GameDlssReason;
-    using VideoCore::GameDlssState;
-    VideoCore::GameDlssStatus shown{.state = GameDlssState::Checking};
-    if (dlss_chain.native) {
-        shown.state = GameDlssState::Network;
-    } else if (dlss_chain.failure != GameDlssReason::None) {
-        shown = {.state = GameDlssState::Replacement, .reason = dlss_chain.failure};
-    } else if (blocker != GameDlssReason::None) {
-        shown = {.state = GameDlssState::Replacement, .reason = blocker};
-    } else if (!complete) {
-        shown = {.state = GameDlssState::Replacement,
-                 .reason = GameDlssReason::PassesCannotRun,
-                 .rejected_passes = dlss_chain.rejected};
-    }
-    if (shown.state == dlss_chain.status.state && shown.reason == dlss_chain.status.reason &&
-        shown.rejected_passes == dlss_chain.status.rejected_passes) {
-        return;
-    }
-    // A failed check was logged as it happened; the network's start is logged above.
-    if (shown.state == GameDlssState::Checking) {
-        LOG_INFO(HW_GPU, "Game DLSS network: checking its output; the replacement upscale draws "
-                         "meanwhile");
-    } else if (shown.reason == GameDlssReason::PassesCannotRun) {
-        LOG_INFO(HW_GPU,
-                 "Game DLSS network: {} pass(es) can't run, the replacement upscale "
-                 "draws the output",
-                 shown.rejected_passes);
-    } else if (shown.state == GameDlssState::Replacement && shown.reason != dlss_chain.failure) {
-        LOG_INFO(HW_GPU, "Game DLSS network: {}, the replacement upscale draws the output",
-                 VideoCore::GameDlssReasonText(shown.reason));
-    }
-    dlss_chain.status = shown;
-    VideoCore::SetGameDlssStatus(shown);
-}
-
-// Ends this frame's DLSS evaluation at its output pass: either the network's own result stays,
-// or the replacement upscale draws over it. Returns whether the replacement ran.
-bool KeplerCompute::FinishDlssEvaluation() {
-    dlss_chain.active = false;
-    dlss_chain.output_pass = false;
-    if (dlss_chain.spatial_only) {
-        dlss_chain.pending.clear();
-        using namespace VideoCommon::FireEmblemUpscale;
-        if (UseReplacement(StarFoxProgramId, StarFoxOutputProgramKey,
-                           std::getenv("EDEN_NX2_DLSS_REPLACEMENT"))) {
-            return TryFireEmblemUpscale(false);
-        }
-        dlss_motion_vectors.reset();
-        dlss_depth.reset();
-        (void)fe_upscale_jitter.Take();
-        return false;
-    }
-    dlss_chain.programs.insert(dlss_chain.pending.begin(), dlss_chain.pending.end());
-    dlss_chain.pending.clear();
-    const bool complete = dlss_chain.rejected == 0;
-    dlss_chain.clean_evaluations = complete ? dlss_chain.clean_evaluations + 1 : 0;
-    ++dlss_chain.evaluations;
-    using VideoCore::GameDlssReason;
-    const GameDlssReason blocker = GameDlssBlocker();
-    const bool can_show =
-        blocker == GameDlssReason::None && dlss_chain.failure == GameDlssReason::None;
-    // Checked before the replacement upscale draws over the output. Checks start over whenever
-    // the network can't run.
-    if (complete && can_show) {
-        CheckDlssNetwork();
-    } else {
-        dlss_chain.good_checks = 0;
-        dlss_chain.bad_checks = 0;
-    }
-    bool native = complete && can_show && dlss_chain.failure == GameDlssReason::None;
-    if (!dlss_chain.native) {
-        native = native && dlss_chain.clean_evaluations >= DLSS_NETWORK_CLEAN_EVALUATIONS &&
-                 (!dlss_chain.checked || dlss_chain.good_checks >= DLSS_NETWORK_GOOD_CHECKS);
-    }
-    if (native != dlss_chain.native) {
-        dlss_chain.native = native;
-        if (native) {
-            LOG_INFO(HW_GPU, "Game DLSS network: every pass runs{}, its own output is shown",
-                     dlss_chain.checked ? " and its output checks out" : "");
-        }
-    }
-    UpdateGameDlssStatus(complete, blocker);
-    if (native) {
-        dlss_motion_vectors.reset();
-        dlss_depth.reset();
-        (void)fe_upscale_jitter.Take();
-        return false;
-    }
-    return TryFireEmblemUpscale();
+    return true;
 }
 
 // Logs the images a rejected program's handles (constant bank 0, bytes 0x80-0x11c) point to, so a
 // substitute (e.g. an upscale blit for a tensor-core pass) can find its inputs and output.
-void KeplerCompute::DescribeNativeResources(const NativeQmdScheduler::Descriptor& qmd) {
+void KeplerCompute::DescribeNativeResources(const NativeQmdScheduler::Descriptor& qmd, bool always) {
     static u32 described{};
-    if (described++ >= 2) return;
+    if (!always && described++ >= 2) return;
     const auto& cbuf = launch_description.const_buffer_config[0];
     const GPUVAddr cbuf_address = (GPUVAddr{cbuf.address_high} << 32) | cbuf.address_low;
     LOG_INFO(HW_GPU, "Native resources: cbuf0 {:#x} size {:#x}, grid {}x{}x{}, block {}x{}x{}, tic pool {:#x}",
@@ -880,30 +621,39 @@ void KeplerCompute::DescribeNativeResources(const NativeQmdScheduler::Descriptor
                  static_cast<u32>(tic.g_type.Value()), static_cast<u32>(tic.b_type.Value()),
                  static_cast<u32>(tic.a_type.Value()));
     }
+    // Words in every bound constant buffer that name a real image of at least 256 pixels a side:
+    // where the program's inputs and output are when they are not at cbuf0+0x90/0xa0.
+    for (u32 slot = 0; slot < NumConstBuffers; ++slot) {
+        const auto& buffer = launch_description.const_buffer_config[slot];
+        if (!((launch_description.const_buffer_enable_mask.Value() >> slot) & 1)) continue;
+        const GPUVAddr address = (GPUVAddr{buffer.address_high} << 32) | buffer.address_low;
+        const u32 size = std::min<u32>(buffer.size.Value(), 0x800);
+        LOG_INFO(HW_GPU, "  cbuf{} {:#x} size {:#x}", slot, address, buffer.size.Value());
+        for (u32 offset = 0; offset + 4 <= size; offset += 4) {
+            const u32 handle = memory_manager.Read<u32>(address + offset);
+            const u32 tic_index = handle & 0xfffff;
+            if (handle == 0 || tic_index == 0 || tic_index > regs.tic.limit) continue;
+            const auto tic = GetTICEntry(tic_index);
+            if (tic.Address() == 0 || tic.Width() < 256 || tic.Height() < 256) continue;
+            LOG_INFO(HW_GPU, "    cbuf{}+{:#x} = {:#x}: tic {} address {:#x} {}x{} format {:#x} block {}",
+                     slot, offset, handle, tic_index, tic.Address(), tic.Width(), tic.Height(),
+                     static_cast<u32>(tic.format.Value()), tic.IsBlockLinear());
+        }
+    }
 }
 
 std::atomic<u32> g_nx2_trace_draws_after_upscale{};
 
 // Fire Emblem: Fortune's Weave's first DLSS pass (rejected, before the network) has the input colour
-// at cbuf0+0x278, its motion vectors (R16G16 float, the input's size) at +0x290, its depth (Z32, the
-// input's size) at +0x298 and this frame's camera jitter (x, y; input pixels, Halton bases 2 and 3
-// less 0.5) at +0x1b0.
+// at cbuf0+0x278, its motion vectors (R16G16 float, the input's size) at +0x290 and this frame's
+// camera jitter (x, y; input pixels, Halton bases 2 and 3 less 0.5) at +0x1b0.
 void KeplerCompute::RememberDlssMotionVectors() {
-    dlss_motion_vectors.reset();
-    dlss_depth.reset();
     const auto& cbuf = launch_description.const_buffer_config[0];
+    if (cbuf.size.Value() < 0x294) return;
     const GPUVAddr cbuf_address = (GPUVAddr{cbuf.address_high} << 32) | cbuf.address_low;
-    if (!(launch_description.const_buffer_enable_mask & 1) || cbuf.size.Value() < 0x294 ||
-        !memory_manager.IsFullyMappedRange(cbuf_address, cbuf.size.Value())) {
-        return;
-    }
     const auto image = [&](u32 offset) -> std::optional<Texture::TICEntry> {
         const u32 tic_index = memory_manager.Read<u32>(cbuf_address + offset) & 0xfffff;
-        if (tic_index > regs.tic.limit || !memory_manager.IsFullyMappedRange(
-                regs.tic.Address() + u64{tic_index} * sizeof(Texture::TICEntry),
-                sizeof(Texture::TICEntry))) {
-            return std::nullopt;
-        }
+        if (tic_index > regs.tic.limit) return std::nullopt;
         return GetTICEntry(tic_index);
     };
     const auto color = image(0x278), motion = image(0x290);
@@ -914,138 +664,52 @@ void KeplerCompute::RememberDlssMotionVectors() {
         return;
     dlss_motion_vectors = *motion;
     dlss_motion_color = color->Address();
-    const auto depth = cbuf.size.Value() >= 0x29c ? image(0x298) : std::nullopt;
-    if (depth && depth->format == Texture::TextureFormat::Z32 && depth->Address() != 0 &&
-        depth->Width() == color->Width() && depth->Height() == color->Height() &&
-        depth->IsBlockLinear()) {
-        dlss_depth = *depth;
-    } else {
-        dlss_depth.reset();
-    }
+    dlss_jitter = {std::bit_cast<f32>(memory_manager.Read<u32>(cbuf_address + 0x1b0)),
+                   std::bit_cast<f32>(memory_manager.Read<u32>(cbuf_address + 0x1b4))};
 }
 
-void KeplerCompute::CaptureFireEmblemJitter() {
-    using namespace VideoCommon::FireEmblemUpscale;
-    (void)fe_upscale_jitter.Take();
-    dlss_motion_vectors.reset();
-    dlss_depth.reset();
+// Title 4's upscaler reads the tonemapped frame through the texture handle at cbuf0+0x90 and
+// writes the output resolution image through the surface handle at cbuf0+0xa0 (from its
+// TLD/SUST operands). Kirby Air Riders' reads a 2048x1152 image at cbuf0+0x80 and writes a
+// 2560x1440 one at +0x90; Fire Emblem: Fortune's Weave's DLSS network ends with a pass that reads
+// the input colour through cbuf0+0x328 and writes the DLSS output through cbuf0+0x348 (B10G11R11;
+// 720p to 1440p docked). Blit one to the other with bilinear filtering when both are plain 2D
+// images of the same format and the output is larger: title 4's slots first, then Fortune's
+// Weave's, else the first two handles in cbuf0+0x80..0x11c that form such a pair.
+bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
     const auto& cbuf = launch_description.const_buffer_config[0];
-    const GPUVAddr address = (GPUVAddr{cbuf.address_high} << 32) | cbuf.address_low;
-    if (!(launch_description.const_buffer_enable_mask & 1) || cbuf.size.Value() < 0x27c ||
-        !memory_manager.IsFullyMappedRange(address, 0x27c)) {
-        return;
-    }
-    const u32 index = memory_manager.Read<u32>(address + PrepassColorOffset) & 0xfffff;
-    if (index > regs.tic.limit || !memory_manager.IsFullyMappedRange(
-            regs.tic.Address() + u64{index} * sizeof(Texture::TICEntry), sizeof(Texture::TICEntry))) {
-        return;
-    }
-    const auto color = GetTICEntry(index);
-    if (!ValidInput(color, dlss_chain.spatial_only)) {
-        return;
-    }
-    fe_upscale_jitter.Capture(color.Address(), color.Width(), color.Height(),
-        {std::bit_cast<f32>(memory_manager.Read<u32>(address + JitterOffset)),
-         std::bit_cast<f32>(memory_manager.Read<u32>(address + JitterOffset + sizeof(f32)))});
-    if (!dlss_chain.spatial_only) {
-        RememberDlssMotionVectors();
-    }
-}
-
-void KeplerCompute::TraceDlssContract(u64 native_key, bool warn_unvalidated) {
-    static bool reported{};
-    if (warn_unvalidated && !reported) {
-        reported = true;
-        LOG_WARNING(HW_GPU, "Fast Fusion temporal replacement is not selected: motion, depth, jitter and reset contract is unvalidated; native dispatches retained. EDEN_NX2_DLSS_CONTRACT_TRACE enables bounded evidence capture");
-    }
-    static const bool enabled = std::getenv("EDEN_NX2_DLSS_CONTRACT_TRACE") != nullptr;
-    static const u32 skip = [] {
-        const char* value = std::getenv("EDEN_NX2_DLSS_CONTRACT_SKIP");
-        return value ? static_cast<u32>(std::min<unsigned long>(std::strtoul(value, nullptr, 10), 1000000UL)) : 0U;
-    }();
-    if (!enabled || dlss_contract_trace_count >= skip + 24) {
-        return;
-    }
-    if (dlss_contract_trace_count++ < skip) {
-        return;
-    }
-    const auto& cbuf = launch_description.const_buffer_config[0];
-    const GPUVAddr address = (GPUVAddr{cbuf.address_high} << 32) | cbuf.address_low;
-    const u32 bytes = std::min<u32>(cbuf.size.Value(), 0x360U);
-    if (!(launch_description.const_buffer_enable_mask & 1) || bytes < 0x100 ||
-        !memory_manager.IsFullyMappedRange(address, bytes)) {
-        return;
-    }
-    LOG_INFO(HW_GPU, "DLSS contract candidate {:016x}: cb0={:#x} bytes={:#x} grid={}x{}x{} block={}x{}x{} native dispatch retained",
-             native_key, address, bytes, launch_description.grid_dim_x.Value(),
-             launch_description.grid_dim_y.Value(), launch_description.grid_dim_z.Value(),
-             launch_description.block_dim_x.Value(), launch_description.block_dim_y.Value(),
-             launch_description.block_dim_z.Value());
-    for (u32 offset = 0x100; offset + 16 <= bytes; offset += 16) {
-        std::array<u32, 4> words{};
-        memory_manager.ReadBlock(address + offset, words.data(), sizeof(words));
-        LOG_INFO(HW_GPU, "DLSS contract cb0+{:03x}: {:08x}", offset, fmt::join(words, " "));
-    }
-    for (u32 offset = 0x278; offset + 4 <= bytes; offset += 4) {
-        const u32 handle = memory_manager.Read<u32>(address + offset);
-        const u32 index = handle & 0xfffff;
-        const GPUVAddr tic_address = regs.tic.Address() + u64{index} * sizeof(Texture::TICEntry);
-        if (!handle || index > regs.tic.limit ||
-            !memory_manager.IsFullyMappedRange(tic_address, sizeof(Texture::TICEntry))) {
-            continue;
-        }
-        const auto tic = GetTICEntry(index);
-        std::array<u32, sizeof(Texture::TICEntry) / sizeof(u32)> words{};
-        std::memcpy(words.data(), &tic, sizeof(tic));
-        LOG_INFO(HW_GPU, "DLSS contract handle+{:03x}={:08x}: tic={} addr={:#x} {}x{} raw={:08x}",
-                 offset, handle, index, tic.Address(), tic.Width(), tic.Height(),
-                 fmt::join(words, " "));
-    }
-}
-
-bool KeplerCompute::TryFireEmblemUpscale(bool allow_history) {
-    using namespace VideoCommon::FireEmblemUpscale;
-    static const bool requested_history = [] {
-        const char* const option = std::getenv("EDEN_NX2_DLSS_REPLACEMENT");
-        return option && (std::string_view{option} == "fsr" || std::string_view{option} == "dlss");
-    }();
-    const bool use_history = allow_history && requested_history;
-    const size_t game_index = dlss_chain.spatial_only ? 1 : 0;
-    const char* const game = dlss_chain.spatial_only ? "Star Fox" : "Fire Emblem";
-    const auto jitter = fe_upscale_jitter.Take();
-    const auto motion = std::exchange(dlss_motion_vectors, std::nullopt);
-    const auto depth = std::exchange(dlss_depth, std::nullopt);
-    if (!jitter || (use_history && (!motion || !depth))) {
-        static std::array<bool, 2> reported{};
-        if (!reported[game_index]) {
-            reported[game_index] = true;
-            LOG_WARNING(HW_GPU, "{} replacement lacks current inputs: jitter={} motion={} depth={} temporal={}; retaining native dispatch",
-                        game, jitter.has_value(), motion.has_value(), depth.has_value(), use_history);
-        }
-        return false;
-    }
-    const auto& cbuf = launch_description.const_buffer_config[0];
-    const GPUVAddr address = (GPUVAddr{cbuf.address_high} << 32) | cbuf.address_low;
-    if (!(launch_description.const_buffer_enable_mask & 1) || cbuf.size.Value() < 0x34c ||
-        !memory_manager.IsFullyMappedRange(address, 0x34c)) {
-        return false;
-    }
+    const GPUVAddr cbuf_address = (GPUVAddr{cbuf.address_high} << 32) | cbuf.address_low;
     const auto image = [&](u32 offset) -> std::optional<Texture::TICEntry> {
-        const u32 index = memory_manager.Read<u32>(address + offset) & 0xfffff;
-        if (index > regs.tic.limit || !memory_manager.IsFullyMappedRange(
-                regs.tic.Address() + u64{index} * sizeof(Texture::TICEntry), sizeof(Texture::TICEntry))) {
-            return std::nullopt;
-        }
-        return GetTICEntry(index);
+        const u32 tic_index = memory_manager.Read<u32>(cbuf_address + offset) & 0xfffff;
+        if (tic_index > regs.tic.limit) return std::nullopt;
+        return GetTICEntry(tic_index);
     };
-    const auto input = image(OutputColorInputOffset);
-    const auto output = image(OutputColorOffset);
-    if (!input || !output || !ValidPair(*input, *output, dlss_chain.spatial_only) ||
-        jitter->color != input->Address() || (use_history && dlss_motion_color != input->Address()) ||
-        jitter->width != input->Width() || jitter->height != input->Height()) {
-        return false;
+    const auto usable = [](const std::optional<Texture::TICEntry>& in,
+                           const std::optional<Texture::TICEntry>& out) {
+        return in && out && in->format == out->format && in->Address() != 0 &&
+               out->Address() != 0 && out->Width() > in->Width() && in->IsBlockLinear() &&
+               out->IsBlockLinear();
+    };
+    // Title 4's version 458752 keeps the pair at cbuf0+0x60 (1280x720) and +0x70 (1920x1080); the
+    // screen stayed the output's clear colour (blue) until camera mode skipped the pass.
+    std::optional<Texture::TICEntry> input, output;
+    for (const auto [in_offset, out_offset] : {std::pair{0x90U, 0xa0U}, std::pair{0x60U, 0x70U}}) {
+        input = image(in_offset);
+        output = image(out_offset);
+        if (usable(input, output)) break;
     }
-    const auto surface = [](const Texture::TICEntry& tic, Tegra::RenderTargetFormat format) {
+    if (!usable(input, output))
+        return false;
+    using RTFormat = Tegra::RenderTargetFormat;
+    RTFormat format{};
+    switch (input->format) {
+    case Texture::TextureFormat::A2B10G10R10: format = RTFormat::A2B10G10R10_UNORM; break;
+    case Texture::TextureFormat::A8B8G8R8: format = RTFormat::A8B8G8R8_UNORM; break;
+    case Texture::TextureFormat::B10G11R11: format = RTFormat::B10G11R11_FLOAT; break;
+    case Texture::TextureFormat::R16G16B16A16: format = RTFormat::R16G16B16A16_FLOAT; break;
+    default: return false;
+    }
+    const auto surface = [&](const Texture::TICEntry& tic) {
         Fermi2D::Surface result{};
         result.format = format;
         result.linear = Fermi2D::MemoryLayout::BlockLinear;
@@ -1059,21 +723,170 @@ bool KeplerCompute::TryFireEmblemUpscale(bool allow_history) {
         result.addr_lower = static_cast<u32>(tic.Address());
         return result;
     };
-    const auto input_format = dlss_chain.spatial_only ? Tegra::RenderTargetFormat::A8B8G8R8_SRGB
-                                                     : Tegra::RenderTargetFormat::B10G11R11_FLOAT;
-    const auto output_format = dlss_chain.spatial_only ? Tegra::RenderTargetFormat::R16G16B16A16_FLOAT
-                                                      : Tegra::RenderTargetFormat::B10G11R11_FLOAT;
-    const bool done = rasterizer->AccelerateTemporalUpscale(
-        surface(*input, input_format), surface(*output, output_format),
-        use_history ? surface(*motion, Tegra::RenderTargetFormat::R16G16_FLOAT) : Fermi2D::Surface{},
-        use_history ? &*depth : nullptr, jitter->offset,
-        use_history ? std::array{1.0f, 1.0f} : std::array{0.0f, 0.0f}, use_history);
-    static std::array<u32, 2> logged{};
-    if (logged[game_index]++ < 8) {
-        LOG_INFO(HW_GPU, "{} DLSS replacement: {} temporal={} input={:#x} {}x{} output={:#x} {}x{} jitter={},{}",
-                 game, done ? "applied" : "unavailable; retaining native dispatch", use_history,
-                 input->Address(), input->Width(), input->Height(), output->Address(),
-                 output->Width(), output->Height(), jitter->offset[0], jitter->offset[1]);
+    const Fermi2D::Config config{
+        .operation = Fermi2D::Operation::SrcCopy,
+        .filter = Fermi2D::Filter::Bilinear,
+        .must_accelerate = true,
+        .dst_x0 = 0,
+        .dst_y0 = 0,
+        .dst_x1 = static_cast<s32>(output->Width()),
+        .dst_y1 = static_cast<s32>(output->Height()),
+        .src_x0 = 0,
+        .src_y0 = 0,
+        .src_x1 = static_cast<s32>(input->Width()),
+        .src_y1 = static_cast<s32>(input->Height()),
+    };
+    // Debug (EDEN_NX2_SAMPLE_AT=<n>): at the n-th upscale, download the input, output and targets
+    // and count non-zero words. Off by default: the downloads froze title 4 for ~1.3 s.
+    static const u32 sample_at = [] {
+        const char* value = std::getenv("EDEN_NX2_SAMPLE_AT");
+        return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : ~0U;
+    }();
+    // EDEN_NX2_SAMPLE_EVERY=<n>: again every n upscales after that (the scene may come later).
+    static const u32 sample_every = [] {
+        const char* value = std::getenv("EDEN_NX2_SAMPLE_EVERY");
+        return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
+    }();
+    if (static u32 sampled{}; sampled++ == sample_at ||
+                              (sample_every != 0 && sampled > sample_at &&
+                               (sampled - 1 - sample_at) % sample_every == 0)) {
+        const auto sample = [&](const Texture::TICEntry& tic) {
+            const u64 size = u64{tic.Width()} * tic.Height() * 4;
+            if (const auto device = memory_manager.GpuToCpuAddress(tic.Address())) {
+                rasterizer->FlushRegion(*device, size, VideoCommon::CacheType::All);
+            }
+            u32 nonzero{}, samples{};
+            u64 sum{};
+            for (u64 offset = 0; offset < size; offset += 4096 + 4) {
+                const u32 word = memory_manager.Read<u32>(tic.Address() + offset);
+                ++samples;
+                nonzero += word != 0;
+                sum += (word & 0x3ff) + ((word >> 10) & 0x3ff) + ((word >> 20) & 0x3ff);
+            }
+            LOG_INFO(HW_GPU, "Upscale fallback image {:#x}: {}/{} sampled words non-zero, mean channel {}",
+                     tic.Address(), nonzero, samples, samples ? sum / (samples * 3) : 0);
+        };
+        sample(*input);
+        sample(*output);
+        // Every 2560x1440 target the in-game passes draw to (from EDEN_NX2_RT_TRACE), or the
+        // images listed in EDEN_NX2_SAMPLE_EXTRA=<hex address>,... (Kirby Air Riders' frame).
+        std::vector<std::pair<GPUVAddr, u64>> addresses;
+        for (const GPUVAddr address : {0x8116a03000ULL, 0x8117ae5000ULL, 0x8114b62000ULL,
+                                       0x8115a63000ULL, 0x8117904000ULL, 0x8114a02000ULL}) {
+            addresses.emplace_back(address, 2560ULL * 1440 * 4);
+        }
+        // <hex address>[:<hex size>],...: the size defaults to the upscale input's.
+        if (const char* extra = std::getenv("EDEN_NX2_SAMPLE_EXTRA")) {
+            addresses.clear();
+            for (const char* text = extra; *text != '\0';) {
+                char* end{};
+                const u64 address = std::strtoull(text, &end, 16);
+                if (end == text) break;
+                u64 extra_size = u64{input->Width()} * input->Height() * 4;
+                if (*end == ':') {
+                    text = end + 1;
+                    extra_size = std::strtoull(text, &end, 16);
+                }
+                addresses.emplace_back(address, extra_size);
+                text = *end == ',' ? end + 1 : end;
+            }
+        }
+        for (const auto& [address, size] : addresses) {
+            if (const auto device = memory_manager.GpuToCpuAddress(address)) {
+                rasterizer->FlushRegion(*device, size, VideoCommon::CacheType::All);
+            }
+            u32 nonzero{}, samples{}, distinct{};
+            u32 last{};
+            std::unordered_map<u32, u32> counts;
+            // About a thousand samples of a small image (a 33x33x33 table), else every 4 KiB.
+            const u64 stride = size < (u64{4} << 20) ?(std::max<u64>(size / 1024, 8) & ~u64{7}) + 4 : 4096 + 4;
+            u32 first_words[4]{};
+            for (u32 i = 0; i < 4; ++i) {
+                first_words[i] = memory_manager.Read<u32>(address + i * 4);
+            }
+            LOG_INFO(HW_GPU, "Upscale fallback target {:#x}: first words {:08x} {:08x} {:08x} {:08x}",
+                     address, first_words[0], first_words[1], first_words[2], first_words[3]);
+            for (u64 offset = 0; offset < size; offset += stride) {
+                const u32 word = memory_manager.Read<u32>(address + offset);
+                ++samples;
+                nonzero += word != 0;
+                distinct += word != last;
+                last = word;
+                ++counts[word];
+            }
+            u32 common{}, common_count{};
+            for (const auto& [word, count] : counts) {
+                if (count > common_count) {
+                    common = word;
+                    common_count = count;
+                }
+            }
+            LOG_INFO(HW_GPU, "Upscale fallback target {:#x}: {}/{} non-zero, {} changes, most common "
+                             "word {:#010x} ({} times)",
+                     address, nonzero, samples, distinct, common, common_count);
+        }
+    }
+    auto source = surface(*input);
+    // EDEN_NX2_UPSCALE_SOURCE=<gpu address>: blit from another same-sized image (debug aid).
+    if (static const u64 override_source = [] {
+            const char* value = std::getenv("EDEN_NX2_UPSCALE_SOURCE");
+            return value ? std::strtoull(value, nullptr, 16) : 0ULL;
+        }();
+        override_source != 0) {
+        source.addr_upper = static_cast<u32>(override_source >> 32);
+        source.addr_lower = static_cast<u32>(override_source);
+        if (const char* value = std::getenv("EDEN_NX2_UPSCALE_SOURCE_FORMAT")) {
+            source.format = static_cast<RTFormat>(std::strtoul(value, nullptr, 16));
+        }
+    }
+    // Fortune's Weave: a temporal upscale along its motion vectors that undoes this frame's camera
+    // jitter (both from the frame's first DLSS pass) and accumulates the frames as DLSS would.
+    // EDEN_NX2_TEMPORAL_UPSCALE=0 blits instead.
+    const auto upscale_temporally = [&] {
+        static const bool enabled = [] {
+            const char* value = std::getenv("EDEN_NX2_TEMPORAL_UPSCALE");
+            return value == nullptr || std::string_view{value} != "0";
+        }();
+        if (!fortunes_weave || !enabled || !dlss_motion_vectors ||
+            dlss_motion_color != input->Address())
+            return false;
+        Fermi2D::Surface motion = surface(*dlss_motion_vectors);
+        motion.format = RTFormat::R16G16_FLOAT;
+        return rasterizer->AccelerateTemporalUpscale(source, surface(*output), motion, dlss_jitter,
+                                                     {1.0f, 1.0f});
+    };
+    const bool done = upscale_temporally() ||
+                      rasterizer->AccelerateSurfaceCopy(source, surface(*output), config);
+    if (static u32 checked{}; checked++ == sample_at) {
+        const u64 size = u64{output->Width()} * output->Height() * 4;
+        if (const auto device = memory_manager.GpuToCpuAddress(output->Address())) {
+            rasterizer->FlushRegion(*device, size, VideoCommon::CacheType::All);
+        }
+        u32 nonzero{}, samples{}, changes{}, last{};
+        for (u64 offset = 0; offset < size; offset += 4096 + 4) {
+            const u32 word = memory_manager.Read<u32>(output->Address() + offset);
+            ++samples;
+            nonzero += word != 0;
+            changes += word != last;
+            last = word;
+        }
+        LOG_INFO(HW_GPU, "Upscale fallback output after blit: {}/{} non-zero, {} changes", nonzero, samples,
+                 changes);
+    }
+    // Debug: trace the draws that follow one upscale (EDEN_NX2_RT_TRACE_AFTER_UPSCALE).
+    static const u32 trace_at = [] {
+        const char* value = std::getenv("EDEN_NX2_TRACE_AFTER_UPSCALE");
+        return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
+    }();
+    if (static u32 count{}; trace_at != 0 && ++count == trace_at) g_nx2_trace_draws_after_upscale = 40;
+    static u32 logged{};
+    if (logged++ < 4) {
+        LOG_INFO(HW_GPU, "Upscale fallback {:#x} {}x{} block {}/{}/{} -> {:#x} {}x{} block {}/{}/{} levels {}: {}",
+                 input->Address(), input->Width(), input->Height(), input->block_width.Value(),
+                 input->block_height.Value(), input->block_depth.Value(), output->Address(),
+                 output->Width(), output->Height(), output->block_width.Value(),
+                 output->block_height.Value(), output->block_depth.Value(), output->max_mip_level.Value(),
+                 done ? "blitted" : "not accelerated");
     }
     return done;
 }
@@ -1116,7 +929,7 @@ struct KeplerCompute::FrontState {
 KeplerCompute::FrontState& KeplerCompute::Front(VideoCommon::GpuSplit& split) {
     if (!front) [[unlikely]] {
         // Copy the back's state and take the macros over while it is idle.
-        split.Drain(VideoCommon::DrainSite::FrontStart);
+        split.Drain();
         front = std::make_unique<FrontState>();
         front->registers = native_registers;
         front->executing_macro = native_executing_macro;
@@ -1222,6 +1035,7 @@ void KeplerCompute::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuS
 
 void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split,
                                   FrontState& fs) {
+#ifdef ARCHITECTURE_x86_64
     const auto positions = FrontMacroPositions(fs);
     const u32 start = positions[((*fs.executing_macro - 0xe00) / 2) % positions.size()];
     fs.executing_macro.reset();
@@ -1230,33 +1044,31 @@ void KeplerCompute::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& s
         macro.native_interpreter.active_dram = native_data_ram;
     }
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Macro};
-    const auto read = [&fs](u32 address) {
-        return address < fs.registers.size() ? fs.registers[address] : 0U;
-    };
-    const auto emit = [&](u32 address, u32 value) {
-        if (address >= 0xe00) {
-            return false;
-        }
-        FrontApply(fs, address, value);
-        split.MacroWrite(this, address, value);
-        return true;
-    };
-#ifdef ARCHITECTURE_x86_64
     if (!macro.native_jit) {
         macro.native_jit = std::make_shared<TuringMacroJit>();
     }
     macro.native_jit->Prepare(macro.native_code, macro.native_code_generation);
     const auto result = macro.native_jit->Execute(
-        start, fs.parameters, std::span<u32>{*macro.native_interpreter.active_dram}, read, emit);
-#else
-    const auto result =
-        macro.native_interpreter.Execute(macro.native_code, start, fs.parameters, read, emit);
-#endif
+        start, fs.parameters, std::span<u32>{*macro.native_interpreter.active_dram},
+        [&fs](u32 address) {
+            return address < fs.registers.size() ? fs.registers[address] : 0U;
+        },
+        [&](u32 address, u32 value) {
+            if (address >= 0xe00) {
+                return false;
+            }
+            FrontApply(fs, address, value);
+            split.MacroWrite(this, address, value);
+            return true;
+        });
     if (!result.success) {
         macro.native_execution_failed = true;
-        LOG_ERROR(HW_GPU, "Native MME (split front) failed: compute start={:#x}, consumed={}, error={}",
+        LOG_ERROR(HW_GPU, "Native MME (JIT, split front) failed: compute start={:#x}, consumed={}, error={}",
                   start, result.consumed, result.error);
     }
+#else
+    fs.executing_macro.reset();
+#endif
     fs.parameters.clear();
 }
 

@@ -4,18 +4,25 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <span>
-#include <string>
-#include <string_view>
 #include <vector>
 
 #include "common/common_types.h"
+#include "video_core/host1x/nvdec_common.h"
 
 namespace FFmpeg {
 class Frame;
 }
 
 namespace Tegra::Host1x {
+
+struct Nx2VideoConfiguration {
+    NvdecCommon::VideoCodec codec;
+    std::span<const u8> extradata;
+};
+
+std::optional<Nx2VideoConfiguration> ParseNx2VideoConfiguration(std::span<const u8> configuration);
 
 /// A picture decoded by Nx2VideoDecoder, in display order.
 struct Nx2Picture {
@@ -40,15 +47,22 @@ bool IsH264Stream(std::span<const u8> data);
 /// Used from one thread at a time.
 class Nx2VideoDecoder {
 public:
-    /// mime: the codec name nn::codec sends with Configure ("video/vp9", "video/vp8", ...).
-    explicit Nx2VideoDecoder(std::string_view mime);
+    explicit Nx2VideoDecoder(std::span<const u8> configuration);
     ~Nx2VideoDecoder();
 
     bool IsOpen() const;
 
+    /// The decoder opened, then stopped after faults: it outputs nothing more.
+    bool Failed() const;
+
+    /// Whether frames are decoded on the host GPU (NVDEC emulation GPU, a codec it supports).
+    bool UsingHardware() const;
+
     const std::string& Name() const;
 
-    /// Decodes one compressed frame and appends the pictures it completes.
+    /// Decodes one compressed frame and appends the pictures it completes. Never fails the
+    /// caller: a bad packet is skipped, a failing GPU decoder is replaced by the CPU decoder,
+    /// and one that faults twice closes (IsOpen() false).
     void Decode(std::span<const u8> data, u64 pts, std::vector<Nx2Picture>& pictures);
 
     /// End of stream: appends the pictures the decoder still holds, then starts over.
@@ -63,6 +77,9 @@ public:
                 u64 pitch, u64 chroma_offset, std::span<u8> out);
 
 private:
+    void RenderUnguarded(const Nx2Picture& picture, Nx2PictureFormat format, u32 width,
+                         u32 height, u64 pitch, u64 chroma_offset, std::span<u8> out);
+
     struct Impl;
     std::unique_ptr<Impl> impl;
 };

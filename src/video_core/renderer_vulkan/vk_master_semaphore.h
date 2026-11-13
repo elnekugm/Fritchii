@@ -85,7 +85,6 @@ private:
     /// On their own cache lines: the GPU thread reads current_tick several times a draw, while
     /// threads refreshing gpu_tick would otherwise make each of those reads miss.
     alignas(64) std::atomic<u64> gpu_tick{0};     ///< Current known GPU tick.
-    std::atomic<u64> diagnostic_submitted_tick{0};
     alignas(64) std::atomic<u64> current_tick{1}; ///< Current logical tick.
     alignas(64) std::mutex wait_mutex;
     std::mutex free_mutex;

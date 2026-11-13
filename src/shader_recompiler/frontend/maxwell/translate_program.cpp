@@ -330,7 +330,8 @@ void LowerGeometryPassthrough(IR::Program& program, const HostTranslateInfo& hos
     // With the layer relative to the viewport (Maxwell 0x11F0) the hardware draws the primitive
     // once per viewport in the mask, each into layer = viewport: one shadow cascade per layer in
     // Mario Tennis Fever. Only the lowest viewport and layer 0 left every cascade in layer 0.
-    const bool multicast = viewport_mask_reg && program.invocations <= 1 && !ReadsInvocationId(program);
+    const bool multicast = viewport_mask_reg && host_info.layer_viewport_relative &&
+                           program.invocations <= 1 && !ReadsInvocationId(program);
     if (multicast) {
         program.invocations = 16; // Maxwell's viewport count
     }

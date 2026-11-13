@@ -113,6 +113,7 @@ struct Profile {
 
     bool support_cooperative_matrix{};
     bool support_software_tensor{};
+    u32 max_compute_shared_memory_size{};
     u32 max_tensor_workgroup_size{};
 
     u32 gl_max_compute_smem_size{};

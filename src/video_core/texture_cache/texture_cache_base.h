@@ -596,7 +596,7 @@ private:
     bool MarkPartialWrite(ImageBase& image, DAddr cpu_addr, size_t size);
 
     /// Uploads a large plain 2D image in chunks; false if it does not qualify.
-
+    bool UploadInChunks(Image& image);
 
     /// Records a GPU remap of a small part of a large 2D image for a partial re-upload instead of
     /// marking the whole image remapped (which replaces it). False if the image does not qualify.
