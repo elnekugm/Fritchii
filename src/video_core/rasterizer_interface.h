@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <array>
 #include <functional>
 #include <optional>
 #include <span>
@@ -26,6 +27,9 @@ class AccelerateDMAInterface;
 }
 namespace Control {
 struct ChannelState;
+}
+namespace Texture {
+struct TICEntry;
 }
 } // namespace Tegra
 
@@ -193,6 +197,17 @@ public:
     [[nodiscard]] virtual bool AccelerateSurfaceCopy(
         const Tegra::Engines::Fermi2D::Surface& src, const Tegra::Engines::Fermi2D::Surface& dst,
         const Tegra::Engines::Fermi2D::Config& copy_config) {
+        return false;
+    }
+
+    /// Temporal upscale along motion vectors, compensating camera jitter and optionally using
+    /// depth/history. Returns false when unsupported so the caller can use the native copy path.
+    [[nodiscard]] virtual bool AccelerateTemporalUpscale(
+        const Tegra::Engines::Fermi2D::Surface& src,
+        const Tegra::Engines::Fermi2D::Surface& dst,
+        const Tegra::Engines::Fermi2D::Surface& motion_vectors,
+        const Tegra::Texture::TICEntry* depth, std::array<f32, 2> jitter,
+        std::array<f32, 2> motion_scale, bool use_history = true) {
         return false;
     }
 

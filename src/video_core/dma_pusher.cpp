@@ -951,16 +951,19 @@ bool DmaPusher::IsGpuWrittenCommands(GPUVAddr address, size_t size) {
     if (!Tegra::g_nx2_ampere.load(std::memory_order_relaxed) || size == 0) {
         return false;
     }
+    bool gpu_written = false;
     Nx2SynchronizeGpuWrittenCommands(address, size,
         [] {
             if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) split.Drain();
         },
         [&](GPUVAddr page) { return memory_manager.GpuToCpuAddress(page); },
         [&] {
+            gpu_written = true;
             if (memory_manager.IsMemoryDirty(address, size, VideoCommon::CacheType::BufferCache)) {
                 memory_manager.FlushRegion(address, size, VideoCommon::CacheType::BufferCache);
             }
         });
+    return gpu_written;
 }
 
 void DmaPusher::ReportUnboundSubchannel() {

@@ -645,12 +645,21 @@ std::atomic<u32> g_nx2_trace_draws_after_upscale{};
 // at cbuf0+0x278, its motion vectors (R16G16 float, the input's size) at +0x290 and this frame's
 // camera jitter (x, y; input pixels, Halton bases 2 and 3 less 0.5) at +0x1b0.
 void KeplerCompute::RememberDlssMotionVectors() {
+    dlss_motion_vectors.reset();
+    dlss_depth.reset();
     const auto& cbuf = launch_description.const_buffer_config[0];
-    if (cbuf.size.Value() < 0x294) return;
     const GPUVAddr cbuf_address = (GPUVAddr{cbuf.address_high} << 32) | cbuf.address_low;
+    if (!(launch_description.const_buffer_enable_mask & 1) || cbuf.size.Value() < 0x294 ||
+        !memory_manager.IsFullyMappedRange(cbuf_address, cbuf.size.Value())) {
+        return;
+    }
     const auto image = [&](u32 offset) -> std::optional<Texture::TICEntry> {
         const u32 tic_index = memory_manager.Read<u32>(cbuf_address + offset) & 0xfffff;
-        if (tic_index > regs.tic.limit) return std::nullopt;
+        if (tic_index > regs.tic.limit ||
+            !memory_manager.IsFullyMappedRange(regs.tic.Address() + u64{tic_index} * sizeof(Texture::TICEntry),
+                                               sizeof(Texture::TICEntry))) {
+            return std::nullopt;
+        }
         return GetTICEntry(tic_index);
     };
     const auto color = image(0x278), motion = image(0x290);
@@ -661,6 +670,12 @@ void KeplerCompute::RememberDlssMotionVectors() {
         return;
     dlss_motion_vectors = *motion;
     dlss_motion_color = color->Address();
+    const auto depth = cbuf.size.Value() >= 0x29c ? image(0x298) : std::nullopt;
+    if (depth && depth->format == Texture::TextureFormat::Z32 && depth->Address() != 0 &&
+        depth->Width() == color->Width() && depth->Height() == color->Height() &&
+        depth->IsBlockLinear()) {
+        dlss_depth = *depth;
+    }
     dlss_jitter = {std::bit_cast<f32>(memory_manager.Read<u32>(cbuf_address + 0x1b0)),
                    std::bit_cast<f32>(memory_manager.Read<u32>(cbuf_address + 0x1b4))};
 }
@@ -844,13 +859,14 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
             const char* value = std::getenv("EDEN_NX2_TEMPORAL_UPSCALE");
             return value == nullptr || std::string_view{value} != "0";
         }();
-        if (!fortunes_weave || !enabled || !dlss_motion_vectors ||
+        if (!enabled || !dlss_motion_vectors ||
             dlss_motion_color != input->Address())
             return false;
         Fermi2D::Surface motion = surface(*dlss_motion_vectors);
         motion.format = RTFormat::R16G16_FLOAT;
-        return rasterizer->AccelerateTemporalUpscale(source, surface(*output), motion, dlss_jitter,
-                                                     {1.0f, 1.0f});
+        return rasterizer->AccelerateTemporalUpscale(
+            source, surface(*output), motion, dlss_depth ? &*dlss_depth : nullptr, dlss_jitter,
+            {1.0f, 1.0f});
     };
     const bool done = upscale_temporally() ||
                       rasterizer->AccelerateSurfaceCopy(source, surface(*output), config);
