@@ -172,6 +172,9 @@ public:
 
     [[nodiscard]] StagingBufferRef DownloadStagingBuffer(size_t size, bool deferred = false);
 
+    bool BindSmallUniformReusing(Tegra::MaxwellDeviceMemoryManager& device_memory, size_t stage,
+                                 u32 index, DAddr device_addr, u32 size);
+
     bool CanReorderUpload(const Buffer& buffer, std::span<const VideoCommon::BufferCopy> copies);
 
     void FreeDeferredStagingBuffer(StagingBufferRef& ref);
@@ -191,6 +194,9 @@ public:
                          u32 base_vertex, VkBuffer buffer, u32 offset, u32 size);
 
     void BindQuadIndexBuffer(PrimitiveTopology topology, u32 first, u32 count);
+
+    void ReserveQuadIndirect();
+    void BindArrayIndirect(VkBuffer src_buffer, u32 src_offset, bool quads);
 
     bool WidensUint8IndicesOnHost() const {
         return device.IsMoltenVK() && !device.IsExtIndexTypeUint8Supported();
