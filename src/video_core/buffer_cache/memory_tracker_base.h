@@ -7,6 +7,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <deque>
 #include <limits>
@@ -34,6 +35,28 @@ class MemoryTrackerBase {
 public:
     MemoryTrackerBase(DeviceTracker& device_tracker_) : device_tracker{&device_tracker_} {}
     ~MemoryTrackerBase() = default;
+
+    /// Remember that a vertex-buffer binding was synchronized while its guest bytes were stable.
+    void WatchSynchronized(size_t index, VAddr address, u64 size) noexcept {
+        if (index >= synchronized.size()) {
+            return;
+        }
+        synchronized[index] = {address, size, CpuWriteEpoch(address, size), size != 0};
+    }
+
+    [[nodiscard]] bool IsSynchronized(size_t index) const noexcept {
+        if (index >= synchronized.size()) {
+            return false;
+        }
+        const auto& range = synchronized[index];
+        return range.valid && range.epoch == CpuWriteEpoch(range.address, range.size);
+    }
+
+    void ForgetSynchronized(size_t index) noexcept {
+        if (index < synchronized.size()) {
+            synchronized[index].valid = false;
+        }
+    }
 
     /// Returns the inclusive CPU modified range in a begin end pair
     [[nodiscard]] std::pair<u64, u64> ModifiedCpuRegion(VAddr query_cpu_addr, u64 query_size) noexcept {
@@ -279,6 +302,14 @@ public:
     }
 
 private:
+    struct SynchronizedRange {
+        VAddr address{};
+        u64 size{};
+        u64 epoch{};
+        bool valid{};
+    };
+    std::array<SynchronizedRange, 32> synchronized{};
+
     template <bool create_region_on_fail, typename Func>
     bool IteratePages(VAddr cpu_address, size_t size, Func&& func) {
         using FuncReturn = typename std::invoke_result<Func, Manager*, u64, size_t>::type;

@@ -792,11 +792,12 @@ bool BufferCache<P>::BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, 
             }
         }
     }
-    channel_state->enabled_storage_buffers[stage] |= 1U << ssbo_index;
-    channel_state->written_storage_buffers[stage] |= (is_written ? 1U : 0U) << ssbo_index;
+    const u64 mask = u64{1} << ssbo_index;
+    channel_state->enabled_storage_buffers[stage] |= mask;
+    channel_state->written_storage_buffers[stage] |= is_written ? mask : 0;
     channel_state->selected_write_storage_buffers[stage] |=
-        (is_written && selected_writes ? 1U : 0U) << ssbo_index;
-    channel_state->table_storage_buffers[stage] |= (indirect_offset != ~0U ? 1U : 0U) << ssbo_index;
+        (is_written && selected_writes) ? mask : 0;
+    channel_state->table_storage_buffers[stage] |= (indirect_offset != ~0U) ? mask : 0;
     if constexpr (requires { runtime.ShouldLimitDynamicStorageBuffers(); }) {
         if (runtime.ShouldLimitDynamicStorageBuffers() && !already_enabled) {
             ++channel_state->total_graphics_storage_buffers;
@@ -882,12 +883,12 @@ void BufferCache<P>::BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index,
             }
         }
     }
-    channel_state->enabled_compute_storage_buffers |= 1U << ssbo_index;
-    channel_state->written_compute_storage_buffers |= (is_written ? 1U : 0U) << ssbo_index;
+    const u64 mask = u64{1} << ssbo_index;
+    channel_state->enabled_compute_storage_buffers |= mask;
+    channel_state->written_compute_storage_buffers |= is_written ? mask : 0;
     channel_state->selected_write_compute_storage_buffers |=
-        (is_written && selected_writes ? 1U : 0U) << ssbo_index;
-    channel_state->table_compute_storage_buffers |= (indirect_offset != ~0U ? 1U : 0U)
-                                                    << ssbo_index;
+        (is_written && selected_writes) ? mask : 0;
+    channel_state->table_compute_storage_buffers |= (indirect_offset != ~0U) ? mask : 0;
     if constexpr (requires { runtime.ShouldLimitDynamicStorageBuffers(); }) {
         if (runtime.ShouldLimitDynamicStorageBuffers() && !already_enabled) {
             ++channel_state->total_compute_storage_buffers;
@@ -2139,16 +2140,16 @@ u32 BufferCache<P>::WrittenMarkSize(bool compute, size_t stage, u32 index, const
         const char* value = std::getenv("EDEN_NX2_SELECTED_WRITE_BOUND");
         return value != nullptr && value[0] != '0';
     }();
-    const u32 selected = compute ? channel_state->selected_write_compute_storage_buffers
+    const u64 selected = compute ? channel_state->selected_write_compute_storage_buffers
                                  : channel_state->selected_write_storage_buffers[stage];
     if (!bound || ((selected >> index) & 1) == 0) {
         return size;
     }
     // Table entries are read from guest memory here and from the holder's host buffer by the
     // shader; a GPU-written table can make the two differ, so they don't bound other buffers.
-    const u32 enabled = compute ? channel_state->enabled_compute_storage_buffers
+    const u64 enabled = compute ? channel_state->enabled_compute_storage_buffers
                                 : channel_state->enabled_storage_buffers[stage];
-    const u32 tables = compute ? channel_state->table_compute_storage_buffers
+    const u64 tables = compute ? channel_state->table_compute_storage_buffers
                                : channel_state->table_storage_buffers[stage];
     const auto& bindings =
         compute ? channel_state->compute_storage_buffers : channel_state->storage_buffers[stage];
@@ -2633,10 +2634,10 @@ void BufferCache<P>::TouchBuffer(Buffer& buffer, BufferId buffer_id) noexcept {
         return;
     }
     if (Nx2FastDraw::g_buffer_skip) {
-        if (buffer.touch_tick == frame_tick) {
+        if (buffer.lru_touched_tick == frame_tick) {
             return;
         }
-        buffer.touch_tick = frame_tick;
+        buffer.lru_touched_tick = frame_tick;
     }
     lru_cache.Touch(buffer.getLRUID(), frame_tick);
 }

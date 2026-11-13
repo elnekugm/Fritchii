@@ -172,9 +172,6 @@ public:
 
     [[nodiscard]] StagingBufferRef DownloadStagingBuffer(size_t size, bool deferred = false);
 
-    bool BindSmallUniformReusing(Tegra::MaxwellDeviceMemoryManager& device_memory, size_t stage,
-                                 u32 index, DAddr device_addr, u32 size);
-
     bool CanReorderUpload(const Buffer& buffer, std::span<const VideoCommon::BufferCopy> copies);
 
     void FreeDeferredStagingBuffer(StagingBufferRef& ref);
