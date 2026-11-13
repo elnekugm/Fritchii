@@ -89,8 +89,6 @@ struct Profile {
     bool has_broken_signed_operations{};
     /// Float controls break when fp16 is enabled
     bool has_broken_fp16_float_controls{};
-    /// Shared memory limit for compute shaders in bytes (0 = unknown).
-    u32 max_compute_shared_memory_size{};
     /// Declaring fp32 denorm flush to zero miscompiles on some drivers
     bool has_broken_fp32_denorm_flush{};
     /// Dynamic vec4 indexing is broken on some OpenGL drivers
@@ -106,15 +104,7 @@ struct Profile {
     /// Some drivers have broken support for OpVectorExtractDynamic on subgroup mask inputs
     bool has_broken_spirv_subgroup_mask_vector_extract_dynamic{};
     bool has_broken_spirv_subgroup_shuffle{};
-    /// AMD graphics workaround, enabled only when this stage is forced to subgroup size 32.
-    /// Compute must keep Shuffle: the broadcast loop can hang AMDVLK pipeline compilation.
-    bool has_broken_spirv_dynamic_subgroup_shuffle{};
     u32 max_subgroup_size{};
-
-    bool support_cooperative_matrix{};
-    bool support_software_tensor{};
-    u32 max_compute_shared_memory_size{};
-    u32 max_tensor_workgroup_size{};
 
     u32 gl_max_compute_smem_size{};
 

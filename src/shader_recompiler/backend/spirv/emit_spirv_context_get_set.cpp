@@ -48,9 +48,6 @@ std::optional<OutAttr> OutputAttrPointer(EmitContext& ctx, IR::Attribute attr) {
         const u32 index{IR::GenericAttributeIndex(attr)};
         const u32 element{IR::GenericAttributeElement(attr)};
         const GenericElementInfo& info{ctx.output_generics.at(index).at(element)};
-        if (!Sirit::ValidId(info.id)) {
-            return std::nullopt; // output pruned, nothing downstream reads it
-        }
         if (info.num_components == 1) {
             return info.id;
         } else {
@@ -116,7 +113,7 @@ std::optional<OutAttr> OutputAttrPointer(EmitContext& ctx, IR::Attribute attr) {
     }
 }
 
-Id GetCbuf(EmitContext& ctx, Id result_type, Id UniformDefinitions::* member_ptr, u32 element_size,
+Id GetCbuf(EmitContext& ctx, Id result_type, Id UniformDefinitions::*member_ptr, u32 element_size,
            const IR::Value& binding, const IR::Value& offset, const Id indirect_func) {
     Id buffer_offset;
     const Id uniform_type{ctx.uniform_types.*member_ptr};
@@ -429,7 +426,7 @@ void EmitSetAttribute(EmitContext& ctx, IR::Attribute attr, Id value, [[maybe_un
     static constexpr IR::Attribute cd7 = IR::Attribute::ClipDistance7;
 
     if (attr >= cd0 && attr <= cd7) {
-        const u32 idx = (u32)attr - (u32)cd0;
+        const u32 idx = (u32) attr - (u32) cd0;
         clip_distance_written.set(idx);
     }
     ctx.OpStore(output->pointer, value);
@@ -525,56 +522,42 @@ void EmitSetFragDepth(EmitContext& ctx, Id value) {
 }
 
 void EmitGetZFlag(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 void EmitGetSFlag(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 void EmitGetCFlag(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 void EmitGetOFlag(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 void EmitSetZFlag(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 void EmitSetSFlag(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 void EmitSetCFlag(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 void EmitSetOFlag(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitWorkgroupId(EmitContext& ctx) {
-    if (Sirit::ValidId(ctx.mesh_group_index)) {
-        // Mesh emulation with a task: a mesh workgroup's index is within its task's, as in a
-        // mesh shader launched by a task shader.
-        const Id zero{ctx.u32_zero_value};
-        return ctx.OpCompositeConstruct(ctx.U32[3], ctx.OpLoad(ctx.U32[1], ctx.mesh_group_index),
-                                        zero, zero);
-    }
     return ctx.OpLoad(ctx.U32[3], ctx.workgroup_id);
 }
 
 Id EmitLocalInvocationId(EmitContext& ctx) {
-    if (ctx.uses_software_tensor) {
-        // Vulkan does not tie native local IDs to subgroup lanes. Preserve guest warp grouping.
-        const Id warp{ctx.OpLoad(ctx.U32[1], ctx.subgroup_id)};
-        const Id lane{ctx.OpLoad(ctx.U32[1], ctx.subgroup_local_invocation_id)};
-        const Id x{ctx.OpIAdd(ctx.U32[1], ctx.OpIMul(ctx.U32[1], warp, ctx.Const(32U)), lane)};
-        return ctx.OpCompositeConstruct(ctx.U32[3], x, ctx.Const(0U), ctx.Const(0U));
-    }
     return ctx.OpLoad(ctx.U32[3], ctx.local_invocation_id);
 }
 
@@ -586,12 +569,9 @@ Id EmitInvocationInfo(EmitContext& ctx) {
     switch (ctx.stage) {
     case Stage::TessellationControl:
     case Stage::TessellationEval:
-        return ctx.OpShiftLeftLogical(ctx.U32[1], ctx.OpLoad(ctx.U32[1], ctx.patch_vertices_in),
-                                      ctx.Const(16u));
+        return ctx.OpShiftLeftLogical(ctx.U32[1], ctx.OpLoad(ctx.U32[1], ctx.patch_vertices_in), ctx.Const(16u));
     case Stage::Geometry:
-        return ctx.OpShiftLeftLogical(
-            ctx.U32[1], ctx.Const(InputTopologyVertices::vertices(ctx.runtime_info.input_topology)),
-            ctx.Const(16u));
+        return ctx.OpShiftLeftLogical(ctx.U32[1], ctx.Const(InputTopologyVertices::vertices(ctx.runtime_info.input_topology)), ctx.Const(16u));
     default:
         LOG_WARNING(Shader, "(STUBBED) called");
         return ctx.Const(0x00ff0000u);
@@ -639,25 +619,20 @@ Id EmitRenderArea(EmitContext& ctx) {
         const Id pointer{ctx.OpAccessChain(pointer_type, ctx.render_area_push_constant, index)};
         return ctx.OpLoad(ctx.F32[4], pointer);
     } else {
-        throw NotImplementedException("SPIR-V Instruction {}", __func__);
+        throw NotImplementedException("SPIR-V Instruction");
     }
 }
 
-// A dynamic index past the array is undefined in SPIR-V: drivers that put the array in scratch
-// memory (RADV) read or write wherever the offset points and fault the GPU (Kirby Air Riders).
-// Out-of-range words go to the spare word past the end; the frontend already turns such loads
-// into zero.
-static Id LocalPointer(EmitContext& ctx, Id word_offset) {
-    const Id index{ctx.OpUMin(ctx.U32[1], word_offset, ctx.Const(ctx.local_memory_words))};
-    return ctx.OpAccessChain(ctx.private_u32, ctx.local_memory, index, ctx.Const(0U));
-}
-
 Id EmitLoadLocal(EmitContext& ctx, Id word_offset) {
-    return ctx.OpLoad(ctx.U32[1], LocalPointer(ctx, word_offset));
+    const Id pointer{
+        ctx.OpAccessChain(ctx.private_u32, ctx.local_memory, word_offset, ctx.Const(0U))};
+    return ctx.OpLoad(ctx.U32[1], pointer);
 }
 
 void EmitWriteLocal(EmitContext& ctx, Id word_offset, Id value) {
-    ctx.OpStore(LocalPointer(ctx, word_offset), value);
+    const Id pointer{
+        ctx.OpAccessChain(ctx.private_u32, ctx.local_memory, word_offset, ctx.Const(0U))};
+    ctx.OpStore(pointer, value);
 }
 
 } // namespace Shader::Backend::SPIRV

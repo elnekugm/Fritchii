@@ -14,7 +14,7 @@ Id SubgroupScope(EmitContext& ctx) {
 }
 
 bool StageSupportsSubgroups(EmitContext& ctx) {
-    return ctx.SupportsSubgroups();
+    return ctx.profile.SupportsSubgroupStage(ctx.stage);
 }
 
 Id GetThreadId(EmitContext& ctx) {
@@ -90,22 +90,12 @@ Id GuestLane(EmitContext& ctx, Id index) {
     return ctx.OpBitwiseAnd(ctx.U32[1], index, ctx.Const(31U));
 }
 
-bool UseShuffleFallback(EmitContext& ctx) {
-    return ctx.profile.has_broken_spirv_subgroup_shuffle ||
-           (ctx.profile.has_broken_spirv_fragment_shuffle && ctx.stage == Stage::Fragment);
-}
-
 Id ShuffleAbsolute(EmitContext& ctx, Id value, Id src_thread_id) {
-    const bool replace_dynamic_shuffle =
-        ctx.profile.has_broken_spirv_dynamic_subgroup_shuffle && ctx.stage != Stage::Compute;
-    if (!ctx.profile.has_broken_spirv_subgroup_shuffle && !replace_dynamic_shuffle) {
+    if (!ctx.profile.has_broken_spirv_subgroup_shuffle) {
         return ctx.OpGroupNonUniformShuffle(ctx.U32[1], SubgroupScope(ctx), value, src_thread_id);
     }
     Id result{ctx.u32_zero_value};
-    // The AMD path is enabled per stage only with an enforced 32-lane subgroup.
-    // Qualcomm retains its full host-subgroup fallback.
-    const u32 loop_lanes = replace_dynamic_shuffle ? 32U : ctx.profile.max_subgroup_size;
-    for (u32 lane = 0; lane < loop_lanes; ++lane) {
+    for (u32 lane = 0; lane < ctx.profile.max_subgroup_size; ++lane) {
         const Id read{
             ctx.OpGroupNonUniformBroadcast(ctx.U32[1], SubgroupScope(ctx), value, ctx.Const(lane))};
         const Id matches{ctx.OpIEqual(ctx.U1, src_thread_id, ctx.Const(lane))};
@@ -115,7 +105,7 @@ Id ShuffleAbsolute(EmitContext& ctx, Id value, Id src_thread_id) {
 }
 
 Id ShuffleRelative(EmitContext& ctx, Id value, Id delta, Id src_thread_id, spv::Op op) {
-    if (!ctx.profile.support_shuffle_relative || UseShuffleFallback(ctx)) {
+    if (!ctx.profile.support_shuffle_relative) {
         return ShuffleAbsolute(ctx, value, HostThreadId(ctx, src_thread_id));
     }
     const Id result{ctx.OpGroupNonUniformShuffleXor(ctx.U32[1], SubgroupScope(ctx), value, delta)};

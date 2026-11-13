@@ -15,7 +15,6 @@
 
 #include "common/common_types.h"
 #include "shader_recompiler/frontend/ir/type.h"
-#include "shader_recompiler/storage_write_extent.h"
 #include "shader_recompiler/varying_state.h"
 
 #include <boost/container/small_vector.hpp>
@@ -264,22 +263,15 @@ struct MeshInfo {
     u32 payload_words{}; ///< Task output region / mesh input region, in 32-bit words
     u32 max_vertices{};
     u32 max_primitives{};
-    u32 topology{}; ///< SET_MESH_SHADER_A output topology (0 = points, 1 = lines, 4 = triangles)
+    u32 topology{}; ///< SET_MESH_SHADER_A output topology (4 = triangles)
     boost::container::static_vector<u32, 136> vertex_lines;
     boost::container::static_vector<u32, 136> primitive_lines;
-
-    /// Vertex indices per primitive, which is also its byte count in the map region.
-    [[nodiscard]] u32 PrimitiveVertices() const noexcept {
-        return topology == 0 ? 1 : topology == 1 ? 2 : 3;
-    }
 };
 
 struct Info {
     static constexpr size_t MAX_INDIRECT_CBUFS{14};
     static constexpr size_t MAX_CBUFS{18};
-    /// Native (Switch 2) programs take their storage buffers from raw pointers, as many as they
-    /// read: Ocarina of Time's foliage culling binds 37 for its lists and per-type instance tables.
-    static constexpr size_t MAX_SSBOS{64};
+    static constexpr size_t MAX_SSBOS{32};
 
     bool is_task{}; ///< Switch 2 task program (Stage::Task)
     bool is_mesh{}; ///< Switch 2 mesh program (Stage::Mesh)
@@ -290,7 +282,6 @@ struct Info {
     bool uses_sample_id{};
     bool uses_is_helper_invocation{};
     bool uses_subgroup_invocation_id{};
-    bool uses_tensor_mul_add{};
     bool uses_subgroup_shuffles{};
     bool uses_quad_shuffles{};
     std::array<bool, 30> uses_patches{};
@@ -305,8 +296,6 @@ struct Info {
     bool loads_indexed_attributes{};
 
     std::array<bool, 8> stores_frag_color{};
-    /// Components (bit 0 = R ... bit 3 = A) of each render target the fragment shader writes
-    std::array<u8, 8> frag_color_components{};
     bool stores_sample_mask{};
     bool stores_frag_depth{};
 
@@ -355,8 +344,6 @@ struct Info {
     bool uses_global_memory{};
     bool requires_coherent_global_memory{};
     bool requires_coherent_image_memory{};
-    /// Set by the SPIR-V backend when HMMA runs on cooperative matrices, which need full subgroups
-    bool uses_cooperative_matrix{};
     /// Native global accesses whose pointer is chosen at run time: every storage buffer descriptor
     /// is a candidate and its bound length (not an NVN size word) limits the range.
     bool native_global_bounds{};
@@ -383,9 +370,6 @@ struct Info {
     boost::container::static_vector<ConstantBufferDescriptor, MAX_CBUFS>
         constant_buffer_descriptors;
     boost::container::static_vector<StorageBufferDescriptor, MAX_SSBOS> storage_buffers_descriptors;
-    /// One per storage_buffers_descriptors entry, same order: how far the program's loads and
-    /// atomics reach past the pointer. A size other than the descriptors' means unknown.
-    std::vector<StorageWriteExtent> storage_read_extents;
     TextureBufferDescriptors texture_buffer_descriptors;
     ImageBufferDescriptors image_buffer_descriptors;
     TextureDescriptors texture_descriptors;

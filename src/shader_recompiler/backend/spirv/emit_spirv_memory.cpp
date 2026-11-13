@@ -79,19 +79,19 @@ void WriteStorageByCasLoop(EmitContext& ctx, const IR::Value& binding, const IR:
 } // Anonymous namespace
 
 void EmitLoadGlobalU8(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 void EmitLoadGlobalS8(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 void EmitLoadGlobalU16(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 void EmitLoadGlobalS16(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitLoadGlobal32(EmitContext& ctx, Id address) {
@@ -119,19 +119,19 @@ Id EmitLoadGlobal128(EmitContext& ctx, Id address) {
 }
 
 void EmitWriteGlobalU8(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 void EmitWriteGlobalS8(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 void EmitWriteGlobalU16(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 void EmitWriteGlobalS16(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 void EmitWriteGlobal32(EmitContext& ctx, Id address, Id value) {
@@ -210,21 +210,8 @@ Id EmitLoadStorage32(EmitContext& ctx, const IR::Value& binding, const IR::Value
     return LoadStorage32(ctx, binding, offset);
 }
 
-// Offsets are relative to a binding aligned only to the device's storage buffer alignment (4 bytes
-// on AMD), so the vector view (offset >> 3 or 4) is exact only for offsets known to be multiples of
-// the access size; otherwise it reads the vector before the access.
-static bool VectorViewIsExact(EmitContext& ctx, const IR::Value& offset, u32 size) {
-    if (!ctx.profile.support_descriptor_aliasing) {
-        return false;
-    }
-    if (offset.IsImmediate()) {
-        return offset.U32() % size == 0;
-    }
-    return ctx.profile.min_ssbo_alignment >= size;
-}
-
 Id EmitLoadStorage64(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset) {
-    if (VectorViewIsExact(ctx, offset, sizeof(u32[2]))) {
+    if (ctx.profile.support_descriptor_aliasing) {
         return LoadStorage(ctx, binding, offset, ctx.U32[2], ctx.storage_types.U32x2,
                            sizeof(u32[2]), &StorageDefinitions::U32x2);
     } else {
@@ -234,7 +221,7 @@ Id EmitLoadStorage64(EmitContext& ctx, const IR::Value& binding, const IR::Value
 }
 
 Id EmitLoadStorage128(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset) {
-    if (VectorViewIsExact(ctx, offset, sizeof(u32[4]))) {
+    if (ctx.profile.support_descriptor_aliasing) {
         return LoadStorage(ctx, binding, offset, ctx.U32[4], ctx.storage_types.U32x4,
                            sizeof(u32[4]), &StorageDefinitions::U32x4);
     } else {
@@ -296,7 +283,7 @@ void EmitWriteStorage32(EmitContext& ctx, const IR::Value& binding, const IR::Va
 
 void EmitWriteStorage64(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset,
                         Id value) {
-    if (VectorViewIsExact(ctx, offset, sizeof(u32[2]))) {
+    if (ctx.profile.support_descriptor_aliasing) {
         WriteStorage(ctx, binding, offset, value, ctx.storage_types.U32x2, sizeof(u32[2]),
                      &StorageDefinitions::U32x2);
     } else {
@@ -309,7 +296,7 @@ void EmitWriteStorage64(EmitContext& ctx, const IR::Value& binding, const IR::Va
 
 void EmitWriteStorage128(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset,
                          Id value) {
-    if (VectorViewIsExact(ctx, offset, sizeof(u32[4]))) {
+    if (ctx.profile.support_descriptor_aliasing) {
         WriteStorage(ctx, binding, offset, value, ctx.storage_types.U32x4, sizeof(u32[4]),
                      &StorageDefinitions::U32x4);
     } else {

@@ -118,7 +118,6 @@ void CheckCBufNVN(Info& info, IR::Inst& inst) {
     }
 }
 
-/// Records the features, types and resources an instruction needs in the shader info
 void VisitUsages(Info& info, IR::Inst& inst) {
     switch (inst.GetOpcode()) {
     case IR::Opcode::ImageRead:
@@ -413,7 +412,6 @@ void VisitUsages(Info& info, IR::Inst& inst) {
     case IR::Opcode::GlobalAtomicOr32:
     case IR::Opcode::GlobalAtomicXor32:
     case IR::Opcode::GlobalAtomicExchange32:
-    case IR::Opcode::GlobalAtomicCompareExchange32:
     case IR::Opcode::GlobalAtomicIAdd64:
     case IR::Opcode::GlobalAtomicSMin64:
     case IR::Opcode::GlobalAtomicUMin64:
@@ -483,13 +481,9 @@ void VisitUsages(Info& info, IR::Inst& inst) {
     case IR::Opcode::SetAttributeIndexed:
         info.stores_indexed_attributes = true;
         break;
-    case IR::Opcode::SetFragColor: {
-        const u32 render_target{inst.Arg(0).U32()};
-        info.stores_frag_color[render_target] = true;
-        info.frag_color_components[render_target] |=
-            static_cast<u8>(1U << inst.Arg(1).U32());
+    case IR::Opcode::SetFragColor:
+        info.stores_frag_color[inst.Arg(0).U32()] = true;
         break;
-    }
     case IR::Opcode::SetSampleMask:
         info.stores_sample_mask = true;
         break;
@@ -525,10 +519,6 @@ void VisitUsages(Info& info, IR::Inst& inst) {
         info.uses_subgroup_invocation_id = true;
         break;
     case IR::Opcode::LaneId:
-        info.uses_subgroup_invocation_id = true;
-        break;
-    case IR::Opcode::TensorMulAdd:
-        info.uses_tensor_mul_add = true;
         info.uses_subgroup_invocation_id = true;
         break;
     case IR::Opcode::ShuffleIndex:
@@ -669,7 +659,6 @@ void VisitUsages(Info& info, IR::Inst& inst) {
     case IR::Opcode::StorageAtomicOr32:
     case IR::Opcode::StorageAtomicXor32:
     case IR::Opcode::StorageAtomicExchange32:
-    case IR::Opcode::StorageAtomicCompareExchange32:
         info.used_storage_buffer_types |= IR::Type::U32;
         break;
     case IR::Opcode::LoadStorage64:

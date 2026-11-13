@@ -7,8 +7,6 @@
 #pragma once
 
 #include <array>
-#include <utility>
-#include <vector>
 #include "common/container/unordered_map.h"
 
 #include "common/common_types.h"
@@ -87,31 +85,6 @@ public:
     /// Native argument tables mix pointers with scalars (sizes, strides).
     [[nodiscard]] virtual bool IsCbufStorageBufferPointer(u32, u32) { return true; }
 
-    /// Native programs: whether the 8 bytes at `indirect` past the pointer at (index, offset) are
-    /// a mapped GPU address (a pointer table the program loads its buffer pointer from).
-    [[nodiscard]] virtual bool IsCbufIndirectStorageBufferPointer(u32, u32, u32) {
-        return true;
-    }
-
-    /// Native programs: (index, offset) slots classified as non-pointers because they were null.
-    [[nodiscard]] virtual std::vector<std::pair<u32, u32>> NullStoragePointerSlots() const {
-        return {};
-    }
-
-    /// Native programs: the classified slots bound as storage buffer pointers, as the sorted keys
-    /// of their classification (direct and pointer-table slots).
-    [[nodiscard]] virtual std::vector<u64> MappedStoragePointerKeys() const {
-        return {};
-    }
-
-    /// A Switch 2 native program lowered to Maxwell instructions. Its storage buffer pointers are
-    /// raw 8-byte arguments in constant buffers, without the NVN descriptor layout.
-    [[nodiscard]] virtual bool IsNativeProgram() const { return false; }
-
-    /// Native programs: whether the 8-byte constant at (index, offset) is a mapped GPU address.
-    /// Native argument tables mix pointers with scalars (sizes, strides).
-    [[nodiscard]] virtual bool IsCbufStorageBufferPointer(u32, u32) { return true; }
-
     [[nodiscard]] virtual u32 ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) = 0;
 
     [[nodiscard]] virtual TextureType ReadTextureType(u32 raw_handle) = 0;
@@ -123,10 +96,6 @@ public:
     [[nodiscard]] virtual u32 ReadViewportTransformState() = 0;
 
     [[nodiscard]] virtual u32 TextureBoundBuffer() const = 0;
-
-    /// Constant buffer holding the surface (image write) descriptors; the texture one unless the
-    /// program needs both from different buffers.
-    [[nodiscard]] virtual u32 SurfaceBoundBuffer() const { return TextureBoundBuffer(); }
 
     [[nodiscard]] virtual u32 LocalMemorySize() const = 0;
 

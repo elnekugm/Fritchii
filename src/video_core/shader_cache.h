@@ -8,12 +8,10 @@
 
 #include <array>
 #include <atomic>
-#include <chrono>
 #include <exception>
 #include <memory>
 #include <mutex>
 #include <span>
-#include "video_core/page_filter.h"
 #include "common/container/unordered_map.h"
 #include <utility>
 #include <vector>
@@ -42,20 +40,7 @@ struct ShaderInfo {
     size_t size_bytes{};
     /// Lowered code of a native program, reused when its pipelines are built.
     std::shared_ptr<const LoweredNativeCode> lowered_native;
-    /// Generic inputs a native vertex program reads (its header's input map), two bits per
-    /// attribute as in FixedPipelineState::attribute_types. None for task and mesh programs, all
-    /// set for any other program.
-    u64 vertex_attribute_mask{~u64{0}};
-    /// Native vertex programs: the generic attributes their header says they read (#895).
-    u32 generic_read_mask{~0U};
 };
-
-/// Generic attributes a vertex program's header says it reads (any component of each).
-u32 GenericReadMask(const Shader::ProgramHeader& sph) noexcept;
-
-/// ShaderInfo::vertex_attribute_mask of the program in `env` (a runtime or a disk environment).
-/// EDEN_NX2_KEY_ALL_ATTRIBUTES=1 keeps every attribute type in the keys, as before.
-[[nodiscard]] u64 VertexAttributeMaskOf(const Shader::Environment& env);
 
 class ShaderCache : public VideoCommon::ChannelSetupCaches<VideoCommon::ChannelInfo> {
     static constexpr u64 YUZU_PAGEBITS = 14;
@@ -76,9 +61,6 @@ class ShaderCache : public VideoCommon::ChannelSetupCaches<VideoCommon::ChannelI
     };
 
 public:
-    /// Device pages this cache ever registered objects on (InnerInvalidation skips the rest).
-    VideoCommon::PageFilter page_filter;
-
     /// @brief Removes shaders inside a given region
     /// @note Checks for ranges
     /// @param addr Start address of the invalidation
@@ -87,10 +69,6 @@ public:
 
     void InvalidateRegions(std::span<const std::pair<DAddr, size_t>> sequences);
 
-    /// Regions whose GPU writes can invalidate compiled code or a remembered rejection.
-    /// Returns a snapshot so callers can perform readbacks without holding cache locks.
-    std::vector<std::pair<DAddr, size_t>> GetShaderCodeRanges();
-
     /// @brief Unmarks a memory region as cached and marks it for removal
     /// @param addr Start address of the CPU write operation
     /// @param size Number of bytes of the CPU write operation
@@ -98,11 +76,6 @@ public:
 
     /// @brief Flushes delayed removal operations
     void SyncGuestHost();
-
-    /// Drops the native programs the debug server rejects so their next draw or dispatch lowers
-    /// them again (and fails); after an un-reject, forgets every rejection so they are retried.
-    /// Runs on the thread that owns the cache, between frames.
-    void RefreshDebugRejections(bool unrejected);
 
 protected:
     struct GraphicsEnvironments {
@@ -126,24 +99,11 @@ protected:
     const ShaderInfo* ComputeShader();
 
     /// @brief Collect the current graphics environments
-    /// @param snapshot Take each environment's snapshot (GraphicsEnvironment::TakeSnapshot)
-    /// @return Bytes the snapshots copied
-    size_t GetGraphicsEnvironments(GraphicsEnvironments& result,
-                                   const std::array<u64, NUM_PROGRAMS>& unique_hashes,
-                                   bool snapshot = false);
+    void GetGraphicsEnvironments(GraphicsEnvironments& result,
+                                 const std::array<u64, NUM_PROGRAMS>& unique_hashes);
 
     std::array<const ShaderInfo*, NUM_PROGRAMS> shader_infos{};
-    /// vertex_attribute_mask of shader_infos, copied so the lookup of every draw doesn't read a
-    /// ShaderInfo that an invalidation may have removed since.
-    std::array<u64, NUM_PROGRAMS> vertex_attribute_masks{};
     bool last_shaders_valid = false;
-
-    Tegra::MaxwellDeviceMemoryManager& device_memory;
-    bool support_cooperative_matrix = false;
-
-    void SetCooperativeMatrixSupported(bool value) {
-        support_cooperative_matrix = value;
-    }
 
 private:
     friend struct ShaderCacheTestAccess;
@@ -167,9 +127,6 @@ private:
     /// @brief Remove shaders marked for deletion
     /// @pre invalidation_mutex is locked
     void RemovePendingShaders();
-
-    /// Drop invalidated bindings and reclaim retired metadata on the renderer thread.
-    void ReclaimInvalidatedShaders();
 
     /// @brief Invalidates entries in a given range for the passed page
     /// @param entries         Vector of entries in the page, it will be modified on overlaps
@@ -199,11 +156,11 @@ private:
     /// Whether a native program at this address was rejected.
     bool IsRejected(VAddr addr);
     /// Remembers the exception being handled as this address's rejection.
-    void RememberRejection(VAddr addr, GPUVAddr gpu_addr);
-    /// Drops a rejection whose program bytes changed since it was made (see the .cpp).
-    bool RecheckRejection(VAddr addr);
+    void RememberRejection(VAddr addr);
     /// Hash of the state task and mesh programs are translated with.
     u64 MeshStateHash() const;
+
+    Tegra::MaxwellDeviceMemoryManager& device_memory;
 
     mutable std::mutex lookup_mutex;
     std::mutex invalidation_mutex;
@@ -212,24 +169,11 @@ private:
     ::Common::unordered_map<u64, std::vector<Entry*>> invalidation_cache;
     std::vector<std::unique_ptr<ShaderInfo>> storage;
     std::vector<Entry*> marked_for_removal;
-    // Invalidation can run on a CPU thread while a renderer lookup still uses a ShaderInfo.
-    // Keep removed objects alive until the next renderer lookup has dropped its old bindings.
-    std::vector<std::unique_ptr<ShaderInfo>> retired_shaders;
-    std::atomic<u64> invalidation_generation{};
-    u64 observed_invalidation_generation{}; // renderer thread only
-    std::chrono::steady_clock::time_point next_failed_stage_retry{};
 
     /// Native programs the lowering rejected, by address, so each draw or dispatch rethrows the
     /// first error instead of lowering again; dropped when guest memory there is written.
     std::mutex rejected_mutex;
-    struct Rejection {
-        std::exception_ptr error;
-        GPUVAddr gpu_addr{};
-        std::vector<u8> bytes;
-        std::chrono::steady_clock::time_point made;
-        std::chrono::steady_clock::time_point checked;
-    };
-    ::Common::unordered_map<u64, Rejection> rejected_native;
+    ::Common::unordered_map<u64, std::exception_ptr> rejected_native;
     /// Bounds of every address ever rejected (never shrinks): a quick test for invalidations.
     std::atomic<VAddr> rejected_lowest{~VAddr{}};
     std::atomic<VAddr> rejected_highest{};

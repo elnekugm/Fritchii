@@ -290,8 +290,6 @@ public:
     [[nodiscard]] U32U64 GlobalAtomicOr(const U64& pointer_offset, const U32U64& value);
     [[nodiscard]] U32U64 GlobalAtomicXor(const U64& pointer_offset, const U32U64& value);
     [[nodiscard]] U32U64 GlobalAtomicExchange(const U64& pointer_offset, const U32U64& value);
-    [[nodiscard]] U32 GlobalAtomicCompareExchange(const U64& pointer_offset, const U32& comparator,
-                                                  const U32& value);
 
     [[nodiscard]] F32 GlobalAtomicF32Add(const U64& pointer_offset, const Value& value,
                                          const FpControl control = {});
@@ -416,6 +414,9 @@ public:
 
     [[nodiscard]] F32 DPdyCoarse(const F32& a);
 
+private:
+    IR::Block::iterator insertion_point;
+
     template <typename T = Value, typename... Args>
     T Inst(Opcode op, Args... args) {
         auto it{block->PrependNewInst(insertion_point, op, {Value{args}...})};
@@ -438,9 +439,6 @@ public:
         auto it{block->PrependNewInst(insertion_point, op, {Value{args}...}, raw_flags)};
         return T{Value{&*it}};
     }
-
-private:
-    IR::Block::iterator insertion_point;
 };
 
 } // namespace Shader::IR

@@ -6,7 +6,6 @@
 
 add_library(shader_recompiler STATIC
     backend/bindings.h
-    backend/nvn_storage_descriptor.h
     backend/spirv/emit_spirv.cpp
     backend/spirv/emit_spirv.h
     backend/spirv/emit_spirv_atomic.cpp
@@ -61,9 +60,7 @@ add_library(shader_recompiler STATIC
     frontend/ir/type.h
     frontend/ir/value.cpp
     frontend/ir/value.h
-    frontend/ampere/instruction.h
     frontend/ampere/lower_to_maxwell.h
-    frontend/ampere/register_pressure.h
     frontend/ampere/program_override.h
     frontend/ampere/program_address_map.h
     frontend/maxwell/control_flow.cpp
@@ -122,7 +119,6 @@ add_library(shader_recompiler STATIC
     frontend/maxwell/translate/impl/integer_add.cpp
     frontend/maxwell/translate/impl/integer_byte_permute.cpp
     frontend/maxwell/translate/impl/integer_add_three_input.cpp
-    frontend/maxwell/translate/impl/integer_byte_permute.cpp
     frontend/maxwell/translate/impl/integer_compare.cpp
     frontend/maxwell/translate/impl/integer_compare_and_set.cpp
     frontend/maxwell/translate/impl/integer_floating_point_conversion.cpp
@@ -173,16 +169,11 @@ add_library(shader_recompiler STATIC
     frontend/maxwell/translate/impl/video_set_predicate.cpp
     frontend/maxwell/translate/impl/vote.cpp
     frontend/maxwell/translate/impl/warp_shuffle.cpp
-    frontend/maxwell/translate/impl/tensor_mul_add.cpp
     frontend/maxwell/translate/translate.cpp
     frontend/maxwell/translate/translate.h
     frontend/maxwell/translate_program.cpp
     frontend/maxwell/translate_program.h
     host_translate_info.h
-    info_serialize.cpp
-    info_serialize.h
-    translate_profile.cpp
-    translate_profile.h
     ir_opt/collect_shader_info_pass.cpp
     ir_opt/conditional_barrier_pass.cpp
     ir_opt/constant_propagation_pass.cpp
@@ -208,7 +199,6 @@ add_library(shader_recompiler STATIC
     program_header.h
     runtime_info.h
     shader_info.h
-    storage_write_extent.h
     varying_state.h)
 
 if (ENABLE_OPENGL)

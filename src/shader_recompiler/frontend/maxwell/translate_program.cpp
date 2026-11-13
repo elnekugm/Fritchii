@@ -22,7 +22,6 @@
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/host_translate_info.h"
 #include "shader_recompiler/ir_opt/passes.h"
-#include "shader_recompiler/translate_profile.h"
 
 namespace Shader::Maxwell {
 namespace {
@@ -91,7 +90,7 @@ void CollectInterpolationInfo(Environment& env, IR::Program& program) {
     }
 }
 
-void AddNVNStorageBuffers(IR::Program& program, const HostTranslateInfo& host_info) {
+void AddNVNStorageBuffers(IR::Program& program) {
     if (!program.info.uses_global_memory) {
         return;
     }
@@ -129,16 +128,7 @@ void AddNVNStorageBuffers(IR::Program& program, const HostTranslateInfo& host_in
         })};
         if (it != descs.end()) {
             it->is_written |= program.info.stores_global_memory;
-            if (program.info.stores_global_memory) {
-                // A global store may land anywhere in it
-                it->write_extent = {};
-            }
             continue;
-        }
-        if (descs.size() >= Optimization::StorageBufferLimit(host_info)) {
-            throw NotImplementedException("Binding {} storage buffers to a stage that binds {}",
-                                          descs.size() + 1,
-                                          Optimization::StorageBufferLimit(host_info));
         }
         descs.push_back({
             .cbuf_index = driver_cbuf,
@@ -147,9 +137,6 @@ void AddNVNStorageBuffers(IR::Program& program, const HostTranslateInfo& host_in
             .is_written = program.info.stores_global_memory,
         });
     }
-    // A global access is left: it is routed by address into any bound buffer at any offset, so no
-    // read extent of the program is known.
-    program.info.storage_read_extents.assign(descs.size(), StorageWriteExtent{});
 }
 
 using IR::IsLegacyAttribute; //rescoped to attribute.h to make it visible in load_store_attribute.cpp IPA
@@ -193,17 +180,11 @@ void EmitGeometryPassthrough(IR::IREmitter& ir, const IR::Program& program,
                              const Shader::VaryingState& passthrough_mask,
                              bool passthrough_position,
                              std::optional<IR::Attribute> passthrough_layer_attr,
-                             std::optional<IR::Reg> viewport_mask_reg, bool multicast) {
+                             std::optional<IR::Reg> viewport_mask_reg) {
     constexpr std::array CULLED_POSITION{2.0f, 2.0f, 2.0f, 1.0f};
     IR::U1 culled{ir.Imm1(false)};
     IR::U32 viewport{ir.Imm32(0)};
-    if (viewport_mask_reg && multicast) {
-        // One invocation per viewport: keep the primitive where its bit is set in the mask.
-        const IR::U32 mask{ir.GetReg(*viewport_mask_reg)};
-        viewport = ir.InvocationId();
-        const IR::U32 bit{ir.BitwiseAnd(IR::U32{ir.ShiftRightLogical(mask, viewport)}, ir.Imm32(1))};
-        culled = ir.IEqual(bit, ir.Imm32(0));
-    } else if (viewport_mask_reg) {
+    if (viewport_mask_reg) {
         const IR::U32 mask{ir.GetReg(*viewport_mask_reg)};
         const IR::U32 lowest_bit{ir.BitwiseAnd(mask, IR::U32{ir.INeg(mask)})};
         culled = ir.IEqual(mask, ir.Imm32(0));
@@ -239,11 +220,6 @@ void EmitGeometryPassthrough(IR::IREmitter& ir, const IR::Program& program,
         if (viewport_mask_reg) {
             ir.SetAttribute(IR::Attribute::ViewportIndex, ir.BitCast<IR::F32>(viewport),
                             ir.Imm32(0));
-        }
-        if (multicast) {
-            // ponytail: the layer is the viewport index alone; a layer the program writes itself
-            // is not added (Mario Tennis Fever's cascade shaders write none).
-            ir.SetAttribute(IR::Attribute::Layer, ir.BitCast<IR::F32>(viewport), ir.Imm32(0));
         }
 
         if (passthrough_layer_attr) {
@@ -314,26 +290,10 @@ std::optional<IR::Reg> LowerViewportMask(const IR::Program& program) {
     return reg;
 }
 
-bool ReadsInvocationId(const IR::Program& program) {
-    return std::ranges::any_of(program.blocks, [](const IR::Block* block) {
-        return std::ranges::any_of(block->Instructions(), [](const IR::Inst& inst) {
-            return inst.GetOpcode() == IR::Opcode::InvocationId;
-        });
-    });
-}
-
-void LowerGeometryPassthrough(IR::Program& program, const HostTranslateInfo& host_info) {
+void LowerGeometryPassthrough(const IR::Program& program, const HostTranslateInfo& host_info) {
     std::optional<IR::Reg> viewport_mask_reg;
     if (!host_info.support_viewport_mask) {
         viewport_mask_reg = LowerViewportMask(program);
-    }
-    // With the layer relative to the viewport (Maxwell 0x11F0) the hardware draws the primitive
-    // once per viewport in the mask, each into layer = viewport: one shadow cascade per layer in
-    // Mario Tennis Fever. Only the lowest viewport and layer 0 left every cascade in layer 0.
-    const bool multicast = viewport_mask_reg && host_info.layer_viewport_relative &&
-                           program.invocations <= 1 && !ReadsInvocationId(program);
-    if (multicast) {
-        program.invocations = 16; // Maxwell's viewport count
     }
     for (IR::Block* const block : program.blocks) {
         for (IR::Inst& inst : block->Instructions()) {
@@ -342,7 +302,7 @@ void LowerGeometryPassthrough(IR::Program& program, const HostTranslateInfo& hos
                 EmitGeometryPassthrough(
                     ir, program, program.info.passthrough,
                     program.info.passthrough.AnyComponent(IR::Attribute::PositionX), {},
-                    viewport_mask_reg, multicast);
+                    viewport_mask_reg);
             }
         }
     }
@@ -401,18 +361,10 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
     HostTranslateInfo normalized_host_info{host_info};
     normalized_host_info.ApplyDescriptorLimitPolicy();
 
-    using TranslateProfile::Scope;
-    using TranslateProfile::Step;
     IR::Program program;
-    {
-        Scope scope{Step::BuildAsl};
-        program.syntax_list = BuildASL(inst_pool, block_pool, env, cfg, normalized_host_info);
-    }
-    {
-        Scope scope{Step::Blocks};
-        program.blocks = GenerateBlocks(program.syntax_list);
-        program.post_order_blocks = PostOrder(program.syntax_list.front());
-    }
+    program.syntax_list = BuildASL(inst_pool, block_pool, env, cfg, normalized_host_info);
+    program.blocks = GenerateBlocks(program.syntax_list);
+    program.post_order_blocks = PostOrder(program.syntax_list.front());
     program.stage = env.ShaderStage();
     program.local_memory_size = env.LocalMemorySize();
     switch (program.stage) {
@@ -434,15 +386,6 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
             }
 
             if (!normalized_host_info.support_geometry_shader_passthrough) {
-                // The lowered shader copies only Position and the generics; the mask's other
-                // bits (InstanceId, VertexId, FrontFace...) would declare stage inputs a geometry
-                // shader can't have, BaseInstance without DrawParameters among them.
-                for (size_t i = 0; i < program.info.passthrough.mask.size(); ++i) {
-                    if (i < static_cast<size_t>(IR::Attribute::PositionX) ||
-                        i > static_cast<size_t>(IR::Attribute::Generic31W)) {
-                        program.info.passthrough.mask[i] = false;
-                    }
-                }
                 program.output_vertices = GetOutputTopologyVertices(program.output_topology);
                 LowerGeometryPassthrough(program, normalized_host_info);
             }
@@ -468,8 +411,7 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
         const u32 threads{program.stage == Stage::Task ? init & 0x3f : (shader_b >> 20) & 0x3f};
         program.workgroup_size = {(std::max)(threads, 1U), 1, 1};
         if (program.stage == Stage::Mesh) {
-            if (program.mesh.topology != 0 && program.mesh.topology != 1 &&
-                program.mesh.topology != 4) {
+            if (program.mesh.topology != 4) {
                 throw NotImplementedException("Mesh output topology {} (SET_MESH_SHADER_A {:#010x})",
                                               program.mesh.topology, shader_a);
             }
@@ -481,13 +423,9 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
     default:
         break;
     }
-    {
-        Scope scope{Step::RemoveUnreachable};
-        RemoveUnreachableBlocks(program);
-    }
+    RemoveUnreachableBlocks(program);
 
     // Replace instructions before the SSA rewrite
-    std::optional<Scope> lower_scope{std::in_place, Step::LowerTypes};
     if (!normalized_host_info.support_float64) {
         Optimization::LowerFp64ToFp32(program);
     }
@@ -500,38 +438,26 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
     if (!normalized_host_info.support_conditional_barrier) {
         Optimization::ConditionalBarrierPass(program);
     }
-    lower_scope.reset();
-    // Each pass, timed when the translation profile is on.
-    const auto pass = [](Step step, auto&& run) {
-        Scope scope{step};
-        run();
-    };
-    pass(Step::SsaRewrite, [&] { Optimization::SsaRewritePass(program); });
+    Optimization::SsaRewritePass(program);
 
-    pass(Step::ConstantPropagation, [&] { Optimization::ConstantPropagationPass(env, program); });
+    Optimization::ConstantPropagationPass(env, program);
 
-    pass(Step::Position, [&] { Optimization::PositionPass(env, program); });
-    pass(Step::BlitConstants, [&] { Optimization::BlitConstantsPass(env, program); });
+    Optimization::PositionPass(env, program);
+    Optimization::BlitConstantsPass(env, program);
 
-    pass(Step::GlobalMemoryToStorageBuffer, [&] {
-        Optimization::GlobalMemoryToStorageBufferPass(env, program, normalized_host_info);
-    });
-    pass(Step::GeometryCompaction,
-         [&] { Optimization::GeometryCompactionPass(program, normalized_host_info); });
-    pass(Step::Texture, [&] { Optimization::TexturePass(env, program, normalized_host_info); });
+    Optimization::GlobalMemoryToStorageBufferPass(env, program, normalized_host_info);
+    Optimization::GeometryCompactionPass(program, normalized_host_info);
+    Optimization::TexturePass(env, program, normalized_host_info);
 
     if (Settings::values.resolution_info.active) {
-        pass(Step::Rescaling, [&] { Optimization::RescalingPass(program); });
+        Optimization::RescalingPass(program);
     }
-    pass(Step::DeadCodeElimination, [&] {
-        Optimization::DeadCodeEliminationPass(program);
-        TightenOutputVertices(program);
-    });
+    Optimization::DeadCodeEliminationPass(program);
+    TightenOutputVertices(program);
     if (Settings::values.renderer_debug) {
         Optimization::VerificationPass(program);
     }
     Optimization::CollectShaderInfoPass(env, program);
-    Optimization::LimitSampledTextureArrays(program, normalized_host_info);
     program.info.is_task = program.stage == Stage::Task;
     program.info.is_mesh = program.stage == Stage::Mesh;
     if (program.stage == Stage::Mesh) {
@@ -544,19 +470,17 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
             program.info.stores.Set(static_cast<IR::Attribute>(line), true);
         }
     }
-    pass(Step::Layer, [&] { Optimization::LayerPass(program, normalized_host_info); });
-    pass(Step::VendorWorkaround, [&] { Optimization::VendorWorkaroundPass(program); });
+    Optimization::LayerPass(program, normalized_host_info);
+    Optimization::VendorWorkaroundPass(program);
 
-    pass(Step::Interpolation, [&] { CollectInterpolationInfo(env, program); });
-    pass(Step::NvnStorageBuffers, [&] { AddNVNStorageBuffers(program, normalized_host_info); });
-    pass(Step::LimitSampledTextureArrays,
-         [&] { Optimization::LimitSampledTextureArrays(program, normalized_host_info); });
+    CollectInterpolationInfo(env, program);
+    AddNVNStorageBuffers(program);
+    Optimization::LimitSampledTextureArrays(program, normalized_host_info);
     return program;
 }
 
 IR::Program MergeDualVertexPrograms(IR::Program& vertex_a, IR::Program& vertex_b,
-                                    Environment& env_vertex_b, const HostTranslateInfo& host_info) {
-    TranslateProfile::Scope profile_scope{TranslateProfile::Step::MergeDualVertex};
+                                    Environment& env_vertex_b) {
     IR::Program result{};
     Optimization::VertexATransformPass(vertex_a);
     Optimization::VertexBTransformPass(vertex_b);
@@ -579,9 +503,7 @@ IR::Program MergeDualVertexPrograms(IR::Program& vertex_a, IR::Program& vertex_b
     result.info.stores.mask |= vertex_b.info.stores.mask;
 
     Optimization::JoinTextureInfo(result.info, vertex_b.info);
-    // The two halves are one stage: their storage buffers share its limit.
-    Optimization::JoinStorageInfo(result.info, vertex_b.info,
-                                  Optimization::StorageBufferLimit(host_info));
+    Optimization::JoinStorageInfo(result.info, vertex_b.info);
     Optimization::DeadCodeEliminationPass(result);
     if (Settings::values.renderer_debug) {
         Optimization::VerificationPass(result);
@@ -591,7 +513,6 @@ IR::Program MergeDualVertexPrograms(IR::Program& vertex_a, IR::Program& vertex_b
 }
 
 void ConvertLegacyToGeneric(IR::Program& program, const Shader::RuntimeInfo& runtime_info) {
-    TranslateProfile::Scope profile_scope{TranslateProfile::Step::ConvertLegacyToGeneric};
     auto& stores = program.info.stores;
     if (stores.Legacy()) {
         std::queue<IR::Attribute> unused_output_generics{};
@@ -674,7 +595,7 @@ IR::Program GenerateGeometryPassthrough(ObjectPool<IR::Inst>& inst_pool,
 
     IR::IREmitter ir{*current_block};
     EmitGeometryPassthrough(ir, program, program.info.stores, true,
-                            source_program.info.emulated_layer, std::nullopt, false);
+                            source_program.info.emulated_layer, std::nullopt);
 
     IR::Block* return_block{block_pool.Create(inst_pool)};
     IR::IREmitter{*return_block}.Epilogue();

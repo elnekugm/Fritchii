@@ -248,16 +248,6 @@ Id EmitStorageAtomicExchange32(EmitContext& ctx, const IR::Value& binding, const
     return StorageAtomicU32(ctx, binding, offset, value, &Sirit::Module::OpAtomicExchange);
 }
 
-/// Stores value if the storage word equals comparator; returns the old word.
-Id EmitStorageAtomicCompareExchange32(EmitContext& ctx, const IR::Value& binding,
-                                      const IR::Value& offset, Id comparator, Id value) {
-    const Id pointer{StoragePointer(ctx, ctx.storage_types.U32, &StorageDefinitions::U32, binding,
-                                    offset, sizeof(u32))};
-    const auto [scope, semantics]{AtomicArgs(ctx)};
-    return ctx.OpAtomicCompareExchange(ctx.U32[1], pointer, scope, semantics, semantics, value,
-                                       comparator);
-}
-
 Id EmitStorageAtomicIAdd64(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset,
                            Id value) {
     return StorageAtomicU64(ctx, binding, offset, value, &Sirit::Module::OpAtomicIAdd,
@@ -437,16 +427,16 @@ Id EmitGlobalAtomicIAdd32(EmitContext& ctx, const IR::Value& address, Id value) 
     return ctx.OpFunctionCall(ctx.U32[1], ctx.atomic_add_global_func_u32, ctx.Def(address), value);
 }
 
-Id EmitGlobalAtomicSMin32(EmitContext& ctx, Id address, Id value) {
-    return GlobalAtomicU32(ctx, 1, address, value);
+Id EmitGlobalAtomicSMin32(EmitContext&) {
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
-Id EmitGlobalAtomicUMin32(EmitContext& ctx, Id address, Id value) {
-    return GlobalAtomicU32(ctx, 2, address, value);
+Id EmitGlobalAtomicUMin32(EmitContext&) {
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
-Id EmitGlobalAtomicSMax32(EmitContext& ctx, Id address, Id value) {
-    return GlobalAtomicU32(ctx, 3, address, value);
+Id EmitGlobalAtomicSMax32(EmitContext&) {
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicUMax32(EmitContext& ctx, const IR::Value& address, Id value) {
@@ -459,164 +449,144 @@ Id EmitGlobalAtomicUMax32(EmitContext& ctx, const IR::Value& address, Id value) 
     return ctx.OpFunctionCall(ctx.U32[1], ctx.atomic_umax_global_func_u32, ctx.Def(address), value);
 }
 
-Id EmitGlobalAtomicAnd32(EmitContext& ctx, Id address, Id value) {
-    return GlobalAtomicU32(ctx, 5, address, value);
-}
-
-Id EmitGlobalAtomicOr32(EmitContext& ctx, Id address, Id value) {
-    return GlobalAtomicU32(ctx, 6, address, value);
-}
-
-Id EmitGlobalAtomicXor32(EmitContext& ctx, Id address, Id value) {
-    return GlobalAtomicU32(ctx, 7, address, value);
-}
-
-Id EmitGlobalAtomicExchange32(EmitContext& ctx, Id address, Id value) {
-    return GlobalAtomicU32(ctx, 8, address, value);
-}
-
-Id EmitGlobalAtomicCompareExchange32(EmitContext& ctx, Id address, Id comparator, Id value) {
-    if (!ctx.profile.support_int64) {
-        throw NotImplementedException("Global atomic address without Int64 support");
-    }
-    return ctx.OpFunctionCall(ctx.U32[1], ctx.atomic_cas_global_func_u32, address, comparator, value);
-}
-
 Id EmitGlobalAtomicInc32(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicDec32(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
-/// Global compare-exchange through the routing function; returns the old word.
-Id EmitGlobalAtomicCompareExchange32(EmitContext& ctx, const IR::Value& address, Id comparator,
-                                     Id value) {
-    if (!ctx.profile.support_int64) {
-        throw NotImplementedException("Global atomic addressing requires 64-bit integers");
-    }
-    if (!Sirit::ValidId(ctx.atomic_cas_global_func_u32)) {
-        throw NotImplementedException("Global atomic compare-exchange with no routable storage buffer");
-    }
-    return ctx.OpFunctionCall(ctx.U32[1], ctx.atomic_cas_global_func_u32, ctx.Def(address),
-                              comparator, value);
+Id EmitGlobalAtomicAnd32(EmitContext&) {
+    throw NotImplementedException("SPIR-V Instruction");
+}
+
+Id EmitGlobalAtomicOr32(EmitContext&) {
+    throw NotImplementedException("SPIR-V Instruction");
+}
+
+Id EmitGlobalAtomicXor32(EmitContext&) {
+    throw NotImplementedException("SPIR-V Instruction");
+}
+
+Id EmitGlobalAtomicExchange32(EmitContext&) {
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicIAdd64(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicSMin64(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicUMin64(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicSMax64(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicUMax64(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicInc64(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicDec64(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicAnd64(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicOr64(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicXor64(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicExchange64(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicIAdd32x2(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicSMin32x2(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicUMin32x2(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicSMax32x2(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicUMax32x2(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicInc32x2(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicDec32x2(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicAnd32x2(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicOr32x2(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicXor32x2(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicExchange32x2(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicAddF32(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicAddF16x2(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicAddF32x2(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicMinF16x2(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicMinF32x2(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicMaxF16x2(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 Id EmitGlobalAtomicMaxF32x2(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction {}", __func__);
+    throw NotImplementedException("SPIR-V Instruction");
 }
 
 } // namespace Shader::Backend::SPIRV

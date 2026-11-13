@@ -22,9 +22,6 @@ void DeadCodeEliminationPass(IR::Program& program);
 void GeometryCompactionPass(IR::Program& program, const HostTranslateInfo& host_info);
 void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
                                      const HostTranslateInfo& host_info);
-/// How many storage buffers a program may bind: MAX_SSBOS, or fewer if the device's per-stage or
-/// descriptor set limit is lower
-size_t StorageBufferLimit(const HostTranslateInfo& host_info);
 void IdentityRemovalPass(IR::Program& program);
 void LowerFp64ToFp32(IR::Program& program);
 void LowerFp16ToFp32(IR::Program& program);
@@ -33,7 +30,6 @@ void RescalingPass(IR::Program& program);
 void SsaRewritePass(IR::Program& program);
 void PositionPass(Environment& env, IR::Program& program);
 void BlitConstantsPass(Environment& env, IR::Program& program);
-void LimitSampledTextureArrays(IR::Program& program, const HostTranslateInfo& host_info);
 void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo& host_info);
 void LimitSampledTextureArrays(IR::Program& program, const HostTranslateInfo& host_info);
 void LayerPass(IR::Program& program, const HostTranslateInfo& host_info);
@@ -45,7 +41,6 @@ bool HasBrokenPattern(const IR::Program& program);
 void VertexATransformPass(IR::Program& program);
 void VertexBTransformPass(IR::Program& program);
 void JoinTextureInfo(Info& base, Info& source);
-/// Adds the storage buffers of source to base, at most limit in all
-void JoinStorageInfo(Info& base, Info& source, size_t limit = Info::MAX_SSBOS);
+void JoinStorageInfo(Info& base, Info& source);
 
 } // namespace Shader::Optimization

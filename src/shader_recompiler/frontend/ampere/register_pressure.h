@@ -1,9 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
-#include <algorithm>
 #include <array>
-#include <bit>
 #include <vector>
 #include "shader_recompiler/frontend/ampere/instruction.h"
 
@@ -45,7 +43,6 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
     case 0x804:
     case 0x80b:
     case 0x80c:
-    case 0x3c2: // R2UR: bits 16 to 23 name the uniform register written, Ra is the source
         operand(24);
         break;
     case 0x20c:
@@ -53,14 +50,11 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         operand(24);
         operand(32);
         break;
-    case 0x803: // P2R: Rd and the merge source Ra
     case 0x807:
     case 0x808:
-    case 0x809: // FMNMX with an immediate second source
     case 0x923:
     case 0x820:
     case 0xa20:
-    case 0xc20: // FMUL with a uniform second source
     case 0x421:
         operand(16);
         operand(24);
@@ -83,9 +77,7 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         operand(24);
         break;
     case 0xa24:
-    case 0xc24: // IMAD with a uniform multiplier: Rd, Ra and the addend Rc are registers
     case 0xa23:
-    case 0xc23: // FFMA with a uniform multiplier: Rd, Ra and the addend Rc are registers
     case 0x623:
     case 0x423:
         operand(16);
@@ -109,18 +101,6 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         operand(24);
         operand(32);
         break;
-    case 0x9a8: // ATOMG: result in Rd, data operand at bit 32.
-        operand(16);
-        operand(32);
-        break;
-    case 0xb6c:
-    case 0xf6c: // TXD: results in Rd/Rd+1 and the second pair, coordinates in Ra (Ra+2 is the layer
-                // of ARRAY_2D), gradients in Rb..Rb+3.
-        operand(16, 2);
-        operand(24, input.Bits(61, 3) == 5 ? 3 : 2);
-        operand(32, 4);
-        operand(64, 2);
-        break;
     case 0x224:
     case 0x223:
         operand(16);
@@ -134,6 +114,7 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         break;
     case 0x308:
     case 0x202:
+    case 0x243:
     case 0x245:
     case 0x305:
     case 0x306:
@@ -143,7 +124,6 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         break;
     case 0xb05:
     case 0xd05:
-    case 0xc45: // I2FP with a uniform source
         operand(16);
         break;
     case 0x59f:
@@ -168,8 +148,6 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
     case 0xa10:
     case 0xc10:
     case 0x812:
-    case 0xa12: // LOP3.LUT, constant buffer and uniform B: no register in B's field
-    case 0xc12:
     case 0x824:
     case 0x823:
     case 0x831:
@@ -188,7 +166,6 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         break;
     case 0x419:
     case 0x819:
-    case 0xc19: // SHF with a uniform shift amount: Rd and the low and high words are registers
         operand(16);
         operand(24);
         operand(64);
@@ -196,7 +173,6 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
     case 0x210:
     case 0x211:
     case 0x212:
-    case 0x219: // SHF, register form: Rd, low word, shift amount, high word
         operand(16);
         operand(24);
         operand(32);
@@ -232,24 +208,6 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         operand(32, input.Bits(75, 1) ? 2 : 1);
         operand(64, 2);
         break;
-    case 0xb66: {
-        // TLD, as case 0xb66 of the lowering reads it; counting a register too many only refuses more.
-        if ((input.words[2] & ~0xffU) == 0x059e8700U) { // .F16 explicit fetch: (x, y), level, halves
-            operand(16);
-            operand(24, 2);
-            operand(32);
-            operand(64);
-            break;
-        }
-        const u32 dimension = input.Bits(61, 3);
-        const bool split = input.Bits(64, 8) != 255;
-        operand(16, split ? 2U : static_cast<u32>(std::max(1, std::popcount(input.Bits(72, 4)))));
-        operand(24, dimension == 2 || dimension == 5 || input.Bits(76, 1) ? 2 : 1);
-        operand(32, dimension == 5 && input.Bits(87, 3) == 3 ? 2 : 1);
-        if (split)
-            operand(64, 2);
-        break;
-    }
     case 0x388:
     case 0x984:
     case 0x988: {
@@ -263,12 +221,6 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
     case 0x987: {
         const u32 width = input.Bits(73, 3), count = width == 6 ? 4 : width == 5 ? 2 : 1;
         operand(opcode == 0x983 ? 16 : 32, count);
-        operand(24);
-        break;
-    }
-    case 0xb82: { // LDC with an index register: Rd (a pair when 64-bit) and the index Ra
-        const u32 width = input.Bits(73, 3);
-        operand(16, width == 5 ? 2 : 1);
         operand(24);
         break;
     }

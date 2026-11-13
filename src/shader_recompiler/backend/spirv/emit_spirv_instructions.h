@@ -6,22 +6,16 @@
 
 #pragma once
 
-#include <optional>
-#include <vector>
-
 #include <sirit/sirit.h>
 
 #include "common/common_types.h"
-
-namespace Shader {
-struct Profile;
-}
 
 namespace Shader::IR {
 enum class Attribute : u64;
 enum class Patch : u64;
 class Inst;
 class Value;
+struct Program;
 } // namespace Shader::IR
 
 namespace Shader::Backend::SPIRV {
@@ -29,7 +23,6 @@ namespace Shader::Backend::SPIRV {
 using Sirit::Id;
 
 class EmitContext;
-struct CooperativeHmmaTypes;
 
 // Microinstruction emitters
 Id EmitPhi(EmitContext& ctx, IR::Inst* inst);
@@ -380,8 +373,6 @@ Id EmitStorageAtomicXor32(EmitContext& ctx, const IR::Value& binding, const IR::
                           Id value);
 Id EmitStorageAtomicExchange32(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset,
                                Id value);
-Id EmitStorageAtomicCompareExchange32(EmitContext& ctx, const IR::Value& binding,
-                                      const IR::Value& offset, Id comparator, Id value);
 Id EmitStorageAtomicIAdd64(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset,
                            Id value);
 Id EmitStorageAtomicSMin64(EmitContext& ctx, const IR::Value& binding, const IR::Value& offset,
@@ -443,8 +434,6 @@ Id EmitGlobalAtomicAnd32(EmitContext& ctx);
 Id EmitGlobalAtomicOr32(EmitContext& ctx);
 Id EmitGlobalAtomicXor32(EmitContext& ctx);
 Id EmitGlobalAtomicExchange32(EmitContext& ctx);
-Id EmitGlobalAtomicCompareExchange32(EmitContext& ctx, const IR::Value& address, Id comparator,
-                                     Id value);
 Id EmitGlobalAtomicIAdd64(EmitContext& ctx);
 Id EmitGlobalAtomicSMin64(EmitContext& ctx);
 Id EmitGlobalAtomicUMin64(EmitContext& ctx);
@@ -649,8 +638,7 @@ Id EmitDPdyFine(EmitContext& ctx, Id op_a);
 Id EmitDPdxCoarse(EmitContext& ctx, Id op_a);
 Id EmitDPdyCoarse(EmitContext& ctx, Id op_a);
 
-// Cooperative matrix (tensor core) operations
-Id EmitTensorMulAdd(EmitContext& ctx, IR::Inst* inst, Id a0, Id a1, Id a2, Id a3, Id b0, Id b1,
-                    Id c0, Id c1);
+Id EmitTensorMulAdd(EmitContext& ctx, IR::Inst* inst, Id a, Id b, Id c);
+void DefineSoftwareMatrixFunctions(EmitContext& ctx, const IR::Program& program);
 
 } // namespace Shader::Backend::SPIRV
