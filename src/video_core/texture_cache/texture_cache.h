@@ -39,6 +39,8 @@
 #include "video_core/texture_cache/physical_alias.h"
 #include "video_core/texture_cache/samples_helper.h"
 #include "video_core/texture_cache/texture_cache_base.h"
+#include "video_core/texture_cache/host_memory_limit.h"
+#include "video_core/cache_tracking_diagnostics.h"
 #include "video_core/texture_cache/util.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_debug_control.h"
@@ -2458,16 +2460,10 @@ bool TextureCache<P>::TemporalUpscale(const Tegra::Engines::Fermi2D::Surface& ds
 template <class P>
 std::pair<typename P::ImageView*, bool> TextureCache<P>::TryFindFramebufferImageView(
     const Tegra::FramebufferConfig& config, DAddr cpu_addr) {
-    static const bool trace_native_image = std::getenv("EDEN_NX2_IMAGE_TRACE") != nullptr;
-    static u64 framebuffer_queries{};
-    const u64 query = trace_native_image ? framebuffer_queries++ : 0;
-    const bool trace = trace_native_image && (query % 240) == 0;
-    if (trace) {
-        LOG_INFO(HW_GPU, "Native framebuffer query {}: physical={:#x} backing={:#x} allocation={}x{} "
-                 "stride={} crop=({},{})-({},{})", query, cpu_addr,
-                 device_memory.GetPhysicalRawAddressFromDAddr(cpu_addr), config.width, config.height,
-                 config.stride, config.crop_rect.left, config.crop_rect.top,
-                 config.crop_rect.right, config.crop_rect.bottom);
+    // TODO: Properly implement this
+    const auto it = page_table.find(cpu_addr >> YUZU_PAGEBITS);
+    if (it == page_table.end()) {
+        return {};
     }
     const auto view_format = [&]() {
         switch (config.pixel_format) {
@@ -2480,12 +2476,13 @@ std::pair<typename P::ImageView*, bool> TextureCache<P>::TryFindFramebufferImage
         }
     }();
 
+    const auto& image_map_ids = it->second;
     boost::container::small_vector<ImageId, 4> valid_image_ids;
-    u32 traced_candidates{};
-    const auto add_candidates = [&](DAddr address, bool physical_alias) {
-        const auto it = page_table.find(address >> YUZU_PAGEBITS);
-        if (it == page_table.end()) {
-            return;
+    for (const ImageMapId map_id : image_map_ids) {
+        const ImageMapView& map = slot_map_views[map_id];
+        const ImageBase& image = slot_images[map.image_id];
+        if (image.cpu_addr != cpu_addr) {
+            continue;
         }
         if (image.image_view_ids.empty()) {
             continue;
@@ -2496,27 +2493,12 @@ std::pair<typename P::ImageView*, bool> TextureCache<P>::TryFindFramebufferImage
                 LOG_WARNING(HW_GPU, "Ignoring incompatible framebuffer alias: address={:#x}, image={}, view={}",
                             cpu_addr, image.info.format, view_format);
             }
+            continue;
         }
-    };
-    add_candidates(cpu_addr, false);
-    if (const PAddr backing = device_memory.GetPhysicalRawAddressFromDAddr(cpu_addr);
-        backing != 0 && config.allocation_size != 0) {
-        Common::ScratchBuffer<u32> aliases;
-        device_memory.ApplyOpOnPAddr(backing, aliases, [&](DAddr alias) {
-            if (alias != cpu_addr) {
-                add_candidates(alias, true);
-            }
-        });
+        valid_image_ids.push_back(map.image_id);
     }
 
     const auto GetImageViewForFramebuffer = [&](ImageId image_id) {
-        if (trace) {
-            const auto& image = slot_images[image_id];
-            LOG_INFO(HW_GPU, "Native framebuffer query {} selected: gpu={:#x} physical={:#x} "
-                     "size={}x{} format={} tick={}", query, image.gpu_addr, image.cpu_addr,
-                     image.info.size.width, image.info.size.height, image.info.format,
-                     image.modification_tick);
-        }
         ImageViewInfo info{ImageViewType::e2D, view_format};
         if (config.blending == Tegra::BlendMode::Opaque) {
             info.x_source = static_cast<u8>(SwizzleSource::R);
@@ -2528,20 +2510,6 @@ std::pair<typename P::ImageView*, bool> TextureCache<P>::TryFindFramebufferImage
                               slot_images[image_id].IsRescaled());
     };
 
-    if (g_yo.enabled) {
-        std::string desc;
-        for (const ImageId id : valid_image_ids) {
-            const auto& img = slot_images[id];
-            desc += fmt::format("[cpu={:#x} gpu={:#x} tick={} gmod={} cmod={} {}x{} fmt{}] ",
-                                img.cpu_addr, img.gpu_addr, img.modification_tick,
-                                True(img.flags & ImageFlagBits::GpuModified),
-                                True(img.flags & ImageFlagBits::CpuModified),
-                                img.info.size.width, img.info.size.height,
-                                static_cast<u32>(img.info.format));
-        }
-        g_yo.pick = fmt::format("req={:#x} cands={} {}", cpu_addr, valid_image_ids.size(), desc);
-        g_yo.pick_cpu = valid_image_ids.size() == 1 ? slot_images[valid_image_ids.front()].cpu_addr : 0;
-    }
     if (valid_image_ids.size() == 1) [[likely]] {
         return GetImageViewForFramebuffer(valid_image_ids.front());
     }
@@ -2553,9 +2521,6 @@ std::pair<typename P::ImageView*, bool> TextureCache<P>::TryFindFramebufferImage
         return GetImageViewForFramebuffer(*most_recent);
     }
 
-    if (trace) {
-        LOG_INFO(HW_GPU, "Native framebuffer query {}: no compatible physical-range candidate", query);
-    }
     return {};
 }
 

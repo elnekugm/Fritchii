@@ -127,7 +127,7 @@ public:
                     SubmitDeferredWork();
                 }
                 rasterizer.InvalidateGPUCache();
-                return;
+                return true;
             }
         }
         TFence new_fence = CreateFence(!should_flush);

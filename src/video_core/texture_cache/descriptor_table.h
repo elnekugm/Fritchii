@@ -21,7 +21,7 @@
 
 namespace VideoCommon {
 
-template <typename T>
+template <typename T, typename Id = u32>
 class DescriptorTable {
 public:
     [[nodiscard]] bool Synchronize(GPUVAddr gpu_addr, u32 limit) noexcept {
@@ -83,10 +83,12 @@ public:
         invalidated = false;
         //
         descriptors.resize(num_descriptors);
+        bound_ids.resize(num_descriptors, Id{0});
     }
 
     std::vector<u64> read_descriptors;
     std::vector<T> descriptors;
+    std::vector<Id> bound_ids;
     GPUVAddr current_gpu_addr{};
     u32 current_limit{};
     bool invalidated{}; ///< read_descriptors is to be cleared before the next read

@@ -100,10 +100,10 @@ public:
     TextureCacheChannelInfo(const TextureCacheChannelInfo& state) = delete;
     TextureCacheChannelInfo& operator=(const TextureCacheChannelInfo&) = delete;
 
-    DescriptorTable<TICEntry> graphics_image_table;
-    DescriptorTable<TSCEntry> graphics_sampler_table;
-    DescriptorTable<TICEntry> compute_image_table;
-    DescriptorTable<TSCEntry> compute_sampler_table;
+    DescriptorTable<TICEntry, ImageViewId> graphics_image_table;
+    DescriptorTable<TSCEntry, SamplerId> graphics_sampler_table;
+    DescriptorTable<TICEntry, ImageViewId> compute_image_table;
+    DescriptorTable<TSCEntry, SamplerId> compute_sampler_table;
 
     // TODO: still relies on bad iterators :(
     std::unordered_map<TICEntry, ImageViewId> image_views;
