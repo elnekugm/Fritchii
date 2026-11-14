@@ -5014,40 +5014,6 @@ bool TextureCache<P>::MarkPartialWrite(ImageBase& image, DAddr cpu_addr, size_t 
 }
 
 template <class P>
-bool TextureCache<P>::UploadInChunks(Image& image) {
-    // A whole upload of a very large image needs a staging buffer of its full size (rounded up to
-    // a power of two: 1 GiB for 600 MiB of data), which can fail when memory is tight.
-    constexpr u64 min_size = 64_MiB;
-    constexpr u64 chunk_size = 32_MiB;
-    constexpr ImageFlagBits excluded = ImageFlagBits::Sparse | ImageFlagBits::Converted |
-                                       ImageFlagBits::AcceleratedUpload | ImageFlagBits::Unbacked |
-                                       ImageFlagBits::TrimmedLevels;
-    if (True(image.flags & excluded) || image.info.type != ImageType::e2D ||
-        MapSizeBytes(image) < min_size) {
-        return false;
-    }
-    for (u64 offset = 0; offset < image.guest_size_bytes; offset += chunk_size) {
-        const std::array range{
-            std::pair<u64, u64>{offset, std::min<u64>(offset + chunk_size, image.guest_size_bytes)}};
-        std::optional<decltype(runtime.UploadStagingBuffer(size_t{}))> staging;
-        const auto copies = UnswizzleImageRows(
-            *gpu_memory, image.gpu_addr, image.info, range, [&](size_t bytes) {
-                staging.emplace(runtime.UploadStagingBuffer(bytes));
-                return staging->mapped_span;
-            });
-        if (copies.empty()) {
-            if (offset == 0) {
-                return false; // layout not handled: one staging buffer after all
-            }
-            continue; // padding between levels or layers
-        }
-        image.UploadMemory(*staging, copies);
-    }
-    runtime.InsertUploadMemoryBarrier();
-    return true;
-}
-
-template <class P>
 bool TextureCache<P>::MarkPartialRemap(ImageBase& image, Tegra::MemoryManager& memory,
                                        GPUVAddr gpu_addr, size_t size) {
     // Virtual textures remap a few 64 KiB pages of a huge sparse texture every frame.
