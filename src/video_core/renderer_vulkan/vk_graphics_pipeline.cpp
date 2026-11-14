@@ -23,6 +23,7 @@
 #include <fmt/format.h>
 
 #include "video_core/renderer_vulkan/pipeline_helper.h"
+#include "video_core/renderer_vulkan/pipeline_hitch_trace.h"
 #include "video_core/stall_diagnostics.h"
 
 #include "common/bit_field.h"
@@ -722,8 +723,8 @@ GraphicsPipeline::GraphicsPipeline(
             LOG_CRITICAL(Render_Vulkan,
                          "Graphics pipeline build failed: {} (stages: tcs={} tes={} geom={}, "
                          "patch control points {}, device max patch size {})",
-                         exception.what(), spv_modules[1] ? 1 : 0, spv_modules[2] ? 1 : 0,
-                         spv_modules[3] ? 1 : 0, key.state.patch_control_points_minus_one.Value() + 1,
+                         exception.what(), (*spv_modules)[1] ? 1 : 0, (*spv_modules)[2] ? 1 : 0,
+                         (*spv_modules)[3] ? 1 : 0, key.state.patch_control_points_minus_one.Value() + 1,
                          device.GetMaxTessellationPatchSize());
             throw;
         }
@@ -1900,7 +1901,7 @@ void GraphicsPipeline::FillStates(PipelineStates& s) const {
     if (!vertex_binding_divisors.empty()) {
         s.vertex_input_ci.pNext = &s.input_divisor_ci;
     }
-    const bool has_tess_stages = spv_modules[1] || spv_modules[2];
+    const bool has_tess_stages = (*spv_modules)[1] || (*spv_modules)[2];
     s.has_tess_stages = has_tess_stages;
     auto input_assembly_topology = MaxwellToVK::PrimitiveTopology(device, key.state.topology);
     if (input_assembly_topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST) {
@@ -2224,6 +2225,15 @@ void GraphicsPipeline::FillStates(PipelineStates& s) const {
         .dynamicStateCount = static_cast<u32>(dynamic_states.size()),
         .pDynamicStates = dynamic_states.data(),
     };
+}
+
+void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
+    if (IsMeshPipeline() && !mesh_emulation && !device.IsExtMeshShaderSupported()) {
+        return;
+    }
+    PipelineStates states;
+    FillStates(states);
+    const bool emulated_vertex{mesh_emulation.has_value()};
     const VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT subgroup_size_ci{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT,
         .pNext = nullptr,
@@ -2231,7 +2241,10 @@ void GraphicsPipeline::FillStates(PipelineStates& s) const {
     };
     static_vector<VkPipelineShaderStageCreateInfo, 5> shader_stages;
     for (size_t stage = 0; stage < Maxwell::MaxShaderStage; ++stage) {
-        if (!(*spv_modules)[stage]) {
+        const bool has_module = emulated_vertex && stage == 0
+                                    ? static_cast<bool>(mesh_vertex_module)
+                                    : static_cast<bool>((*spv_modules)[stage]);
+        if (!has_module) {
             continue;
         }
         auto& stage_ci =
@@ -2243,7 +2256,8 @@ void GraphicsPipeline::FillStates(PipelineStates& s) const {
                              ? VK_SHADER_STAGE_VERTEX_BIT
                              : StageFlag(stage_infos[stage],
                                          MaxwellToVK::ShaderStage(Shader::StageFromIndex(stage))),
-                .module = emulated_vertex ? *mesh_vertex_module : *spv_modules[stage],
+                .module = emulated_vertex && stage == 0 ? *mesh_vertex_module
+                                                        : *(*spv_modules)[stage],
                 .pName = "main",
                 .pSpecializationInfo = nullptr,
             });
@@ -2287,12 +2301,12 @@ void GraphicsPipeline::FillStates(PipelineStates& s) const {
         .stageCount = static_cast<u32>(shader_stages.size()),
         .pStages = shader_stages.data(),
         .pVertexInputState = mesh_emulation ? &emulation_vertex_input
-                             : is_mesh      ? nullptr
+                             : states.is_mesh ? nullptr
                                             : &states.vertex_input_ci,
         .pInputAssemblyState = mesh_emulation ? &emulation_input_assembly
-                               : is_mesh      ? nullptr
+                               : states.is_mesh ? nullptr
                                               : &states.input_assembly_ci,
-        .pTessellationState = is_mesh ? nullptr : &states.tessellation_ci,
+        .pTessellationState = states.is_mesh ? nullptr : &states.tessellation_ci,
         .pViewportState = &states.viewport_ci,
         .pRasterizationState = &states.rasterization_ci,
         .pMultisampleState = &states.multisample_ci,
@@ -2359,7 +2373,7 @@ std::string GraphicsPipeline::ShaderLibraryKey(GplPart part, const PipelineState
             continue;
         }
         key_writer.Add(static_cast<u32>(stage));
-        key_writer.Add(static_cast<u32>(spv_modules[stage] ? 1 : 0));
+        key_writer.Add(static_cast<u32>((*spv_modules)[stage] ? 1 : 0));
         key_writer.Add(static_cast<u32>(StageFlag(stage_infos[stage], SlotStage(stage))));
         key_writer.Add(spirv_hashes[stage]);
         key_writer.AddBytes(stage_set_signatures[stage]);
@@ -2461,7 +2475,7 @@ GplLibrary GraphicsPipeline::MakeShaderLibrary(GplPart part, const PipelineState
             library.set_layouts.push_back(builder.CreateDescriptorSetLayout(false));
             set_layouts[stage] = *library.set_layouts.back();
         }
-        if (!spv_modules[stage]) {
+        if (!(*spv_modules)[stage]) {
             continue;
         }
         // Same stage info as the monolithic pipeline (MakePipeline), which sets no subgroup size.
@@ -2471,7 +2485,7 @@ GplLibrary GraphicsPipeline::MakeShaderLibrary(GplPart part, const PipelineState
             .flags = 0,
             .stage = StageFlag(stage_infos[stage],
                                MaxwellToVK::ShaderStage(Shader::StageFromIndex(stage))),
-            .module = *spv_modules[stage],
+            .module = *(*spv_modules)[stage],
             .pName = "main",
             .pSpecializationInfo = nullptr,
         });
@@ -2568,7 +2582,7 @@ bool GraphicsPipeline::MakeLibraryPipeline(VkRenderPass render_pass) {
             // Warm-up with one stage and no partner: build only the part that has a shader.
             bool has_shader{};
             for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
-                has_shader |= InPart(part, stage) && static_cast<bool>(spv_modules[stage]);
+                has_shader |= InPart(part, stage) && static_cast<bool>((*spv_modules)[stage]);
             }
             if (!has_shader) {
                 continue;
