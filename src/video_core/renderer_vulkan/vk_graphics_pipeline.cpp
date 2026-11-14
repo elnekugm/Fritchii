@@ -501,7 +501,8 @@ GraphicsPipeline::GraphicsPipeline(
     : key{key_}, device{device_}, texture_cache{texture_cache_}, buffer_cache{buffer_cache_},
       pipeline_cache(pipeline_cache_), scheduler{scheduler_},
       guest_descriptor_queue{guest_descriptor_queue_},
-      descriptor_buffer_ring{descriptor_buffer_ring_}, spv_modules{std::move(stages)},
+      descriptor_buffer_ring{descriptor_buffer_ring_},
+      spv_modules{std::make_shared<const GraphicsShaderModules>(std::move(stages))},
       library_cache{library_params.library_cache},
       libraries_only{library_params.library_cache && library_params.libraries_only},
       spirv_hashes{library_params.spirv_hashes},
@@ -668,13 +669,14 @@ GraphicsPipeline::GraphicsPipeline(
         };
         try {
             if (emit_stages) {
-                spv_modules = emit_stages(spirv_hashes);
+                spv_modules = std::make_shared<const GraphicsShaderModules>(
+                    emit_stages(spirv_hashes));
             }
             const VkRenderPass render_pass{render_pass_cache.Get(MakeRenderPassKey(key.state, device))};
             Validate();
             if (library_cache) {
                 const bool has_module = std::ranges::any_of(
-                    spv_modules, [](const vk::ShaderModule& module) { return bool(module); });
+                    *spv_modules, [](const vk::ShaderModule& module) { return bool(module); });
                 bool made{};
                 try {
                     made = MakeLibraryPipeline(render_pass);
@@ -697,10 +699,8 @@ GraphicsPipeline::GraphicsPipeline(
                     library_cache->RecordFallback();
                     FallBackToMonolithic(render_pass);
                 }
-                // The libraries hold the shaders now (the fallback has used them too).
-                for (vk::ShaderModule& module : spv_modules) {
-                    module.reset();
-                }
+                // Releasing this reference leaves any shared shader-module owners intact.
+                spv_modules.reset();
             } else {
                 MakePipeline(render_pass);
             }
@@ -733,9 +733,7 @@ GraphicsPipeline::GraphicsPipeline(
         }
         // Nothing reads the shader modules once the pipeline exists, and the driver keeps a copy
         // of each one's SPIR-V while it lives (title 1: ~1,500 pipelines, 2-5 modules each).
-        for (vk::ShaderModule& module : spv_modules) {
-            module.reset();
-        }
+        spv_modules.reset();
         if (worker_only_build) {
             const auto elapsed = std::chrono::steady_clock::now() - begin;
             static std::atomic<u32> logged{};
