@@ -26,6 +26,11 @@ class UnswizzleWorker;
 
 namespace VideoCommon {
 
+/// Switch 2 GOB swizzling is skipped for headers that explicitly retain Maxwell layout.
+[[nodiscard]] inline bool UsesNativeGobs(bool switch2_tiling, const ImageInfo& info) noexcept {
+    return switch2_tiling && !info.maxwell_gobs;
+}
+
 using Tegra::Texture::TICEntry;
 
 using LevelArray = std::array<u32, MAX_MIP_LEVELS>;
